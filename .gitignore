@@ -1,0 +1,3 @@
+# Server data: business data, logins (hashed passwords) and orders — never commit
+data/
+node_modules/

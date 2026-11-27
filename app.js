@@ -112,7 +112,7 @@
       ['Baddi Pharma Traders', 'Naveen Sharma', 'Baddi', 45],
       ['Kangra Drug House', 'Pankaj Katoch', 'Dharamshala', 30],
       ['Una Medicos Wholesale', 'Sunita Rana', 'Una', 30],
-    ].map((s, i) => ({ id: 'S' + String(i + 1).padStart(3, '0'), name: s[0], contact: s[1], city: s[2], phone: phone(), gstin: gstin(), dl: `HP-${digits(5)}, ${digits(5)}`, terms: s[3] }));
+    ].map((s, i) => ({ id: 'S' + String(i + 1).padStart(3, '0'), name: s[0], contact: s[1], city: s[2], phone: phone(), gstin: gstin(), dl1: `HP-20B-${digits(5)}`, dl2: `HP-21B-${digits(5)}`, dlValid: iso(TODAY.getTime() + ri(120, 1500) * DAY), terms: s[3] }));
 
     // Items as printed on the sample sale bill: name, company, mfg, pack, hsn, batch, exp, qty, rate, mrp, gst, category, form
     const BILL = [
@@ -176,7 +176,7 @@
       ['Kailash Chemist', 'Pritam Singh', 'Ghumarwin'],
     ].map((c, i) => ({
       id: 'C' + String(i + 1).padStart(3, '0'), name: c[0], owner: c[1], city: c[2], phone: phone(),
-      dl: `HP-${c[2].slice(0, 3).toUpperCase()}-20B/21B-${digits(5)}`, gstin: gstin(),
+      dl1: `HP-${c[2].slice(0, 3).toUpperCase()}-20-${digits(5)}`, dl2: `HP-${c[2].slice(0, 3).toUpperCase()}-21-${digits(5)}`, dlValid: iso(TODAY.getTime() + (i === 4 ? 25 : ri(120, 1500)) * DAY), gstin: gstin(),
       creditLimit: pick([100000, 150000, 200000, 300000]), terms: pick([14, 21, 30]), cd: 2, td: 0,
       joined: iso(TODAY.getTime() - ri(200, 900) * DAY), status: i === 9 ? 'Pending verification' : i === 6 ? 'On hold' : 'Active',
     }));
@@ -253,13 +253,69 @@
   function load() {
     try { const raw = localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
   }
+  // Server mode (node server.js): data lives on the server and is shared with the chemist portal.
+  // Browser-only mode (any static server): data lives in this browser's localStorage.
+  let SERVER = false, serverRev = 0, saveTimer = null, saving = false, saveAgain = false, saveBlocked = false;
+  async function api(method, url, body) {
+    const r = await fetch(url, { method, cache: 'no-store', headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined });
+    if (r.status === 401) { location.href = 'login.html'; throw new Error('Please log in again.'); }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(data.error || `Server error (${r.status})`), { status: r.status });
+    return data;
+  }
+  async function pushToServer() {
+    if (saving) { saveAgain = true; return; }
+    saving = true;
+    try {
+      const r = await api('PUT', 'api/db', { rev: serverRev, data: db });
+      serverRev = r.rev;
+    } catch (err) {
+      if (err.status === 409) { saveBlocked = true; showBanner('This data was changed in another window or by another person. <a href="./">Reload</a> to see the latest — changes made here since then were not saved.'); }
+      else showBanner(`Could not save to the server: ${esc(err.message)}. Your last change is not saved yet — it will retry on the next change.`);
+    } finally {
+      saving = false;
+      if (saveAgain) { saveAgain = false; pushToServer(); }
+    }
+  }
   function save() {
+    if (SERVER) {
+      if (saveBlocked) return;
+      clearTimeout(saveTimer); saveTimer = setTimeout(() => { saveTimer = null; pushToServer(); }, 250);
+      return;
+    }
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { toast('Could not save — browser storage is full or blocked.'); }
+  }
+  function showBanner(html) {
+    let b = $('#banner');
+    if (!b) { b = document.createElement('div'); b.id = 'banner'; b.className = 'banner'; $('.main').prepend(b); }
+    b.innerHTML = html;
   }
   const getApiKey = () => { try { return localStorage.getItem(KEY_API) || ''; } catch { return ''; } };
   const setApiKey = k => { try { if (k) localStorage.setItem(KEY_API, k); else localStorage.removeItem(KEY_API); } catch { /* storage unavailable */ } };
 
-  let db = load() || seed();
+  let db = null;
+  // Chemist orders and portal logins (server mode only)
+  let chemOrders = [];
+  let portalLogins = {};
+  async function loadOrders() {
+    if (!SERVER) return;
+    try {
+      const prev = JSON.stringify(chemOrders);
+      const before = new Set(chemOrders.map(o => o.id));
+      chemOrders = await api('GET', 'api/orders');
+      if (JSON.stringify(chemOrders) === prev) return;
+      const fresh = chemOrders.filter(o => !before.has(o.id) && o.status === 'New');
+      if (loadOrders.done && fresh.length) toast(`New order from ${chem(fresh[0].chemistId)?.name || 'a chemist'} — see Chemist Orders.`);
+      loadOrders.done = true;
+      const busy = $('#modalBack').classList.contains('open') || document.activeElement?.matches('input, select, textarea');
+      if (!busy && ['chemorders', 'overview'].includes(route) && searchQuery.length < 2) render();
+      else renderNav(searchQuery.length >= 2 ? '' : route === 'folder' ? 'suppliers' : route);
+    } catch { /* will retry on the next poll */ }
+  }
+  async function loadLogins() {
+    if (!SERVER) return;
+    try { portalLogins = await api('GET', 'api/logins'); } catch { portalLogins = {}; }
+  }
 
   // ---------- Lookups & derived data ----------
   const prod = id => db.products.find(p => p.id === id);
@@ -325,9 +381,10 @@
     Active: 'ok', 'Pending verification': 'warn', 'On hold': 'bad',
     Good: 'ok', 'Near expiry': 'warn', Expired: 'bad', 'Low stock': 'warn', 'Out of stock': 'bad', 'In stock': 'ok',
     PO: 'info', GRN: 'ok', Invoice: 'neutral', Chemist: 'info', Individual: 'neutral',
+    New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
     Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
   };
-  const pill = s => `<span class="pill ${PILL[s] || 'neutral'}">${esc(s)}</span>`;
+  const pill = s => `<span class="pill ${PILL[s] || (/^Short/.test(s) || / short$/.test(s) ? 'warn' : 'neutral')}">${esc(s)}</span>`;
 
   // ---------- Icons ----------
   const ICONS = {
@@ -358,14 +415,15 @@
   // ---------- Navigation ----------
   const NAV = [
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
-    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemists', 'Onboard Chemists', 'store']] },
+    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemorders', 'Chemist Orders', 'cart'], ['chemists', 'Onboard Chemists', 'store']] },
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
     { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
   ];
   const SUBTITLES = {
     overview: 'Your business at a glance',
     sales: 'Bills to chemists and individual customers — stock is deducted automatically',
-    chemists: 'Retail chemists onboarded for B2B supply',
+    chemists: 'Retail chemists onboarded for B2B supply, with their portal logins',
+    chemorders: 'Orders placed by chemists on their portal',
     stock: 'Batch-wise stock in bill format',
     products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
@@ -385,10 +443,11 @@
       chemists: db.chemists.filter(c => c.status === 'Pending verification').length,
       grn: db.grns.filter(g => !g.invoiced).length,
       billentry: entry && entry.lines.length ? '•' : 0,
+      chemorders: chemOrders.filter(o => o.status === 'New').length,
     };
     $('#nav').innerHTML = NAV.map(g => `
       <div class="nav-group-title">${g.group}</div>
-      <div class="nav">${g.items.map(([id, label, ic]) => `
+      <div class="nav">${g.items.filter(([id]) => SERVER || id !== 'chemorders').map(([id, label, ic]) => `
         <button type="button" data-nav="${id}" class="${route === id ? 'active' : ''}">${icon(ic)}<span>${label}</span>${badges[id] ? `<span class="badge-n">${badges[id]}</span>` : ''}</button>`).join('')}
       </div>`).join('');
     $('#brandName').textContent = db.settings.firm.name || 'Pharma Suite';
@@ -580,6 +639,10 @@
     if (openPo.length) alerts.push(['info', 'truck', `${openPo.length} purchase orders awaiting delivery`, `Worth ${compact(openPo.reduce((a, p) => a + p.total, 0))}`, 'orders']);
     const dueSoon = db.pinvoices.filter(p => piStatus(p) !== 'Paid' && daysFrom(p.due) <= 7);
     if (dueSoon.length) alerts.push(['warn', 'file', `${dueSoon.length} supplier bills due within 7 days`, `${compact(dueSoon.reduce((a, p) => a + balance(p), 0))} payable`, 'invoices']);
+    const lic = [[db.settings.firm.name + ' (your firm)', db.settings.firm.dlValid], ...db.chemists.map(c => [c.name, c.dlValid]), ...db.suppliers.map(s => [s.name, s.dlValid])].filter(([, v]) => v && daysFrom(v) <= 60);
+    if (lic.length) alerts.push(['warn', 'file', `${lic.length} drug licence${lic.length === 1 ? '' : 's'} expired or expiring within 60 days`, lic.map(x => x[0]).join(', '), 'chemists']);
+    const newOrders = chemOrders.filter(o => o.status === 'New');
+    if (newOrders.length) alerts.unshift(['info', 'cart', `${newOrders.length} new order${newOrders.length === 1 ? '' : 's'} from chemists`, newOrders.map(o => chem(o.chemistId)?.name || o.chemistId).join(', '), 'chemorders']);
     const pend = db.chemists.filter(c => c.status === 'Pending verification');
     if (pend.length) alerts.push(['info', 'store', `${pend.length} chemist awaiting verification`, pend.map(c => c.name).join(', '), 'chemists']);
 
@@ -672,18 +735,51 @@
         tabs: [{ id: 'all', label: 'All' }, ...['Active', 'Pending verification', 'On hold'].map(s => ({ id: s, label: s === 'Pending verification' ? 'Pending' : s, filter: c => c.status === s }))],
         rows: () => db.chemists,
         select: { id: c => c.id, fields: PCT_FIELDS, apply: (items, v) => { items.forEach(c => Object.assign(c, v)); return `Default ${Object.keys(v).map(k => k.toUpperCase() + ' ' + dec(v[k]) + '%').join(', ')} set for ${items.length} chemist(s). Used on their new bills.`; } },
-        text: c => [c.id, c.name, c.owner, c.city, c.phone, c.dl, c.gstin].join(' '),
+        text: c => [c.id, c.name, c.owner, c.city, c.phone, c.dl1, c.dl2, c.gstin].join(' '),
         columns: [
           { h: 'Chemist', c: c => `<span class="strong">${esc(c.name)}</span><div class="small muted">${esc(c.owner)} · ${esc(c.id)}</div>` },
           { h: 'City', c: c => esc(c.city) },
           { h: 'Phone', c: c => esc(c.phone) },
-          { h: 'Drug licence', c: c => `<span class="small">${esc(c.dl)}</span>` },
+          { h: 'Drug licence 1 / 2', c: c => licCell(c) },
           { h: 'GSTIN', c: c => `<span class="small">${esc(c.gstin || '—')}</span>` },
           { h: 'CD% / TD%', r: 1, c: c => `${dec(c.cd)} / ${dec(c.td)}` },
           { h: 'Credit limit', r: 1, c: c => money(c.creditLimit) },
           { h: 'Outstanding', r: 1, c: c => { const o = chemOutstanding(c.id); return `<span style="${o > c.creditLimit ? 'color:var(--bad);font-weight:600' : ''}">${money(o)}</span>`; } },
           { h: 'Status', c: c => pill(c.status) },
+          ...(SERVER ? [{ h: 'Portal login', c: c => portalCell(c) }] : []),
           { h: '', c: c => rowActs(actBtn('view-chemist', c.id, 'View', 'ghost'), actBtn('edit-chemist', c.id, 'Edit', 'ghost'), actBtn('del-chemist', c.id, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
+  };
+
+  // Orders placed by chemists on the portal
+  const orderShort = l => l.productId ? Math.max(0, l.qty - sellableQty(l.productId)) : l.qty;
+  VIEWS.chemorders = () => {
+    const open = chemOrders.filter(o => ['New', 'Accepted', 'Arranging'].includes(o.status));
+    const short = open.filter(o => o.lines.some(l => orderShort(l) > 0));
+    return `
+      <div class="grid g-4">
+        ${kpi('New orders', qty(chemOrders.filter(o => o.status === 'New').length), 'Waiting for you to accept')}
+        ${kpi('Open orders', qty(open.length), 'Accepted or being arranged')}
+        ${kpi('Need stock', qty(short.length), 'Open orders with items short or not stocked')}
+        ${kpi('Billed this month', qty(chemOrders.filter(o => o.status === 'Billed' && monthKey(o.date) === thisM).length), 'Orders turned into sale bills')}
+      </div>
+      ${useList({
+        key: 'chemorders', title: 'Chemist orders',
+        actions: `<button type="button" class="btn sm" data-act="orders-refresh" data-id="">Refresh</button>`,
+        tabs: [{ id: 'open', label: 'Open', filter: o => ['New', 'Accepted', 'Arranging'].includes(o.status) }, ...['New', 'Arranging', 'Billed', 'Rejected', 'Cancelled'].map(s => ({ id: s, label: s, filter: o => o.status === s })), { id: 'all', label: 'All' }],
+        filters: [{ k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (o, v) => o.chemistId === v }, ...prodFilters(o => o.lines.map(l => prod(l.productId)), ['company', 'item'])],
+        rows: () => [...chemOrders].sort((a, b) => b.created.localeCompare(a.created)),
+        text: o => [o.id, chem(o.chemistId)?.name, o.note, ...o.lines.map(l => l.name)].join(' '),
+        empty: chemOrders.length ? 'No orders in this view — try another tab.' : 'No orders yet. Chemists with a portal login can order from their phone or computer.',
+        columns: [
+          { h: 'Order', c: o => `<span class="strong">${esc(o.id)}</span><div class="small muted">${new Date(o.created).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>` },
+          { h: 'Chemist', c: o => `${esc(chem(o.chemistId)?.name || o.chemistId)}<div class="small muted">${esc(chem(o.chemistId)?.city || '')}</div>` },
+          { h: 'Items', c: o => `${o.lines.length}<div class="small muted ellipsis" style="max-width:280px">${esc(o.lines.map(l => `${l.name} × ${l.qty}`).join(', '))}</div>` },
+          { h: 'Stock', c: o => { const n = o.lines.filter(l => orderShort(l) > 0).length; return n ? pill(`${n} short`) : pill('All in stock'); } },
+          { h: 'Note', c: o => `<span class="small">${esc(o.note || '—')}</span>` },
+          { h: 'Status', c: o => pill(o.status) + (o.saleNo ? `<div class="small muted">${esc(o.saleNo)}</div>` : '') },
+          { h: '', c: o => rowActs(actBtn('view-order', o.id, 'View', 'ghost'), ['New', 'Accepted', 'Arranging'].includes(o.status) && actBtn('order-bill', o.id, 'Make bill', 'primary'), o.status === 'New' && actBtn('order-status', o.id + '|Accepted', 'Accept')) },
         ],
       })}`;
   };
@@ -938,7 +1034,7 @@
       <section class="card">
         <div class="card-head"><button type="button" class="btn sm ghost" data-nav="suppliers">← Suppliers</button><div class="folder-ic sm">${icon('folder')}</div><h2 class="card-title">${esc(s.name)}</h2><span class="hint">${esc(s.id)}</span><div class="spacer"></div>
           <div class="toolbar">${actBtn('edit-supplier', s.id, 'Edit supplier', 'ghost')}${actBtn('new-po', '', icon('plus') + 'Purchase order')}<button type="button" class="btn sm primary" data-act="upload-for" data-id="${esc(s.id)}">${icon('upload')}Upload bill</button></div></div>
-        <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['City', esc(s.city || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence', esc(s.dl || '—')], ['Terms', (s.terms ?? 30) + ' days']])}</div>
+        <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['City', esc(s.city || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence 1', esc(s.dl1 || '—')], ['Drug licence 2', esc(s.dl2 || '—')], ['Licence valid upto', licValid(s)], ['Terms', (s.terms ?? 30) + ' days'], ['Licence copies', licDocsBtn('supplier', s.id)]])}</div>
       </section>
       <div class="grid g-4">
         ${kpi('Purchase bills', qty(db.pinvoices.filter(p => p.supplierId === s.id).length), `${db.grns.filter(g => g.supplierId === s.id && !g.invoiced).length} receipts awaiting a bill`)}
@@ -997,7 +1093,7 @@
       key: 'suppliers', title: 'Suppliers',
       actions: actBtn('new-supplier', '', icon('plus') + 'Add supplier', 'primary'),
       rows: () => db.suppliers,
-      text: s => [s.id, s.name, s.contact, s.city, s.gstin, s.dl, s.phone].join(' '),
+      text: s => [s.id, s.name, s.contact, s.city, s.gstin, s.dl1, s.dl2, s.phone].join(' '),
       columns: [
         { h: 'Supplier', c: s => `<a href="#" data-nav="folder/${esc(s.id)}" class="folder-link">${icon('folder')}<span class="strong">${esc(s.name)}</span></a><div class="small muted">${esc(s.contact || '—')} · ${esc(s.id)}</div>` },
         { h: 'Bills', r: 1, c: s => db.pinvoices.filter(p => p.supplierId === s.id).length },
@@ -1005,7 +1101,7 @@
         { h: 'City', c: s => esc(s.city || '—') },
         { h: 'Phone', c: s => esc(s.phone || '—') },
         { h: 'GSTIN', c: s => `<span class="small">${esc(s.gstin || '—')}</span>` },
-        { h: 'Drug licence', c: s => `<span class="small">${esc(s.dl || '—')}</span>` },
+        { h: 'Drug licence 1 / 2', c: s => licCell(s) },
         { h: 'Terms', r: 1, c: s => s.terms + ' days' },
         { h: 'Purchases (6 mo)', r: 1, c: s => money(sumBy(db.pinvoices, p => p.supplierId === s.id && monthKey(p.date) >= since)) },
         { h: 'Payable', r: 1, c: s => money(supPayable(s.id)) },
@@ -1289,13 +1385,15 @@
       clear: () => run('readwrite', s => s.clear()),
     };
   })();
-  function fileBillCopies(pi, files) {
+  // Keep document files under `key`; their names are listed on holder[prop]
+  function fileDocs(key, holder, prop, files) {
     if (!files || !files.length) return;
-    pi.files = [...(pi.files || []), ...files.map(f => f.name)];
-    billStore.get(pi.no).catch(() => null)
-      .then(old => billStore.put(pi.no, [...(old || []).map(o => new File([o.blob], o.name, { type: o.type })), ...files]))
-      .catch(() => { pi.files = (pi.files || []).filter(n => !files.some(f => f.name === n)); save(); toast('The bill copy could not be saved in this browser (storage blocked or full).'); if (route === 'folder') render(); });
+    holder[prop] = [...(holder[prop] || []), ...files.map(f => f.name)];
+    billStore.get(key).catch(() => null)
+      .then(old => billStore.put(key, [...(old || []).map(o => new File([o.blob], o.name, { type: o.type })), ...files]))
+      .catch(() => { holder[prop] = (holder[prop] || []).filter(n => !files.some(f => f.name === n)); save(); toast('The file could not be saved in this browser (storage blocked or full).'); render(); });
   }
+  const fileBillCopies = (pi, files) => fileDocs(pi.no, pi, 'files', files);
 
   // ----- AI bill reading (Claude API, called from the browser with the user's own key) -----
   const strS = { type: 'string' }, numS = { type: 'number' };
@@ -1341,7 +1439,31 @@
     rd.onerror = () => rej(rd.error);
     rd.readAsDataURL(f);
   });
-  async function extractBill(files) {
+  const LIC_SCHEMA = {
+    type: 'object', additionalProperties: false,
+    required: ['firm_name', 'proprietor_name', 'address', 'city', 'phone', 'gstin', 'dl_form_20', 'dl_form_21', 'valid_upto'],
+    properties: {
+      firm_name: strS, proprietor_name: strS, address: strS, city: strS, phone: strS, gstin: strS,
+      dl_form_20: { type: 'string', description: 'Licence number on Form 20 / 20B (or 20C / 20F)' },
+      dl_form_21: { type: 'string', description: 'Licence number on Form 21 / 21B (or 21C)' },
+      valid_upto: { type: 'string', description: 'YYYY-MM-DD, or empty if not printed' },
+    },
+  };
+  const LIC_PROMPT = `These files are documents of an Indian pharmacy business: drug licence certificates (Form 20 and 21 for retail, 20B and 21B for wholesale, or similar forms) and/or a GST registration certificate. Read them and return the business details.
+
+- firm_name: the name of the firm or shop. On a GST certificate prefer the trade name; otherwise use the legal name.
+- proprietor_name: the proprietor, partner or registered pharmacist.
+- address: the full premises address. city: the town or city.
+- gstin: the 15-character GSTIN.
+- dl_form_20: the licence number granted on Form 20 or 20B (or 20C / 20F). dl_form_21: the licence number on Form 21 or 21B (or 21C). If one certificate shows both numbers, split them.
+- valid_upto: the licence validity or expiry date as YYYY-MM-DD. If the licences show different dates, use the earliest. Indian documents print dates as DD/MM/YYYY.
+- phone: a phone number, if printed.
+
+Copy text exactly as printed. Use an empty string for anything that is not printed. Do not guess.`;
+
+  const extractBill = files => callClaudeJson(files, EXTRACT_PROMPT, BILL_SCHEMA, 32000);
+  const extractLicence = files => callClaudeJson(files, LIC_PROMPT, LIC_SCHEMA, 4000);
+  async function callClaudeJson(files, prompt, schema, maxTokens) {
     const Anthropic = await loadSdk();
     const client = new Anthropic({ apiKey: getApiKey(), dangerouslyAllowBrowser: true });
     const content = [];
@@ -1350,19 +1472,19 @@
       if (f.type === 'application/pdf') content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } });
       else content.push({ type: 'image', source: { type: 'base64', media_type: f.type, data } });
     }
-    content.push({ type: 'text', text: EXTRACT_PROMPT });
+    content.push({ type: 'text', text: prompt });
     try {
       const stream = client.beta.messages.stream({
         model: 'claude-opus-5-5',
-        max_tokens: 32000,
+        max_tokens: maxTokens,
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-        output_config: { format: { type: 'json_schema', schema: BILL_SCHEMA } },
+        output_config: { format: { type: 'json_schema', schema } },
         messages: [{ role: 'user', content }],
       });
       const msg = await stream.finalMessage();
-      if (msg.stop_reason === 'refusal') throw new Error('The AI declined to read this file. Try a clearer photo, or import a CSV instead.');
-      if (msg.stop_reason === 'max_tokens') throw new Error('The bill is too long to read in one go. Upload fewer pages at a time.');
+      if (msg.stop_reason === 'refusal') throw new Error('The AI declined to read this file. Try a clearer photo, or enter the details by hand.');
+      if (msg.stop_reason === 'max_tokens') throw new Error('The file is too long to read in one go. Upload fewer pages at a time.');
       const text = msg.content.filter(b => b.type === 'text').map(b => b.text).join('');
       return JSON.parse(text);
     } catch (err) {
@@ -1447,7 +1569,7 @@
     $('#modalBody').innerHTML = `<form id="mform" novalidate>${body}</form>`;
     $('.modal').className = 'modal ' + size;
     $('#modalFoot').innerHTML = `${extraFoot}<button type="button" class="btn" data-close>${onSubmit ? 'Cancel' : 'Close'}</button>${onSubmit ? `<button type="button" class="btn primary" data-submit>${submitLabel}</button>` : ''}`;
-    modalSubmit = onSubmit || null; modalCancel = onCancel || null;
+    modalSubmit = onSubmit || null; modalCancel = onCancel || null; licPending = [];
     $('#modalBack').classList.add('open');
     const first = $('#mform input:not([readonly]):not([type=hidden]), #mform select');
     if (first) setTimeout(() => first.focus(), 30);
@@ -1488,6 +1610,71 @@
   const detailGrid = pairs => `<div class="detail-grid">${pairs.map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>`;
   const miniTable = (cols, rows) => `<div class="lines"><div class="table-wrap">${table(cols, rows)}</div></div>`;
   const GST_OPTS = [[0, '0%'], [5, '5%'], [12, '12%'], [18, '18%'], [28, '28%']];
+
+  // ---------- Licences (drug licence 1 & 2, GSTIN, validity) ----------
+  const dlText = x => [x?.dl1, x?.dl2].filter(Boolean).join(', ');
+  const licValid = x => {
+    if (!x?.dlValid) return '—';
+    const d = daysFrom(x.dlValid);
+    return `${fmtDate(x.dlValid)}${d < 0 ? ' ' + pill('Expired') : d <= 60 ? ' ' + pill('Near expiry') : ''}`;
+  };
+  const licCell = x => `<span class="small">${esc(x.dl1 || '—')}<br>${esc(x.dl2 || '')}</span>${x.dlValid && daysFrom(x.dlValid) <= 60 ? `<div>${pill(daysFrom(x.dlValid) < 0 ? 'Expired' : 'Near expiry')}</div>` : ''}`;
+  const licFields = (x, required) => `
+    ${field('GSTIN', 'gstin', { value: x.gstin || '', attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN, e.g. 02ABCDE1234F1Z5" style="text-transform:uppercase"` })}
+    ${field('Drug licence 1 (Form 20 / 20B)', 'dl1', { value: x.dl1 || '', required })}
+    ${field('Drug licence 2 (Form 21 / 21B)', 'dl2', { value: x.dl2 || '' })}
+    ${field('Licence valid upto', 'dlValid', { type: 'date', value: x.dlValid || '' })}`;
+  const readLic = d => ({ gstin: (d.gstin || '').trim().toUpperCase(), dl1: (d.dl1 || '').trim(), dl2: (d.dl2 || '').trim(), dlValid: d.dlValid || '' });
+  const licReadBox = kind => `<div class="lic-box">
+      <div class="cta-icon">${icon('spark')}</div>
+      <div style="flex:1;min-width:200px"><div class="strong">Fill from licence / GST certificate</div>
+        <div class="small muted" id="licNote">Add photos or PDFs of the drug licences and GST certificate. AI reads them and fills the details below — check them before saving. The files are kept with this record.</div></div>
+      <label class="btn sm">${icon('clip')}Choose files<input type="file" id="licFiles" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden></label>
+      <button type="button" class="btn sm primary" data-lic-read="${kind}">${icon('spark')}Read with AI</button>
+    </div>`;
+  let licPending = [];
+  const licHolder = (kind, id) => kind === 'firm' ? db.settings.firm : kind === 'chemist' ? chem(id) : sup(id);
+  const licDocsBtn = (kind, id) => { const h = licHolder(kind, id); return h?.licFiles?.length ? `<button type="button" class="btn sm ghost" data-act="open-docs" data-id="lic:${kind}:${esc(id)}">${icon('clip')}${h.licFiles.length} file${h.licFiles.length === 1 ? '' : 's'}</button>` : '<span class="muted">None saved</span>'; };
+  function fileLicence(kind, id) {
+    const files = licPending; licPending = [];
+    const h = licHolder(kind, id);
+    if (h && files.length) fileDocs(`lic:${kind}:${id}`, h, 'licFiles', files);
+  }
+  async function readLicenceIntoForm(btn) {
+    if (!licPending.length) { toast('Choose the licence or GST certificate files first.'); return; }
+    if (!getApiKey()) { toast('Reading with AI needs your Anthropic API key (Settings). The chosen files will still be saved with this record.'); return; }
+    const files = licPending.slice();
+    btn.disabled = true; const label = btn.innerHTML; btn.textContent = 'Reading…';
+    try {
+      const x = await extractLicence(files);
+      const phone = String(x.phone || '').replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '');
+      const valid = /^\d{4}-\d{2}-\d{2}$/.test(x.valid_upto || '') ? x.valid_upto : '';
+      const values = { name: x.firm_name, owner: x.proprietor_name, contact: x.proprietor_name, address: x.address, city: x.city, gstin: String(x.gstin || '').toUpperCase(), dl1: x.dl_form_20, dl2: x.dl_form_21, dlValid: valid, phone };
+      const filled = [];
+      Object.entries(values).forEach(([name, v]) => {
+        const el = $(`#mform [name="${name}"]`); v = String(v || '').trim();
+        if (!el || !v) return;
+        if (name === 'phone' && el.pattern && !new RegExp(`^(?:${el.pattern})$`).test(v)) return;
+        el.value = v; el.classList.add('filled'); filled.push(el.closest('.field')?.querySelector('label')?.textContent.replace(' *', '') || name);
+      });
+      const note = $('#licNote');
+      if (note) note.textContent = filled.length ? `Filled from ${files.map(f => f.name).join(', ')}: ${filled.join(', ')}. Check the highlighted boxes, then save.` : 'Nothing could be read from these files. Enter the details by hand.';
+      toast(filled.length ? `${filled.length} details filled — check them before saving.` : 'No details found in these files.');
+    } catch (err) {
+      toast(err.message || 'Could not read the files.');
+    } finally {
+      if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+    }
+  }
+  function migrate(d) {
+    const fix = x => {
+      if (!x) return;
+      if (x.dl != null && !x.dl1 && !x.dl2) { const [a, ...rest] = String(x.dl).split(/\s*,\s*/); x.dl1 = a || ''; x.dl2 = rest.join(', '); }
+      delete x.dl;
+    };
+    (d.chemists || []).forEach(fix); (d.suppliers || []).forEach(fix);
+    return d;
+  }
 
   // Printable bill (same layout as the paper bill)
   function billDoc({ title, no, date, partyHtml, extraHead = '', lines, t, paid, showBank = false }) {
@@ -1607,14 +1794,14 @@
     b.qty += a.fromQty; b.free = (b.free || 0) + a.fromFree;
   }
 
-  function saleModal(existing) {
+  function saleModal(existing, preset = {}) {
     // When editing, put the bill's stock back first; it is taken again on save (or re-applied on cancel).
     if (existing) existing.lines.forEach(restoreLine);
-    const s = existing || { party: { type: 'chemist', chemistId: '' }, date: todayIso, lines: [], paid: 0, mode: 'Credit' };
+    const s = existing || { party: { type: 'chemist', chemistId: preset.chemistId || '' }, date: todayIso, lines: preset.lines || [], paid: 0, mode: 'Credit' };
     const chemOpts = [['', 'Select chemist'], ...db.chemists.filter(c => c.status === 'Active' || c.id === s.party.chemistId).map(c => [c.id, `${c.name} — ${c.city}`])];
     const isChem = s.party.type === 'chemist';
     openModal({
-      title: existing ? `Edit sale bill ${existing.no}` : 'New sale bill', size: 'xl', submitLabel: existing ? 'Save changes' : 'Create bill',
+      title: existing ? `Edit sale bill ${existing.no}` : preset.orderId ? `Sale bill for order ${preset.orderId}` : 'New sale bill', size: 'xl', submitLabel: existing ? 'Save changes' : 'Create bill',
       body: `
         <div class="seg"><label><input type="radio" name="ptype" value="chemist" ${isChem ? 'checked' : ''}> Chemist (B2B)</label><label><input type="radio" name="ptype" value="individual" ${!isChem ? 'checked' : ''}> Individual / walk-in (B2C)</label></div>
         <div class="form-grid g4">
@@ -1659,7 +1846,8 @@
           return `${existing.no} updated — stock adjusted.`;
         }
         const no = nextNo('SMS-', db.sales);
-        db.sales.push({ no, date: d.date, party, lines, ...t, paid, mode: d.mode });
+        db.sales.push({ no, date: d.date, party, lines, ...t, paid, mode: d.mode, ...(preset.orderId ? { orderId: preset.orderId } : {}) });
+        if (preset.orderId) setOrder(preset.orderId, { status: 'Billed', saleNo: no });
         const c = type === 'chemist' ? chem(d.chemistId) : null;
         return c && chemOutstanding(c.id) > c.creditLimit ? `${no} created. Note: ${c.name} is now above their credit limit.` : `${no} created for ${money(t.total)} — stock deducted.`;
       },
@@ -1770,7 +1958,7 @@
     const s = db.sales.find(x => x.no === no); if (!s) return;
     const c = s.party.type === 'chemist' ? chem(s.party.chemistId) : null;
     const partyHtml = c
-      ? `<div class="strong">M/S: ${esc(c.name)}</div><div>${esc(c.city)}</div><div>DL NO: ${esc(c.dl)}</div><div>GST NO: ${esc(c.gstin || '—')}</div><div>Mob: ${esc(c.phone)}</div>`
+      ? `<div class="strong">M/S: ${esc(c.name)}</div><div>${esc(c.city)}</div><div>DL NO: ${esc(dlText(c) || '—')}</div><div>GST NO: ${esc(c.gstin || '—')}</div><div>Mob: ${esc(c.phone)}</div>`
       : `<div class="strong">${esc(s.party.name)}</div><div>Mob: ${esc(s.party.phone || '—')}</div><div class="small muted">Individual customer</div>`;
     openModal({
       title: `Sale bill ${s.no}`, size: 'xl',
@@ -1930,26 +2118,60 @@
   };
 
   // Chemists
-  const chemistForm = (c = {}) => `<div class="form-grid">
+  const chemistForm = (c = {}) => `${licReadBox('chemist')}<div class="form-grid">
       ${field('Firm name', 'name', { value: c.name || '', required: true })}
       ${field('Owner / pharmacist', 'owner', { value: c.owner || '', required: true })}
       ${field('Mobile', 'phone', { type: 'tel', value: c.phone || '', required: true, attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
       ${field('City', 'city', { value: c.city || '', required: true })}
-      ${field('Drug licence no. (20B / 21B)', 'dl', { value: c.dl || '', required: true })}
-      ${field('GSTIN', 'gstin', { value: c.gstin || '', attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN, e.g. 02ABCDE1234F1Z5" style="text-transform:uppercase"` })}
+      ${licFields(c, true)}
       ${field('Credit limit (₹)', 'creditLimit', { type: 'number', value: c.creditLimit ?? 100000, required: true, attrs: numAttrs('1') })}
       ${field('Payment terms (days)', 'terms', { type: 'number', value: c.terms ?? 14, required: true, attrs: numAttrs('1') })}
       ${field('Default CD %', 'cd', { type: 'number', value: c.cd ?? db.settings.defaultCd ?? 0, attrs: numAttrs() })}
       ${field('Default TD %', 'td', { type: 'number', value: c.td ?? 0, attrs: numAttrs() })}
       ${field('Address', 'address', { value: c.address || '', full: true })}
     </div>`;
-  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, city: d.city.trim(), dl: d.dl.trim(), gstin: (d.gstin || '').toUpperCase(), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td), address: d.address });
-  ACTIONS['new-chemist'] = () => openModal({
-    title: 'Onboard a chemist', submitLabel: 'Onboard',
-    body: chemistForm() + '<div class="small muted">New chemists start as “Pending verification”. Activate them after checking the drug licence to allow billing.</div>',
-    onSubmit: d => { const c = { id: nextId('C', db.chemists), joined: todayIso, status: 'Pending verification' }; readChemist(d, c); db.chemists.push(c); return `${c.name} onboarded — pending verification.`; },
-  });
-  ACTIONS['edit-chemist'] = id => { const c = chem(id); if (!c) return; openModal({ title: `Edit ${c.name}`, body: chemistForm(c), onSubmit: d => { readChemist(d, c); return `${c.name} updated.`; } }); };
+  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, city: d.city.trim(), ...readLic(d), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td), address: d.address });
+  // Portal login section inside the chemist form: optional when onboarding, edits the login when it exists
+  const chemistPortalBlock = c => !SERVER ? '' : `<label class="check-line"><input type="checkbox" name="pWant" id="pWant" ${portalLogins[c.id] ? 'checked disabled' : ''}> ${portalLogins[c.id] ? 'Has a portal login' : 'Create a portal login for this chemist'}</label>
+    <div id="pBlock" class="${portalLogins[c.id] ? '' : 'hidden'}">${portalFields(c, portalLogins[c.id])}</div>`;
+  function afterChemistSave(c, d) {
+    if (!SERVER) return;
+    const l = portalLogins[c.id];
+    if (!l && !d.pWant) return;
+    if (l && !d.pPass && String(d.pUser || '').trim().toLowerCase() === l.username && !!d.pActive === l.active) return;
+    savePortalLogin(c, d).then(msg => { render(); if (d.pPass) showNotice(msg); else toast(msg); }).catch(err => toast(`${c.name} was saved, but the login was not: ${err.message}`));
+  }
+  const portalFieldsOk = d => {
+    if (!SERVER || !(d.pWant || d.pUser)) return true;
+    if (!(d.pWant || portalLogins[d._id])) return true;
+    if (!/^[a-z0-9._-]{3,32}$/.test(String(d.pUser || '').trim().toLowerCase())) { toast('Username: 3–32 lower-case letters, numbers, dot, dash or underscore.'); return false; }
+    if (!portalLogins[d._id] && !d.pPass) { toast('Set a password for the new login.'); return false; }
+    if (d.pPass && d.pPass.length < 8) { toast('The password must be at least 8 characters.'); return false; }
+    return true;
+  };
+  ACTIONS['new-chemist'] = () => {
+    openModal({
+      title: 'Onboard a chemist', submitLabel: 'Onboard', size: 'lg',
+      body: chemistForm() + `<div class="form-grid">${field('Status', 'status', { value: 'Pending verification', options: ['Pending verification', 'Active'] })}</div>
+        <div class="small muted">Choose “Pending verification” until the drug licence is checked. Only Active chemists can be billed and can sign in to the portal.</div>${chemistPortalBlock({})}`,
+      onSubmit: d => {
+        if (d.pWant && !portalFieldsOk(d)) return false;
+        const c = { id: nextId('C', db.chemists), joined: todayIso, status: d.status === 'Active' ? 'Active' : 'Pending verification' };
+        readChemist(d, c); db.chemists.push(c); fileLicence('chemist', c.id);
+        afterChemistSave(c, d);
+        return `${c.name} onboarded — ${c.status.toLowerCase()}.`;
+      },
+    });
+    $('#pWant')?.addEventListener('change', e => { $('#pBlock').classList.toggle('hidden', !e.target.checked); const n = $('#f-name').value.trim(); if (e.target.checked && n) $('#f-pUser').value = suggestUsername({ name: n }); });
+  };
+  ACTIONS['edit-chemist'] = id => {
+    const c = chem(id); if (!c) return;
+    openModal({
+      title: `Edit ${c.name}`, size: 'lg', body: chemistForm(c) + chemistPortalBlock(c),
+      onSubmit: d => { if (!portalFieldsOk({ ...d, _id: c.id })) return false; readChemist(d, c); fileLicence('chemist', c.id); afterChemistSave(c, d); return `${c.name} updated.`; },
+    });
+    $('#pWant')?.addEventListener('change', e => $('#pBlock').classList.toggle('hidden', !e.target.checked));
+  };
   ACTIONS['del-chemist'] = id => {
     const c = chem(id); if (!c) return;
     const n = db.sales.filter(s => s.party.chemistId === id).length;
@@ -1963,30 +2185,159 @@
       .map(([s, l]) => `<button type="button" class="btn ${s === 'Active' ? 'primary' : ''}" data-act="chemist-status" data-id="${c.id}|${s}">${l}</button>`).join('');
     openModal({
       title: c.name, size: 'lg',
-      extraFoot: `<div class="foot-left">${btns}<button type="button" class="btn" data-act="edit-chemist" data-id="${c.id}">Edit</button></div>`,
-      body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['City', esc(c.city)], ['Drug licence', esc(c.dl)], ['GSTIN', esc(c.gstin || '—')], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Default CD / TD', `${dec(c.cd)}% / ${dec(c.td)}%`]])}
+      extraFoot: `<div class="foot-left">${btns}<button type="button" class="btn" data-act="edit-chemist" data-id="${c.id}">Edit</button>${SERVER ? `<button type="button" class="btn" data-act="portal-login" data-id="${c.id}">${portalLogins[c.id] ? 'Portal login' : 'Create portal login'}</button>` : ''}</div>`,
+      body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['City', esc(c.city)], ['Drug licence 1', esc(c.dl1 || '—')], ['Drug licence 2', esc(c.dl2 || '—')], ['Licence valid upto', licValid(c)], ['GSTIN', esc(c.gstin || '—')], ['Licence copies', licDocsBtn('chemist', c.id)], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Default CD / TD', `${dec(c.cd)}% / ${dec(c.td)}%`], ...(SERVER ? [['Portal login', portalCell(c)], ['Portal orders', String(chemOrders.filter(o => o.chemistId === c.id).length)]] : [])])}
         <div class="card-title" style="font-size:15px">Bills (${inv.length})</div>
         ${miniTable([{ h: 'Bill', c: s => s.no }, { h: 'Date', c: s => fmtDate(s.date) }, { h: 'Amount', r: 1, c: s => money(s.total) }, { h: 'Balance', r: 1, c: s => money(balance(s)) }, { h: 'Status', c: s => pill(saleStatus(s)) }], inv.slice(0, 12))}`,
     });
   };
+  // Chemist orders
+  const orderById = id => chemOrders.find(o => o.id === id);
+  async function setOrder(id, body, msg) {
+    try {
+      const o = await api('POST', `api/orders/${encodeURIComponent(id)}`, body);
+      chemOrders = chemOrders.map(x => x.id === o.id ? o : x);
+      refresh(); if (msg) toast(msg);
+    } catch (err) { toast(err.message); }
+  }
+  ACTIONS['orders-refresh'] = async () => { await loadOrders(); render(); toast('Orders refreshed.'); };
+  ACTIONS['order-status'] = v => {
+    const [id, status] = v.split('|'); const o = orderById(id); if (!o) return;
+    if (status === 'Rejected') {
+      openModal({
+        title: `Reject ${id}?`, size: 'sm', submitLabel: 'Reject order',
+        body: `<div class="form-grid">${field('Reason shown to the chemist', 'reply', { full: true, value: o.reply || '' })}</div>`,
+        onSubmit: d => { setOrder(id, { status, reply: d.reply }, `${id} rejected.`); },
+      });
+      $('#modalFoot [data-submit]').classList.add('danger-solid');
+      return;
+    }
+    setOrder(id, { status }, `${id} marked ${status}.`);
+  };
+  ACTIONS['view-order'] = id => {
+    const o = orderById(id); if (!o) return;
+    const c = chem(o.chemistId);
+    const open = ['New', 'Accepted', 'Arranging'].includes(o.status);
+    const shortLines = o.lines.filter(l => l.productId && orderShort(l) > 0);
+    openModal({
+      title: `Order ${o.id} · ${c?.name || o.chemistId}`, size: 'lg',
+      extraFoot: open ? `<div class="foot-left">
+        <button type="button" class="btn primary" data-act="order-bill" data-id="${esc(o.id)}">Make sale bill</button>
+        ${shortLines.length ? `<button type="button" class="btn" data-act="order-po" data-id="${esc(o.id)}">Purchase order for short items</button>` : ''}
+        ${o.status !== 'Arranging' ? `<button type="button" class="btn" data-act="order-status" data-id="${esc(o.id)}|Arranging">Mark arranging</button>` : ''}
+        ${o.status === 'New' ? `<button type="button" class="btn" data-act="order-status" data-id="${esc(o.id)}|Accepted">Accept</button>` : ''}
+        <button type="button" class="btn ghost danger" data-act="order-status" data-id="${esc(o.id)}|Rejected">Reject</button></div>` : '',
+      body: `${detailGrid([['Chemist', esc(c?.name || o.chemistId)], ['City', esc(c?.city || '—')], ['Mobile', esc(c?.phone || '—')], ['Placed', new Date(o.created).toLocaleString('en-IN')], ['Status', pill(o.status)], ['Sale bill', esc(o.saleNo || '—')]])}
+        ${o.note ? `<div><div class="small muted">Chemist’s note</div><div>${esc(o.note)}</div></div>` : ''}
+        ${miniTable([
+          { h: 'Item', c: l => `<span class="strong">${esc(l.name)}</span><div class="small muted">${esc([l.pack, l.company].filter(Boolean).join(' · '))}${l.productId ? '' : ' · not in your product list'}</div>${l.note ? `<div class="small">${esc(l.note)}</div>` : ''}` },
+          { h: 'Ordered', r: 1, c: l => qty(l.qty) },
+          { h: 'In stock now', r: 1, c: l => l.productId ? qty(sellableQty(l.productId)) : '—' },
+          { h: '', c: l => orderShort(l) > 0 ? pill(l.productId ? `Short ${qty(orderShort(l))}` : 'Not stocked') : pill('In stock') },
+        ], o.lines)}
+        ${o.reply ? `<div class="small"><b>Your reply:</b> ${esc(o.reply)}</div>` : ''}
+        <div class="small muted">${o.history.map(h => `${h.status} by ${h.by} · ${new Date(h.at).toLocaleString('en-IN')}`).join('<br>')}</div>`,
+    });
+  };
+  ACTIONS['order-bill'] = id => {
+    const o = orderById(id); if (!o) return;
+    const c = chem(o.chemistId);
+    if (!c) { toast('This chemist no longer exists.'); return; }
+    if (c.status !== 'Active') { toast(`${c.name} is ${c.status}. Activate them before billing.`); return; }
+    const lines = o.lines.filter(l => l.productId && sellableQty(l.productId) > 0).map(l => {
+      const p = prod(l.productId); const b = sellableBatches(p.id)[0];
+      return { productId: p.id, batchId: b.id, qty: Math.min(l.qty, avail(b)), free: 0, rate: p.ptr, cd: c.cd || 0, td: c.td || 0 };
+    });
+    if (!lines.length) { toast('None of the ordered items are in stock yet. Use “Purchase order for short items” or mark it Arranging.'); return; }
+    const left = o.lines.length - lines.length;
+    saleModal(null, { chemistId: c.id, lines, orderId: o.id });
+    toast(left ? `${left} item(s) are not in stock and were left out. Quantities are limited to the first batch — add lines for more.` : 'Check the batches and quantities, then create the bill.');
+  };
+  ACTIONS['order-po'] = id => {
+    const o = orderById(id); if (!o) return;
+    const lines = o.lines.filter(l => l.productId && orderShort(l) > 0).map(l => ({ productId: l.productId, qty: orderShort(l), rate: prod(l.productId)?.pts || 0 }));
+    if (!lines.length) { toast('Nothing is short on this order.'); return; }
+    if (o.status !== 'Arranging') setOrder(o.id, { status: 'Arranging' });
+    poModal(null, { lines });
+  };
+
+  // Chemist portal logins (server mode)
+  const portalCell = c => {
+    if (!SERVER) return '<span class="muted small">Server only</span>';
+    const l = portalLogins[c.id];
+    if (!l) return actBtn('portal-login', c.id, 'Create login', 'ghost');
+    return `<span class="small strong">${esc(l.username)}</span> ${l.active ? pill('Active') : pill('Off')}<div class="small muted">${l.lastLogin ? 'Last in ' + fmtDate(l.lastLogin.slice(0, 10)) : 'Never signed in'}</div>`;
+  };
+  const suggestUsername = c => (c.name || 'chemist').toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '').slice(0, 24) || 'chemist';
+  const randomPassword = () => { const a = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const v = crypto.getRandomValues(new Uint32Array(10)); return [...v].map(x => a[x % a.length]).join(''); };
+  const portalFields = (c, l) => `
+    <div class="card-title" style="font-size:15px">Chemist portal login</div>
+    <div class="small muted">The chemist signs in with these to see your stock and place orders. Share them privately.${c.status !== 'Active' ? ' <b>The login works only after the chemist is Active.</b>' : ''}</div>
+    <div class="form-grid g3">
+      ${field('Username', 'pUser', { value: l?.username || suggestUsername(c), attrs: 'autocomplete="off" autocapitalize="none" spellcheck="false"' })}
+      ${field(l ? 'New password (leave empty to keep)' : 'Password (8+ characters)', 'pPass', { value: l ? '' : randomPassword(), attrs: 'autocomplete="new-password"' })}
+      <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="pActive" ${!l || l.active ? 'checked' : ''}> Login switched on</label></div>
+    </div>`;
+  async function savePortalLogin(c, d) {
+    const body = { username: String(d.pUser || '').trim().toLowerCase(), active: !!d.pActive };
+    if (d.pPass) body.password = d.pPass;
+    await api('PUT', `api/logins/${encodeURIComponent(c.id)}`, body);
+    await loadLogins();
+    return d.pPass ? `Login for ${c.name}: username “${body.username}”, password “${d.pPass}”. Note it down and share it privately — it is not shown again.` : `Login for ${c.name} updated.`;
+  }
+  ACTIONS['portal-login'] = id => {
+    const c = chem(id); if (!c) return;
+    if (!SERVER) { toast('Chemist logins need the server. Start it with “node server.js”.'); return; }
+    const l = portalLogins[c.id];
+    openModal({
+      title: `${l ? 'Edit' : 'Create'} portal login · ${c.name}`, size: 'lg', submitLabel: l ? 'Save login' : 'Create login',
+      extraFoot: l ? `<div class="foot-left"><button type="button" class="btn ghost danger" data-act="portal-remove" data-id="${esc(c.id)}">Remove login</button></div>` : '',
+      body: portalFields(c, l),
+      onSubmit: d => {
+        if (!portalFieldsOk({ ...d, pWant: 'on', _id: c.id })) return false;
+        savePortalLogin(c, d).then(msg => { closeModal(false); refresh(); showNotice(msg); }).catch(err => toast(err.message));
+        return false;
+      },
+    });
+  };
+  ACTIONS['portal-remove'] = id => {
+    const c = chem(id); if (!c) return;
+    confirmModal(`Remove the portal login of ${c.name}?`, 'They will be signed out and can no longer see stock or place orders. Their past orders stay.', 'Remove login', () => {
+      api('DELETE', `api/logins/${encodeURIComponent(id)}`).then(loadLogins).then(() => { refresh(); toast(`Login of ${c.name} removed.`); }).catch(err => toast(err.message));
+    });
+  };
+  // A message that stays until it is closed (used to show a new password once)
+  function showNotice(msg) {
+    openModal({ title: 'Done', size: 'sm', body: `<p style="margin:0">${esc(msg)}</p>` });
+  }
+  ACTIONS['change-password'] = () => openModal({
+    title: 'Change your password', size: 'sm', submitLabel: 'Change password',
+    body: `<div class="form-grid">${field('Current password', 'current', { type: 'password', required: true, full: true, attrs: 'autocomplete="current-password"' })}${field('New password (8+ characters)', 'password', { type: 'password', required: true, full: true, attrs: 'autocomplete="new-password" minlength="8"' })}${field('Repeat new password', 'confirm', { type: 'password', required: true, full: true, attrs: 'autocomplete="new-password"' })}</div>`,
+    onSubmit: d => {
+      if (d.password !== d.confirm) { toast('The new passwords do not match.'); return false; }
+      api('POST', 'api/password', { current: d.current, password: d.password }).then(() => { closeModal(false); toast('Password changed.'); }).catch(err => toast(err.message));
+      return false;
+    },
+  });
+
   ACTIONS['chemist-status'] = v => {
     const [id, status] = v.split('|'); const c = chem(id); if (!c) return;
     c.status = status; closeModal(false); refresh(); toast(`${c.name} is now ${status}.`);
   };
 
   // Suppliers
-  const supplierForm = (s = {}) => `<div class="form-grid">
+  const supplierForm = (s = {}) => `${licReadBox('supplier')}<div class="form-grid">
     ${field('Supplier name', 'name', { value: s.name || '', required: true })}
     ${field('Contact person', 'contact', { value: s.contact || '' })}
     ${field('Mobile', 'phone', { type: 'tel', value: s.phone || '', attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
     ${field('City', 'city', { value: s.city || '' })}
-    ${field('GSTIN', 'gstin', { value: s.gstin || '', attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN" style="text-transform:uppercase"` })}
-    ${field('Drug licence no.', 'dl', { value: s.dl || '' })}
+    ${licFields(s, false)}
     ${field('Payment terms (days)', 'terms', { type: 'number', value: s.terms ?? 30, required: true, attrs: numAttrs('1') })}
+    ${field('Address', 'address', { value: s.address || '', full: true })}
   </div>`;
-  const readSupplier = (d, s) => Object.assign(s, { name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, city: d.city.trim(), gstin: (d.gstin || '').toUpperCase(), dl: d.dl.trim(), terms: num(d.terms) });
-  ACTIONS['new-supplier'] = () => openModal({ title: 'Add supplier', body: supplierForm(), submitLabel: 'Add supplier', onSubmit: d => { const s = { id: nextId('S', db.suppliers) }; readSupplier(d, s); db.suppliers.push(s); return `${s.name} added.`; } });
-  ACTIONS['edit-supplier'] = id => { const s = sup(id); if (!s) return; openModal({ title: `Edit ${s.name}`, body: supplierForm(s), onSubmit: d => { readSupplier(d, s); return `${s.name} updated.`; } }); };
+  const readSupplier = (d, s) => Object.assign(s, { name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, city: d.city.trim(), ...readLic(d), terms: num(d.terms), address: (d.address || '').trim() });
+  ACTIONS['new-supplier'] = () => openModal({ title: 'Add supplier', body: supplierForm(), submitLabel: 'Add supplier', onSubmit: d => { const s = { id: nextId('S', db.suppliers) }; readSupplier(d, s); db.suppliers.push(s); fileLicence('supplier', s.id); return `${s.name} added.`; } });
+  ACTIONS['edit-supplier'] = id => { const s = sup(id); if (!s) return; openModal({ title: `Edit ${s.name}`, body: supplierForm(s), onSubmit: d => { readSupplier(d, s); fileLicence('supplier', s.id); return `${s.name} updated.`; } }); };
   ACTIONS['del-supplier'] = id => {
     const s = sup(id); if (!s) return;
     const n = db.pos.filter(p => p.supplierId === id).length + db.grns.filter(g => g.supplierId === id).length + db.pinvoices.filter(p => p.supplierId === id).length;
@@ -2002,17 +2353,18 @@
   ACTIONS['view-supplier'] = goFolder;
 
   // Supplier folder: bill copies
-  ACTIONS['open-bill-file'] = async no => {
+  ACTIONS['open-bill-file'] = no => ACTIONS['open-docs'](no);
+  ACTIONS['open-docs'] = async key => {
     try {
-      const files = await billStore.get(no);
-      if (!files || !files.length) { toast('The bill copy is not in this browser. It may have been saved on another computer or cleared.'); return; }
+      const files = await billStore.get(key);
+      if (!files || !files.length) { toast('The file is not in this browser. It may have been saved on another computer or cleared.'); return; }
       files.forEach(f => {
         const url = URL.createObjectURL(f.blob);
         const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener';
         if (!/^(image\/|application\/pdf)/.test(f.type)) a.download = f.name;
         document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
       });
-    } catch { toast('Could not open the bill copy — browser storage is blocked.'); }
+    } catch { toast('Could not open the file — browser storage is blocked.'); }
   };
   ACTIONS['attach-bill'] = no => {
     const p = db.pinvoices.find(x => x.no === no); if (!p) return;
@@ -2301,7 +2653,7 @@
     const uniqNew = [...new Set(newProducts)];
     confirmModal('Add this bill to stock?', `${lines.length} lines · net ${money2(t.total)}${uniqNew.length ? ` · ${uniqNew.length} new product(s) will be created` : ''}${existingSup ? '' : ` · new supplier “${esc(entry.supplierName)}”`}. The stock lines will be marked “Needs check”.`, 'Add to stock', () => {
       let s = existingSup;
-      if (!s) { s = { id: nextId('S', db.suppliers), name: entry.supplierName.trim(), contact: '', phone: '', city: '', gstin: entry.gstin.toUpperCase(), dl: '', terms: 30 }; db.suppliers.push(s); }
+      if (!s) { s = { id: nextId('S', db.suppliers), name: entry.supplierName.trim(), contact: '', phone: '', city: '', gstin: entry.gstin.toUpperCase(), dl1: '', dl2: '', dlValid: '', terms: 30 }; db.suppliers.push(s); }
       const stockLines = lines.map(l => {
         let p = findProductByName(l.name);
         if (!p) {
@@ -2329,14 +2681,14 @@
     openModal({
       title: 'Settings', size: 'lg', submitLabel: 'Save settings',
       body: `<div class="card-title" style="font-size:15px">Firm details (printed on bills)</div>
+        ${licReadBox('firm')}
         <div class="form-grid">
-          ${field('Firm name', 'fname', { value: f.name, required: true })}
-          ${field('Phone', 'fphone', { value: f.phone })}
-          ${field('Address', 'faddr', { value: f.address, full: true })}
-          ${field('GSTIN', 'fgst', { value: f.gstin })}
-          ${field('Drug licence 1 (20B)', 'fdl1', { value: f.dl1 })}
-          ${field('Drug licence 2 (21B)', 'fdl2', { value: f.dl2 })}
+          ${field('Firm name', 'name', { value: f.name, required: true })}
+          ${field('Phone', 'phone', { value: f.phone })}
+          ${field('Address', 'address', { value: f.address, full: true })}
+          ${licFields(f, false)}
           ${field('Default CD % for new chemists', 'defcd', { type: 'number', value: db.settings.defaultCd ?? 0, attrs: numAttrs() })}
+          <div class="field"><label>Licence copies</label><div>${licDocsBtn('firm', 'firm')}</div></div>
         </div>
         <div class="card-title" style="font-size:15px">AI bill reading</div>
         <div class="form-grid">
@@ -2347,7 +2699,8 @@
         <div class="toolbar"><button type="button" class="btn" data-act="export-data" data-id="">Download backup (JSON)</button><label class="btn">Restore backup<input type="file" id="restoreFile" accept="application/json,.json" hidden></label><button type="button" class="btn ghost danger" data-act="reset-data" data-id="">Reset to sample data</button></div>
         <div class="small muted">All data lives in this browser. Download a backup regularly.</div>`,
       onSubmit: d => {
-        Object.assign(db.settings.firm, { name: d.fname.trim(), phone: d.fphone.trim(), address: d.faddr.trim(), gstin: d.fgst.trim().toUpperCase(), dl1: d.fdl1.trim(), dl2: d.fdl2.trim() });
+        Object.assign(db.settings.firm, { name: d.name.trim(), phone: d.phone.trim(), address: d.address.trim(), ...readLic(d) });
+        fileLicence('firm', 'firm');
         db.settings.defaultCd = num(d.defcd);
         setApiKey((d.apikey || '').trim());
         return 'Settings saved.';
@@ -2379,6 +2732,8 @@
       $$('button', tab.parentElement).forEach(b => b.classList.toggle('active', b === tab));
       fillList(key); return;
     }
+    const lr = e.target.closest('[data-lic-read]');
+    if (lr) { readLicenceIntoForm(lr); return; }
     const ba = e.target.closest('[data-bulkapply]');
     if (ba) { bulkApply(ba.dataset.bulkapply); return; }
     const bc = e.target.closest('[data-bulkclear]');
@@ -2416,7 +2771,7 @@
     if (act && ACTIONS[act.dataset.act]) {
       e.preventDefault();
       // Opening a new dialog from inside one: close the current one first (keeping any edit-in-progress reverted).
-      if (act.closest('.modal') && !['print', 'export-data'].includes(act.dataset.act)) closeModal();
+      if (act.closest('.modal') && !['print', 'export-data', 'open-docs'].includes(act.dataset.act)) closeModal();
       ACTIONS[act.dataset.act](act.dataset.id); return;
     }
     if (e.target.closest('[data-close]') || e.target.id === 'modalBack') { closeModal(); return; }
@@ -2479,6 +2834,13 @@
     }
     if (t.matches('[data-lselall]')) { $$('#lineBody [data-lsel]').forEach(c => { c.checked = t.checked; }); updateSaleSel(); return; }
     if (t.matches('#lineBody [data-lsel]')) { updateSaleSel(); return; }
+    if (t.id === 'licFiles') {
+      const files = [...t.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
+      if (files.length < t.files.length) toast('Only JPG, PNG, WEBP, GIF and PDF files up to 25 MB can be used.');
+      licPending = files;
+      $('#licNote').textContent = files.length ? `Chosen: ${files.map(f => f.name).join(', ')}. Click “Read with AI” to fill the details, or just save — the files are kept either way.` : 'No file chosen.';
+      t.value = ''; return;
+    }
     if (t.id === 'entryAttach' && entry) {
       const files = [...t.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
       if (files.length < t.files.length) toast('Only JPG, PNG, WEBP, GIF and PDF files up to 25 MB can be attached.');
@@ -2548,8 +2910,39 @@
   $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
   $('#settingsBtn').addEventListener('click', () => ACTIONS['open-settings']());
   window.addEventListener('hashchange', render);
-  window.addEventListener('beforeunload', e => { if (entry && entry.lines.some(l => l.name)) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', e => { if ((entry && entry.lines.some(l => l.name)) || saveTimer || saving) { e.preventDefault(); e.returnValue = ''; } });
+  $('#logoutBtn').addEventListener('click', async () => { try { await api('POST', 'api/logout', {}); } catch { /* signed out anyway */ } location.href = 'login.html'; });
+  $('#pwBtn').addEventListener('click', () => ACTIONS['change-password']());
 
-  save();
-  render();
+  async function boot() {
+    let me = null;
+    try {
+      const r = await fetch('api/me', { cache: 'no-store' });
+      if (r.ok && (r.headers.get('content-type') || '').includes('json')) me = await r.json();
+    } catch { /* no server: browser-only mode */ }
+    if (me) {
+      if (me.role === 'chemist') { location.href = 'portal.html'; return; }
+      if (me.role !== 'admin') { location.href = 'login.html'; return; }
+      SERVER = true;
+      try {
+        const st = await api('GET', 'api/db');
+        serverRev = st.rev;
+        db = st.data ? migrate(st.data) : null;
+      } catch (err) { $('#content').innerHTML = `<section class="card"><div class="empty">Could not load data from the server: ${esc(err.message)}</div></section>`; return; }
+      if (!db) {
+        // First run on the server: start from this browser's data if there is any, else the sample data
+        db = migrate(load() || seed());
+        await pushToServer();
+      }
+      $('#storageNote').textContent = `Signed in as ${me.username}. Data is saved on the server.`;
+      $('#accountBtns').hidden = false;
+      await Promise.all([loadOrders(), loadLogins()]);
+      setInterval(loadOrders, 30000);
+    } else {
+      db = migrate(load() || seed());
+      save();
+    }
+    render();
+  }
+  boot();
 })();
