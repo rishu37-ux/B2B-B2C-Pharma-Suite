@@ -47,7 +47,9 @@ const checkPassword = (password, rec) => {
   const b = Buffer.from(rec.hash, 'hex');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
-const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
+// A login ID is an email address or a simple user name
+const USERNAME_RE = /^[a-z0-9._@+-]{3,100}$/;
+const USERNAME_MSG = 'Login ID: an email address, or 3–100 letters, numbers, dot, dash, underscore or @.';
 const passwordProblem = p => (typeof p !== 'string' || p.length < 8) ? 'Password must be at least 8 characters.' : p.length > 200 ? 'Password is too long.' : '';
 
 const sessions = new Map(); // token -> { role, chemistId, expires }
@@ -137,13 +139,13 @@ async function api(req, res, url) {
     if (!s) return send(res, 200, { role: null, setupNeeded: !auth.admin });
     if (s.role === 'admin') return send(res, 200, { role: 'admin', username: auth.admin.username });
     const c = chemistOf(s.chemistId);
-    return send(res, 200, { role: 'chemist', chemistId: s.chemistId, username: auth.chemists[s.chemistId].username, name: c?.name || '', firm: store.data?.settings?.firm?.name || '' });
+    return send(res, 200, { role: 'chemist', chemistId: s.chemistId, username: auth.chemists[s.chemistId].username, mustChange: !!auth.chemists[s.chemistId].mustChange, name: c?.name || '', firm: store.data?.settings?.firm?.name || '' });
   }
   if (route === 'POST /api/setup') {
     if (auth.admin) return send(res, 409, { error: 'The admin account already exists.' });
     const b = await readBody(req, 10_000);
-    const username = str(b.username, 40).toLowerCase();
-    if (!USERNAME_RE.test(username)) return fail400(res, 'Username: 3–32 letters, numbers, dot, dash or underscore.');
+    const username = str(b.username, 100).toLowerCase();
+    if (!USERNAME_RE.test(username)) return fail400(res, USERNAME_MSG);
     const pp = passwordProblem(b.password); if (pp) return fail400(res, pp);
     auth.admin = { username, ...hashPassword(b.password), created: new Date().toISOString() };
     saveAuth();
@@ -152,7 +154,7 @@ async function api(req, res, url) {
   }
   if (route === 'POST /api/login') {
     const b = await readBody(req, 10_000);
-    const username = str(b.username, 40).toLowerCase(); const k = failKey(req, username);
+    const username = str(b.username, 100).toLowerCase(); const k = failKey(req, username);
     if (locked(k)) return send(res, 429, { error: 'Too many wrong tries. Wait 10 minutes and try again.' });
     if (auth.admin && username === auth.admin.username && checkPassword(b.password, auth.admin)) {
       failures.delete(k); newSession(res, req, { role: 'admin' }); return send(res, 200, { role: 'admin' });
@@ -163,10 +165,10 @@ async function api(req, res, url) {
       if (!rec.active) return send(res, 403, { error: 'Your portal login is switched off. Please contact the distributor.' });
       if (chemistOf(chemistId)?.status !== 'Active') return send(res, 403, { error: 'Your account is not active yet. Please contact the distributor.' });
       failures.delete(k); rec.lastLogin = new Date().toISOString(); saveAuth();
-      newSession(res, req, { role: 'chemist', chemistId }); return send(res, 200, { role: 'chemist' });
+      newSession(res, req, { role: 'chemist', chemistId }); return send(res, 200, { role: 'chemist', mustChange: !!rec.mustChange });
     }
     fail(k);
-    return send(res, 401, { error: 'Wrong username or password.' });
+    return send(res, 401, { error: 'Wrong login ID or password.' });
   }
   if (route === 'POST /api/logout') {
     if (s) sessions.delete(s.token);
@@ -179,7 +181,8 @@ async function api(req, res, url) {
     const rec = s.role === 'admin' ? auth.admin : auth.chemists[s.chemistId];
     if (!checkPassword(b.current, rec)) return send(res, 403, { error: 'Current password is wrong.' });
     const pp = passwordProblem(b.password); if (pp) return fail400(res, pp);
-    Object.assign(rec, hashPassword(b.password)); saveAuth();
+    if (checkPassword(b.password, rec)) return fail400(res, 'Choose a new password that is different from the current one.');
+    Object.assign(rec, hashPassword(b.password), { mustChange: false }); saveAuth();
     for (const [t, x] of sessions) if (t !== s.token && x.role === s.role && x.chemistId === s.chemistId) sessions.delete(t);
     return send(res, 200, { ok: true });
   }
@@ -190,6 +193,7 @@ async function api(req, res, url) {
   if (url.pathname.startsWith('/api/portal/')) {
     if (s.role !== 'chemist') return send(res, 403, { error: 'Chemist accounts only.' });
     const cid = s.chemistId;
+    if (auth.chemists[cid]?.mustChange) return send(res, 403, { error: 'Please set your own password first.', mustChange: true });
     if (route === 'GET /api/portal/catalogue') {
       const c = chemistOf(cid);
       return send(res, 200, { items: catalogue(), cd: c?.cd || 0, td: c?.td || 0, firm: store.data?.settings?.firm || {} });
@@ -258,7 +262,7 @@ async function api(req, res, url) {
     return send(res, 200, o);
   }
   if (route === 'GET /api/logins') {
-    return send(res, 200, Object.fromEntries(Object.entries(auth.chemists).map(([id, r]) => [id, { username: r.username, active: r.active, created: r.created, lastLogin: r.lastLogin || '' }])));
+    return send(res, 200, Object.fromEntries(Object.entries(auth.chemists).map(([id, r]) => [id, { username: r.username, active: r.active, created: r.created, lastLogin: r.lastLogin || '', mustChange: !!r.mustChange }])));
   }
   const lg = /^(PUT|DELETE) \/api\/logins\/(C[0-9A-Za-z]+)$/.exec(route);
   if (lg) {
@@ -266,13 +270,13 @@ async function api(req, res, url) {
     if (lg[1] === 'DELETE') { delete auth.chemists[id]; saveAuth(); endSessionsFor(id); return send(res, 200, { ok: true }); }
     const b = await readBody(req, 10_000);
     const rec = auth.chemists[id];
-    const username = str(b.username ?? rec?.username, 40).toLowerCase();
-    if (!USERNAME_RE.test(username)) return fail400(res, 'Username: 3–32 letters, numbers, dot, dash or underscore.');
+    const username = str(b.username ?? rec?.username, 100).toLowerCase();
+    if (!USERNAME_RE.test(username)) return fail400(res, USERNAME_MSG);
     if (username === auth.admin.username || Object.entries(auth.chemists).some(([cid, r]) => cid !== id && r.username === username)) return send(res, 409, { error: `The username “${username}” is already taken.` });
     if (!rec && !b.password) return fail400(res, 'Set a password for the new login.');
     if (b.password) { const pp = passwordProblem(b.password); if (pp) return fail400(res, pp); }
     const next = { ...(rec || { created: new Date().toISOString() }), username, active: b.active !== false };
-    if (b.password) Object.assign(next, hashPassword(b.password));
+    if (b.password) Object.assign(next, hashPassword(b.password), { mustChange: !!b.mustChange });
     auth.chemists[id] = next; saveAuth();
     if (!next.active || b.password) endSessionsFor(id);
     return send(res, 200, { username, active: next.active });

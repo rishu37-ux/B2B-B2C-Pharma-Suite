@@ -26,7 +26,7 @@
     e.preventDefault();
     const username = $('#username').value.trim(), password = $('#password').value;
     const err = $('#error'); err.textContent = '';
-    if (!username || !password) { err.textContent = 'Enter your username and password.'; return; }
+    if (!username || !password) { err.textContent = 'Enter your login ID and password.'; return; }
     if (setup && password !== $('#confirm').value) { err.textContent = 'The two passwords do not match.'; return; }
     $('#submit').disabled = true;
     try {

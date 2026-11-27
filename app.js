@@ -2401,7 +2401,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   const chemistForm = (c = {}) => `${licReadBox('chemist')}<div class="form-grid">
       ${field('Firm name', 'name', { value: c.name || '', required: true })}
       ${field('Owner / pharmacist', 'owner', { value: c.owner || '', required: true })}
-      ${field('Mobile', 'phone', { type: 'tel', value: c.phone || '', required: true, attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
+      ${field('Mobile', 'phone', { type: 'tel', value: c.phone || '', required: true, attrs: 'pattern="[6-9][0-9]{9}" inputmode="numeric" maxlength="10" title="10-digit mobile number"' })}
+      ${field('Email', 'email', { type: 'email', value: c.email || '', attrs: 'autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="used as the portal login ID"' })}
       ${addrFields(c, true)}
       ${licFields(c, true)}
       <div class="field full form-sec">Credit &amp; discount</div>
@@ -2410,22 +2411,24 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ${field('Default CD %', 'cd', { type: 'number', value: c.cd ?? db.settings.defaultCd ?? 0, attrs: numAttrs() })}
       ${field('Default TD %', 'td', { type: 'number', value: c.td ?? 0, attrs: numAttrs() })}
     </div>`;
-  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, ...readAddr(d), ...readLic(d), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td) });
+  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, email: String(d.email || '').trim().toLowerCase(), ...readAddr(d), ...readLic(d), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td) });
   // Portal login section inside the chemist form: optional when onboarding, edits the login when it exists
-  const chemistPortalBlock = c => !SERVER ? '' : `<label class="check-line"><input type="checkbox" name="pWant" id="pWant" ${portalLogins[c.id] ? 'checked disabled' : ''}> ${portalLogins[c.id] ? 'Has a portal login' : 'Create a portal login for this chemist'}</label>
-    <div id="pBlock" class="${portalLogins[c.id] ? '' : 'hidden'}">${portalFields(c, portalLogins[c.id])}</div>`;
+  const chemistPortalBlock = (c, isNew) => !SERVER ? '' : `<div class="field full form-sec">Portal login</div>
+    <label class="check-line"><input type="checkbox" name="pWant" id="pWant" ${portalLogins[c.id] ? 'checked disabled' : isNew ? 'checked' : ''}> ${portalLogins[c.id] ? 'Has a portal login' : 'Create a portal login for this chemist'}</label>
+    <div id="pBlock" class="${portalLogins[c.id] || isNew ? '' : 'hidden'}">${portalFields(c, portalLogins[c.id])}</div>`;
   function afterChemistSave(c, d) {
     if (!SERVER) return;
     const l = portalLogins[c.id];
     if (!l && !d.pWant) return;
     if (l && !d.pPass && String(d.pUser || '').trim().toLowerCase() === l.username && !!d.pActive === l.active) return;
+    if (!l && !d.pPass) { toast(`${c.name} saved without a portal login (no password set).`); return; }
     savePortalLogin(c, d).then(msg => { render(); if (d.pPass) showNotice(msg); else toast(msg); }).catch(err => toast(`${c.name} was saved, but the login was not: ${err.message}`));
   }
   const portalFieldsOk = d => {
     if (!SERVER || !(d.pWant || d.pUser)) return true;
     if (!(d.pWant || portalLogins[d._id])) return true;
-    if (!/^[a-z0-9._-]{3,32}$/.test(String(d.pUser || '').trim().toLowerCase())) { toast('Username: 3–32 lower-case letters, numbers, dot, dash or underscore.'); return false; }
-    if (!portalLogins[d._id] && !d.pPass) { toast('Set a password for the new login.'); return false; }
+    if (!LOGIN_ID_RE.test(String(d.pUser || '').trim().toLowerCase())) { toast('Login ID: an email address, or 3–100 letters, numbers, dot, dash, underscore or @.'); return false; }
+    if (!portalLogins[d._id] && !d.pPass) { toast('Set a password for the new login — fill in the mobile number, or type a password.'); return false; }
     if (d.pPass && d.pPass.length < 8) { toast('The password must be at least 8 characters.'); return false; }
     return true;
   };
@@ -2433,7 +2436,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     openModal({
       title: 'Onboard a chemist', submitLabel: 'Onboard', size: 'lg',
       body: chemistForm() + `<div class="form-grid">${field('Status', 'status', { value: 'Pending verification', options: ['Pending verification', 'Active'] })}</div>
-        <div class="small muted">Choose “Pending verification” until the drug licence is checked. Only Active chemists can be billed and can sign in to the portal.</div>${chemistPortalBlock({})}`,
+        <div class="small muted">Choose “Pending verification” until the drug licence is checked. Only Active chemists can be billed and can sign in to the portal.</div>${chemistPortalBlock({}, true)}`,
       onSubmit: d => {
         if (!addrOk(d) || (d.pWant && !portalFieldsOk(d))) return false;
         const c = { id: nextId('C', db.chemists), joined: todayIso, status: d.status === 'Active' ? 'Active' : 'Pending verification' };
@@ -2442,7 +2445,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         return `${c.name} onboarded — ${c.status.toLowerCase()}.`;
       },
     });
-    $('#pWant')?.addEventListener('change', e => { $('#pBlock').classList.toggle('hidden', !e.target.checked); const n = $('#f-name').value.trim(); if (e.target.checked && n) $('#f-pUser').value = suggestUsername({ name: n }); });
+    $('#pWant')?.addEventListener('change', e => { $('#pBlock').classList.toggle('hidden', !e.target.checked); syncLoginDefaults(); });
   };
   ACTIONS['edit-chemist'] = id => {
     const c = chem(id); if (!c) return;
@@ -2727,24 +2730,30 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     if (!SERVER) return '<span class="muted small">Server only</span>';
     const l = portalLogins[c.id];
     if (!l) return actBtn('portal-login', c.id, 'Create login', 'ghost');
-    return `<span class="small strong">${esc(l.username)}</span> ${l.active ? pill('Active') : pill('Off')}<div class="small muted">${l.lastLogin ? 'Last in ' + fmtDate(l.lastLogin.slice(0, 10)) : 'Never signed in'}</div>`;
+    return `<span class="small strong">${esc(l.username)}</span> ${l.active ? pill('Active') : pill('Off')}<div class="small muted">${l.lastLogin ? 'Last in ' + fmtDate(l.lastLogin.slice(0, 10)) : 'Never signed in'}${l.mustChange ? ' · must set own password' : ''}</div>`;
   };
-  const suggestUsername = c => (c.name || 'chemist').toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '').slice(0, 24) || 'chemist';
-  const randomPassword = () => { const a = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const v = crypto.getRandomValues(new Uint32Array(10)); return [...v].map(x => a[x % a.length]).join(''); };
+  const LOGIN_ID_RE = /^[a-z0-9._@+-]{3,100}$/;
+  const defaultLoginId = c => String(c.email || '').trim().toLowerCase() || '';
   const portalFields = (c, l) => `
-    <div class="card-title" style="font-size:15px">Chemist portal login</div>
-    <div class="small muted">The chemist signs in with these to see your stock and place orders. Share them privately.${c.status !== 'Active' ? ' <b>The login works only after the chemist is Active.</b>' : ''}</div>
+    <div class="small muted">The chemist signs in to the portal with these to see your stock and place orders. By default the <b>login ID is their email</b> and the <b>password is their mobile number</b>.${c.status && c.status !== 'Active' ? ' <b>The login works only after the chemist is Active.</b>' : ''}</div>
     <div class="form-grid g3">
-      ${field('Username', 'pUser', { value: l?.username || suggestUsername(c), attrs: 'autocomplete="off" autocapitalize="none" spellcheck="false"' })}
-      ${field(l ? 'New password (leave empty to keep)' : 'Password (8+ characters)', 'pPass', { value: l ? '' : randomPassword(), attrs: 'autocomplete="new-password"' })}
+      ${field('Login ID (email)', 'pUser', { value: l?.username || defaultLoginId(c), attrs: `autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="filled from Email" data-auto="${l ? '0' : '1'}"` })}
+      ${field(l ? 'New password (leave empty to keep)' : 'Password (mobile number)', 'pPass', { value: l ? '' : (c.phone || ''), attrs: `autocomplete="new-password" placeholder="${l ? '' : 'filled from Mobile'}" data-auto="${l ? '0' : '1'}"` })}
       <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="pActive" ${!l || l.active ? 'checked' : ''}> Login switched on</label></div>
+      <div class="field full"><label class="check-line"><input type="checkbox" name="pTemp" ${l ? '' : 'checked'}> Ask the chemist to set their own password at first sign-in <span class="muted small">(recommended — a mobile number is easy for others to know)</span></label></div>
     </div>`;
+  // While onboarding, keep Login ID = Email and Password = Mobile until the admin types something else
+  function syncLoginDefaults() {
+    const u = $('#f-pUser'), p = $('#f-pPass');
+    if (u && u.dataset.auto === '1') u.value = String($('#mform [name="email"]')?.value || '').trim().toLowerCase();
+    if (p && p.dataset.auto === '1') p.value = String($('#mform [name="phone"]')?.value || '').trim();
+  }
   async function savePortalLogin(c, d) {
     const body = { username: String(d.pUser || '').trim().toLowerCase(), active: !!d.pActive };
-    if (d.pPass) body.password = d.pPass;
+    if (d.pPass) { body.password = d.pPass; body.mustChange = !!d.pTemp; }
     await api('PUT', `api/logins/${encodeURIComponent(c.id)}`, body);
     await loadLogins();
-    return d.pPass ? `Login for ${c.name}: username “${body.username}”, password “${d.pPass}”. Note it down and share it privately — it is not shown again.` : `Login for ${c.name} updated.`;
+    return d.pPass ? `Portal login for ${c.name}: login ID “${body.username}”, password “${d.pPass}”${d.pPass === c.phone ? ' (their mobile number)' : ''}.${body.mustChange ? ' They will be asked to set their own password when they first sign in.' : ''} Share it with them privately.` : `Login for ${c.name} updated.`;
   }
   ACTIONS['portal-login'] = id => {
     const c = chem(id); if (!c) return;
@@ -3257,6 +3266,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     if (e.target.matches('#mform [name="district"]')) refreshAddrLists();
     if (e.target.matches('#mform [name="tehsil"]')) refreshHospitalSelect();
     if (e.target.id === 'hospSearch') { renderHospResults(); return; }
+    if (e.target.matches('#mform [name="email"], #mform [name="phone"]')) syncLoginDefaults();
+    if (e.target.matches('#f-pUser, #f-pPass')) e.target.dataset.auto = e.target.value ? '0' : '1';
     const s = e.target.closest('[data-list-search]');
     if (s) { listState[s.dataset.listSearch].q = s.value; fillList(s.dataset.listSearch); return; }
     const ei = e.target.closest('[data-e]');

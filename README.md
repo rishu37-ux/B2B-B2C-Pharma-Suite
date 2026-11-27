@@ -36,7 +36,7 @@ Needs Node.js 18 or newer.
 node server.js
 ```
 
-Open http://127.0.0.1:8080. The first time, you create the admin login. Then, when onboarding a chemist (or from **Onboard Chemists → View → Portal login**), create a username and password for them. Chemists sign in at the same address and land on their portal, where they can:
+Open http://127.0.0.1:8080. The first time, you create the admin login. Then, when onboarding a chemist (or from **Onboard Chemists → View → Portal login**), give them a portal login: by default the **login ID is the chemist's email** and the **password is their mobile number**, filled in as you type (you can change both). Because a mobile number is easy for others to know, the chemist is asked to set their own password at first sign-in, and the portal shows nothing else until they do (you can untick this). Chemists sign in at the same address and land on their portal, where they can:
 
 - see every item with its availability, rate and MRP, and filter by company, category, type and availability
 - order any item — also items that are not in stock — and request items that are not in the list

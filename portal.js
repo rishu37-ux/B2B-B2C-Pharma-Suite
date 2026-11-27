@@ -24,6 +24,7 @@
     const r = await fetch(url, { method, cache: 'no-store', headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined });
     if (r.status === 401) { location.href = 'login.html'; throw new Error('Please sign in again.'); }
     const data = await r.json().catch(() => ({}));
+    if (r.status === 403 && data.mustChange) { forcePassword(); throw new Error(data.error); }
     if (!r.ok) throw new Error(data.error || `Server error (${r.status})`);
     return data;
   }
@@ -136,12 +137,26 @@
   }
   const refreshList = () => { const el = $('#catList'); if (!el) return render(); const pos = $('#fq') === document.activeElement; render(); if (pos) { const q = $('#fq'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); } };
 
-  function openModal(title, body, foot = '') {
+  let forced = false;
+  function openModal(title, body, foot = '', noClose = false) {
     $('#modalTitle').textContent = title; $('#modalBody').innerHTML = body;
-    $('#modalFoot').innerHTML = foot + '<button type="button" class="btn" data-close>Close</button>';
+    $('#modalFoot').innerHTML = foot + (noClose ? '' : '<button type="button" class="btn" data-close>Close</button>');
+    $('#modalClose').style.display = noClose ? 'none' : '';
     $('#modalBack').classList.add('open');
   }
-  const closeModal = () => $('#modalBack').classList.remove('open');
+  const closeModal = () => { if (!forced) $('#modalBack').classList.remove('open'); };
+  const pwForm = first => `<form id="pwForm" class="form-grid" novalidate>
+        ${first ? '<div class="field full small muted">Welcome! For your security, choose your own password now. Your current password is the one your distributor gave you (usually your mobile number).</div>' : ''}
+        <div class="field full"><label for="pwCur">Current password</label><input id="pwCur" type="password" autocomplete="current-password"></div>
+        <div class="field full"><label for="pwNew">New password (8+ characters)</label><input id="pwNew" type="password" autocomplete="new-password"></div>
+        <div class="field full"><label for="pwNew2">Repeat new password</label><input id="pwNew2" type="password" autocomplete="new-password"></div></form>`;
+  // First sign-in with a password set by the distributor: nothing else works until the chemist sets their own
+  function forcePassword() {
+    forced = true;
+    $('.modal').classList.add('sm'); $('.modal').classList.remove('lg');
+    openModal('Set your own password', pwForm(true), '<button type="button" class="btn" id="logoutBtn2">Sign out</button><button type="button" class="btn primary" id="pwSave">Save password</button>', true);
+    setTimeout(() => $('#pwCur')?.focus(), 50);
+  }
 
   // ---------- Events ----------
   document.addEventListener('click', async e => {
@@ -184,20 +199,20 @@
       return;
     }
     if (t.closest('[data-close]') || t.id === 'modalBack' || t.closest('#modalClose')) { closeModal(); return; }
-    if (t.closest('#logoutBtn')) { try { await api('POST', 'api/logout', {}); } catch { /* signed out anyway */ } location.href = 'login.html'; return; }
+    if (t.closest('#logoutBtn, #logoutBtn2')) { try { await api('POST', 'api/logout', {}); } catch { /* signed out anyway */ } location.href = 'login.html'; return; }
     if (t.closest('#pwBtn')) {
       $('.modal').classList.add('sm'); $('.modal').classList.remove('lg');
-      openModal('Change your password', `<form id="pwForm" class="form-grid" novalidate>
-        <div class="field full"><label for="pwCur">Current password</label><input id="pwCur" type="password" autocomplete="current-password"></div>
-        <div class="field full"><label for="pwNew">New password (8+ characters)</label><input id="pwNew" type="password" autocomplete="new-password"></div>
-        <div class="field full"><label for="pwNew2">Repeat new password</label><input id="pwNew2" type="password" autocomplete="new-password"></div></form>`,
-        '<button type="button" class="btn primary" id="pwSave">Change password</button>');
+      openModal('Change your password', pwForm(false), '<button type="button" class="btn primary" id="pwSave">Change password</button>');
       return;
     }
     if (t.closest('#pwSave')) {
       const cur = $('#pwCur').value, nw = $('#pwNew').value;
       if (nw !== $('#pwNew2').value) { toast('The new passwords do not match.'); return; }
-      try { await api('POST', 'api/password', { current: cur, password: nw }); closeModal(); toast('Password changed.'); } catch (err) { toast(err.message); }
+      try {
+        await api('POST', 'api/password', { current: cur, password: nw });
+        if (forced) { location.reload(); return; }
+        closeModal(); toast('Password changed.');
+      } catch (err) { toast(err.message); }
     }
   });
   document.addEventListener('input', e => {
@@ -221,7 +236,10 @@
     toast(`${name} added to cart as a request.`);
     e.target.reset(); $('#rQty').value = 1;
   });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Enter' && e.target.closest('#pwForm')) { e.preventDefault(); $('#pwSave')?.click(); }
+  });
 
   async function loadMine() {
     try {
@@ -234,6 +252,11 @@
     try {
       me = await api('GET', 'api/me');
       if (me.role !== 'chemist') { location.href = me.role === 'admin' ? './' : 'login.html'; return; }
+      if (me.mustChange) {
+        $('#firmName').textContent = me.firm || 'Distributor'; $('#chemName').textContent = me.name; $('#chemUser').textContent = me.username;
+        $('#content').innerHTML = '<div class="empty">Set your own password to continue.</div>';
+        forcePassword(); return;
+      }
       cat = await api('GET', 'api/portal/catalogue');
     } catch (err) { $('#content').innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
     const firm = cat.firm?.name || me.firm || 'Distributor';
