@@ -18,7 +18,9 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 
 Lists have filters for company/brand, category, type/form, item, supplier and month. Stock, products and chemists can be ticked to set the same CD%, TD% or GST% on many rows at once; the bill entry grid and the sale bill editor have the same option for their lines.
 
-Drug licences and GST certificates can be read with AI: in the chemist, supplier or Settings (your own firm) form, choose the licence photos/PDFs and click **Read with AI** — the licence numbers, GSTIN, validity, name and address are filled in for you to check. AI reading uses your Anthropic API key, saved in Settings in that browser.
+Chemists, suppliers and your own firm have drug licence 1 & 2, FSSAI licence number, GSTIN and validity dates, and an address entered district first: district → tehsil → sub-tehsil → village/locality → house/street → PIN, plus the nearby hospital. Suggestions come from the names already used in that district, and lists can be filtered by district and tehsil.
+
+Drug licences, FSSAI licences and GST certificates can be read with AI: in the chemist, supplier or Settings (your own firm) form, choose the photos/PDFs and click **Read with AI** — the licence numbers, GSTIN, validity dates, name and address are filled in for you to check. AI reading uses your Anthropic API key, saved in Settings in that browser.
 
 ## Run with the server (logins and chemist portal)
 

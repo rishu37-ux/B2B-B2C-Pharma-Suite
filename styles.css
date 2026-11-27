@@ -469,3 +469,7 @@ td a:hover { text-decoration: underline; }
   .g-4 { grid-template-columns: 1fr; }
   .page-title { font-size: 21px; }
 }
+
+/* Form section headings */
+.form-sec { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--gold); font-weight: 600; padding-top: 6px; border-top: 1px solid var(--line-2); margin-top: 2px; }
+.form-grid > .form-sec:first-child { border-top: 0; padding-top: 0; }

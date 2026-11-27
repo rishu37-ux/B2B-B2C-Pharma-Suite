@@ -87,6 +87,10 @@
     return { gross: round2(gross), cd: round2(cd), td: round2(td), taxable: round2(taxable), cgst: round2(gst / 2), sgst: round2(gst / 2), gst: round2(gst), roundOff: round2(net - pre), total: net, slabs };
   }
 
+  // Towns used in the sample data → district
+  const TOWN_DISTRICT = { Ghumarwin: 'Bilaspur', Bilaspur: 'Bilaspur', Hamirpur: 'Hamirpur', Mandi: 'Mandi', Barsar: 'Hamirpur', Bhoranj: 'Hamirpur', Una: 'Una', Sundernagar: 'Mandi', Dharamshala: 'Kangra', Baddi: 'Solan' };
+  const seedAddr = town => ({ district: TOWN_DISTRICT[town] || '', tehsil: town, subTehsil: '', locality: town, address: '', pincode: '', hospital: '', city: town });
+
   // ---------- Sample data ----------
   function seed() {
     const r = rng(20261127);
@@ -112,7 +116,7 @@
       ['Baddi Pharma Traders', 'Naveen Sharma', 'Baddi', 45],
       ['Kangra Drug House', 'Pankaj Katoch', 'Dharamshala', 30],
       ['Una Medicos Wholesale', 'Sunita Rana', 'Una', 30],
-    ].map((s, i) => ({ id: 'S' + String(i + 1).padStart(3, '0'), name: s[0], contact: s[1], city: s[2], phone: phone(), gstin: gstin(), dl1: `HP-20B-${digits(5)}`, dl2: `HP-21B-${digits(5)}`, dlValid: iso(TODAY.getTime() + ri(120, 1500) * DAY), terms: s[3] }));
+    ].map((s, i) => ({ id: 'S' + String(i + 1).padStart(3, '0'), name: s[0], contact: s[1], ...seedAddr(s[2]), phone: phone(), fssai: '1' + digits(13), fssaiValid: iso(TODAY.getTime() + ri(200, 1500) * DAY), gstin: gstin(), dl1: `HP-20B-${digits(5)}`, dl2: `HP-21B-${digits(5)}`, dlValid: iso(TODAY.getTime() + ri(120, 1500) * DAY), terms: s[3] }));
 
     // Items as printed on the sample sale bill: name, company, mfg, pack, hsn, batch, exp, qty, rate, mrp, gst, category, form
     const BILL = [
@@ -175,7 +179,7 @@
       ['Thakur Medical Agency', 'Ravi Thakur', 'Sundernagar'],
       ['Kailash Chemist', 'Pritam Singh', 'Ghumarwin'],
     ].map((c, i) => ({
-      id: 'C' + String(i + 1).padStart(3, '0'), name: c[0], owner: c[1], city: c[2], phone: phone(),
+      id: 'C' + String(i + 1).padStart(3, '0'), name: c[0], owner: c[1], ...seedAddr(c[2]), phone: phone(), ...(i % 3 === 0 ? { fssai: '2' + digits(13), fssaiValid: iso(TODAY.getTime() + ri(90, 1500) * DAY) } : {}),
       dl1: `HP-${c[2].slice(0, 3).toUpperCase()}-20-${digits(5)}`, dl2: `HP-${c[2].slice(0, 3).toUpperCase()}-21-${digits(5)}`, dlValid: iso(TODAY.getTime() + (i === 4 ? 25 : ri(120, 1500)) * DAY), gstin: gstin(),
       creditLimit: pick([100000, 150000, 200000, 300000]), terms: pick([14, 21, 30]), cd: 2, td: 0,
       joined: iso(TODAY.getTime() - ri(200, 900) * DAY), status: i === 9 ? 'Pending verification' : i === 6 ? 'On hold' : 'Active',
@@ -244,7 +248,7 @@
     }
 
     const settings = {
-      firm: { name: 'Shankar Medical Store', address: 'Bajoha, Teh. Ghumarwin, Bilaspur, H.P. - 174021', phone: '01978-315172', gstin: '02AFNFS3835D1Z4', dl1: '20B 20160', dl2: '21B 20161' },
+      firm: { name: 'Shankar Medical Store', district: 'Bilaspur', tehsil: 'Ghumarwin', subTehsil: '', locality: 'Bajoha', address: '', pincode: '174021', hospital: '', city: 'Bajoha', phone: '01978-315172', gstin: '02AFNFS3835D1Z4', dl1: '20B 20160', dl2: '21B 20161' },
       defaultCd: 2, individualTerms: 0,
     };
     return { version: 2, settings, companies, categories, forms, products, batches, chemists, suppliers, sales, pos, grns, pinvoices };
@@ -639,8 +643,8 @@
     if (openPo.length) alerts.push(['info', 'truck', `${openPo.length} purchase orders awaiting delivery`, `Worth ${compact(openPo.reduce((a, p) => a + p.total, 0))}`, 'orders']);
     const dueSoon = db.pinvoices.filter(p => piStatus(p) !== 'Paid' && daysFrom(p.due) <= 7);
     if (dueSoon.length) alerts.push(['warn', 'file', `${dueSoon.length} supplier bills due within 7 days`, `${compact(dueSoon.reduce((a, p) => a + balance(p), 0))} payable`, 'invoices']);
-    const lic = [[db.settings.firm.name + ' (your firm)', db.settings.firm.dlValid], ...db.chemists.map(c => [c.name, c.dlValid]), ...db.suppliers.map(s => [s.name, s.dlValid])].filter(([, v]) => v && daysFrom(v) <= 60);
-    if (lic.length) alerts.push(['warn', 'file', `${lic.length} drug licence${lic.length === 1 ? '' : 's'} expired or expiring within 60 days`, lic.map(x => x[0]).join(', '), 'chemists']);
+    const lic = [[db.settings.firm.name + ' (your firm)', db.settings.firm], ...db.chemists.map(c => [c.name, c]), ...db.suppliers.map(s => [s.name, s])].filter(([, x]) => soon(x.dlValid) || soon(x.fssaiValid));
+    if (lic.length) alerts.push(['warn', 'file', `${lic.length} drug/FSSAI licence${lic.length === 1 ? '' : 's'} expired or expiring within 60 days`, lic.map(x => x[0]).join(', '), 'chemists']);
     const newOrders = chemOrders.filter(o => o.status === 'New');
     if (newOrders.length) alerts.unshift(['info', 'cart', `${newOrders.length} new order${newOrders.length === 1 ? '' : 's'} from chemists`, newOrders.map(o => chem(o.chemistId)?.name || o.chemistId).join(', '), 'chemorders']);
     const pend = db.chemists.filter(c => c.status === 'Pending verification');
@@ -699,7 +703,7 @@
         key: 'sales', title: 'Sale bills',
         actions: actBtn('new-sale', '', icon('plus') + 'New sale', 'primary'),
         tabs: [{ id: 'all', label: 'All' }, { id: 'chem', label: 'Chemists', filter: s => s.party.type === 'chemist' }, { id: 'ind', label: 'Individuals', filter: s => s.party.type === 'individual' }, ...['Due', 'Overdue'].map(s => ({ id: s, label: s, filter: x => saleStatus(x) === s }))],
-        filters: [...prodFilters(s => s.lines.map(l => prod(l.productId))), { k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (s, v) => s.party.chemistId === v }, monthFilter(db.sales.map(s => s.date), s => s.date)],
+        filters: [...prodFilters(s => s.lines.map(l => prod(l.productId))), { k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (s, v) => s.party.chemistId === v }, { k: 'district', label: 'District', options: usedValues('district').map(v => [v, v]), test: (s, v) => chem(s.party.chemistId)?.district === v }, monthFilter(db.sales.map(s => s.date), s => s.date)],
         rows: () => [...db.sales].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
         text: s => [s.no, partyName(s), partyCity(s), ...s.lines.map(l => prod(l.productId)?.name + ' ' + l.batch)].join(' '),
         columns: [
@@ -735,10 +739,11 @@
         tabs: [{ id: 'all', label: 'All' }, ...['Active', 'Pending verification', 'On hold'].map(s => ({ id: s, label: s === 'Pending verification' ? 'Pending' : s, filter: c => c.status === s }))],
         rows: () => db.chemists,
         select: { id: c => c.id, fields: PCT_FIELDS, apply: (items, v) => { items.forEach(c => Object.assign(c, v)); return `Default ${Object.keys(v).map(k => k.toUpperCase() + ' ' + dec(v[k]) + '%').join(', ')} set for ${items.length} chemist(s). Used on their new bills.`; } },
-        text: c => [c.id, c.name, c.owner, c.city, c.phone, c.dl1, c.dl2, c.gstin].join(' '),
+        text: c => [c.id, c.name, c.owner, addrText(c), c.hospital, c.phone, c.dl1, c.dl2, c.fssai, c.gstin].join(' '),
+        filters: [{ k: 'district', label: 'District', options: usedValues('district').map(v => [v, v]), test: (c, v) => c.district === v }, { k: 'tehsil', label: 'Tehsil', options: usedValues('tehsil').map(v => [v, v]), test: (c, v) => c.tehsil === v }],
         columns: [
           { h: 'Chemist', c: c => `<span class="strong">${esc(c.name)}</span><div class="small muted">${esc(c.owner)} · ${esc(c.id)}</div>` },
-          { h: 'City', c: c => esc(c.city) },
+          { h: 'Area', c: c => `${esc(c.locality || c.city || '—')}<div class="small muted">${esc([c.tehsil && 'Teh. ' + c.tehsil, c.district].filter(Boolean).join(' · '))}</div>` },
           { h: 'Phone', c: c => esc(c.phone) },
           { h: 'Drug licence 1 / 2', c: c => licCell(c) },
           { h: 'GSTIN', c: c => `<span class="small">${esc(c.gstin || '—')}</span>` },
@@ -1034,7 +1039,7 @@
       <section class="card">
         <div class="card-head"><button type="button" class="btn sm ghost" data-nav="suppliers">← Suppliers</button><div class="folder-ic sm">${icon('folder')}</div><h2 class="card-title">${esc(s.name)}</h2><span class="hint">${esc(s.id)}</span><div class="spacer"></div>
           <div class="toolbar">${actBtn('edit-supplier', s.id, 'Edit supplier', 'ghost')}${actBtn('new-po', '', icon('plus') + 'Purchase order')}<button type="button" class="btn sm primary" data-act="upload-for" data-id="${esc(s.id)}">${icon('upload')}Upload bill</button></div></div>
-        <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['City', esc(s.city || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence 1', esc(s.dl1 || '—')], ['Drug licence 2', esc(s.dl2 || '—')], ['Licence valid upto', licValid(s)], ['Terms', (s.terms ?? 30) + ' days'], ['Licence copies', licDocsBtn('supplier', s.id)]])}</div>
+        <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['Address', esc(addrText(s) || '—')], ['Nearby hospital', esc(s.hospital || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence 1', esc(s.dl1 || '—')], ['Drug licence 2', esc(s.dl2 || '—')], ['Drug licence valid upto', licValid(s)], ['FSSAI no.', esc(s.fssai || '—')], ['FSSAI valid upto', fssaiValid(s)], ['Terms', (s.terms ?? 30) + ' days'], ['Licence copies', licDocsBtn('supplier', s.id)]])}</div>
       </section>
       <div class="grid g-4">
         ${kpi('Purchase bills', qty(db.pinvoices.filter(p => p.supplierId === s.id).length), `${db.grns.filter(g => g.supplierId === s.id && !g.invoiced).length} receipts awaiting a bill`)}
@@ -1093,12 +1098,12 @@
       key: 'suppliers', title: 'Suppliers',
       actions: actBtn('new-supplier', '', icon('plus') + 'Add supplier', 'primary'),
       rows: () => db.suppliers,
-      text: s => [s.id, s.name, s.contact, s.city, s.gstin, s.dl1, s.dl2, s.phone].join(' '),
+      text: s => [s.id, s.name, s.contact, addrText(s), s.gstin, s.dl1, s.dl2, s.fssai, s.phone].join(' '),
       columns: [
         { h: 'Supplier', c: s => `<a href="#" data-nav="folder/${esc(s.id)}" class="folder-link">${icon('folder')}<span class="strong">${esc(s.name)}</span></a><div class="small muted">${esc(s.contact || '—')} · ${esc(s.id)}</div>` },
         { h: 'Bills', r: 1, c: s => db.pinvoices.filter(p => p.supplierId === s.id).length },
         { h: 'Last purchase', c: s => lastPurchase(s.id) ? fmtDate(lastPurchase(s.id)) : '—' },
-        { h: 'City', c: s => esc(s.city || '—') },
+        { h: 'Area', c: s => `${esc(s.locality || s.city || '—')}<div class="small muted">${esc(s.district || '')}</div>` },
         { h: 'Phone', c: s => esc(s.phone || '—') },
         { h: 'GSTIN', c: s => `<span class="small">${esc(s.gstin || '—')}</span>` },
         { h: 'Drug licence 1 / 2', c: s => licCell(s) },
@@ -1441,22 +1446,28 @@
   });
   const LIC_SCHEMA = {
     type: 'object', additionalProperties: false,
-    required: ['firm_name', 'proprietor_name', 'address', 'city', 'phone', 'gstin', 'dl_form_20', 'dl_form_21', 'valid_upto'],
+    required: ['firm_name', 'proprietor_name', 'address', 'locality', 'sub_tehsil', 'tehsil', 'district', 'pincode', 'phone', 'gstin', 'dl_form_20', 'dl_form_21', 'valid_upto', 'fssai_no', 'fssai_valid_upto'],
     properties: {
-      firm_name: strS, proprietor_name: strS, address: strS, city: strS, phone: strS, gstin: strS,
+      firm_name: strS, proprietor_name: strS, phone: strS, gstin: strS,
+      address: { type: 'string', description: 'House/shop number, street and landmark only' },
+      locality: { type: 'string', description: 'Village, town or locality' }, sub_tehsil: strS, tehsil: strS, district: strS,
+      pincode: { type: 'string', description: '6-digit PIN code' },
+      fssai_no: { type: 'string', description: '14-digit FSSAI licence or registration number' },
+      fssai_valid_upto: { type: 'string', description: 'YYYY-MM-DD, or empty if not printed' },
       dl_form_20: { type: 'string', description: 'Licence number on Form 20 / 20B (or 20C / 20F)' },
       dl_form_21: { type: 'string', description: 'Licence number on Form 21 / 21B (or 21C)' },
       valid_upto: { type: 'string', description: 'YYYY-MM-DD, or empty if not printed' },
     },
   };
-  const LIC_PROMPT = `These files are documents of an Indian pharmacy business: drug licence certificates (Form 20 and 21 for retail, 20B and 21B for wholesale, or similar forms) and/or a GST registration certificate. Read them and return the business details.
+  const LIC_PROMPT = `These files are documents of an Indian pharmacy business: drug licence certificates (Form 20 and 21 for retail, 20B and 21B for wholesale, or similar forms), an FSSAI food licence or registration certificate, and/or a GST registration certificate. Read them and return the business details.
 
 - firm_name: the name of the firm or shop. On a GST certificate prefer the trade name; otherwise use the legal name.
 - proprietor_name: the proprietor, partner or registered pharmacist.
-- address: the full premises address. city: the town or city.
+- Split the premises address: address = house/shop number, street and landmark; locality = village, town or locality; sub_tehsil, tehsil and district as printed ("Teh." means tehsil, "Distt." means district); pincode = the 6-digit PIN.
 - gstin: the 15-character GSTIN.
 - dl_form_20: the licence number granted on Form 20 or 20B (or 20C / 20F). dl_form_21: the licence number on Form 21 or 21B (or 21C). If one certificate shows both numbers, split them.
-- valid_upto: the licence validity or expiry date as YYYY-MM-DD. If the licences show different dates, use the earliest. Indian documents print dates as DD/MM/YYYY.
+- fssai_no: the 14-digit FSSAI licence or registration number. fssai_valid_upto: its validity date as YYYY-MM-DD.
+- valid_upto: the drug licence validity or expiry date as YYYY-MM-DD. If the licences show different dates, use the earliest. Indian documents print dates as DD/MM/YYYY.
 - phone: a phone number, if printed.
 
 Copy text exactly as printed. Use an empty string for anything that is not printed. Do not guess.`;
@@ -1611,24 +1622,72 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   const miniTable = (cols, rows) => `<div class="lines"><div class="table-wrap">${table(cols, rows)}</div></div>`;
   const GST_OPTS = [[0, '0%'], [5, '5%'], [12, '12%'], [18, '18%'], [28, '28%']];
 
-  // ---------- Licences (drug licence 1 & 2, GSTIN, validity) ----------
+  // ---------- Address (district first, then tehsil, sub-tehsil, village/locality) ----------
+  const HP_DISTRICTS = ['Bilaspur', 'Chamba', 'Hamirpur', 'Kangra', 'Kinnaur', 'Kullu', 'Lahaul and Spiti', 'Mandi', 'Shimla', 'Sirmaur', 'Solan', 'Una'];
+  const addrHolders = () => [db.settings.firm, ...db.chemists, ...db.suppliers];
+  const placeCity = x => x.locality || x.tehsil || x.district || '';
+  const addrText = x => {
+    if (!x) return '';
+    const parts = [x.address, x.locality, x.subTehsil && `Sub-Teh. ${x.subTehsil}`, x.tehsil && `Teh. ${x.tehsil}`, x.district && `Distt. ${x.district}`].filter(Boolean);
+    if (!x.district && !x.tehsil && !x.locality && x.city && !String(x.address || '').includes(x.city)) parts.push(x.city);
+    return parts.join(', ') + (x.pincode ? ` - ${x.pincode}` : '');
+  };
+  const usedValues = (key, district) => [...new Set(addrHolders().filter(h => !district || h.district === district).map(h => h[key]).filter(Boolean))].sort();
+  const dlOptions = vals => vals.map(v => `<option value="${esc(v)}">`).join('');
+  const addrFields = (x, required) => `
+    <div class="field full form-sec">Address</div>
+    ${field('District', 'district', { value: x.district || '', required, attrs: 'list="dl-a-district" autocomplete="off"' })}
+    ${field('Tehsil', 'tehsil', { value: x.tehsil || '', required, attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+    ${field('Sub-tehsil', 'subTehsil', { value: x.subTehsil || '', attrs: 'list="dl-a-subTehsil" autocomplete="off"' })}
+    ${field('Village / locality', 'locality', { value: x.locality || '', required, attrs: 'list="dl-a-locality" autocomplete="off"' })}
+    ${field('House / shop no., street, landmark', 'address', { value: x.address || '', full: true })}
+    ${field('PIN code', 'pincode', { value: x.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6" title="6-digit PIN code"' })}
+    ${field('Nearby hospital', 'hospital', { value: x.hospital || '', attrs: 'list="dl-a-hospital" autocomplete="off" placeholder="e.g. Civil Hospital Ghumarwin"' })}
+    <datalist id="dl-a-district">${dlOptions([...new Set([...HP_DISTRICTS, ...usedValues('district')])].sort())}</datalist>
+    ${['tehsil', 'subTehsil', 'locality', 'hospital'].map(k => `<datalist id="dl-a-${k}">${dlOptions(usedValues(k, x.district))}</datalist>`).join('')}`;
+  // When the district changes, suggest only that district's tehsils, villages and hospitals
+  function refreshAddrLists() {
+    const d = $('#mform [name="district"]')?.value.trim();
+    ['tehsil', 'subTehsil', 'locality', 'hospital'].forEach(k => { const el = $(`#dl-a-${k}`); if (el) el.innerHTML = dlOptions(usedValues(k, d)); });
+  }
+  const readAddr = d => {
+    const a = { district: (d.district || '').trim(), tehsil: (d.tehsil || '').trim(), subTehsil: (d.subTehsil || '').trim(), locality: (d.locality || '').trim(), address: (d.address || '').trim(), pincode: (d.pincode || '').trim(), hospital: (d.hospital || '').trim() };
+    a.city = placeCity(a);
+    return a;
+  };
+  const addrOk = d => {
+    if (d.pincode && !/^[1-9]\d{5}$/.test(String(d.pincode).trim())) { toast('PIN code must be 6 digits.'); return false; }
+    if (d.fssai && !/^\d{14}$/.test(String(d.fssai).trim())) { toast('FSSAI licence number must be 14 digits.'); return false; }
+    return true;
+  };
+
+  // ---------- Licences (drug licence 1 & 2, GSTIN, FSSAI, validity) ----------
   const dlText = x => [x?.dl1, x?.dl2].filter(Boolean).join(', ');
   const licValid = x => {
     if (!x?.dlValid) return '—';
     const d = daysFrom(x.dlValid);
     return `${fmtDate(x.dlValid)}${d < 0 ? ' ' + pill('Expired') : d <= 60 ? ' ' + pill('Near expiry') : ''}`;
   };
-  const licCell = x => `<span class="small">${esc(x.dl1 || '—')}<br>${esc(x.dl2 || '')}</span>${x.dlValid && daysFrom(x.dlValid) <= 60 ? `<div>${pill(daysFrom(x.dlValid) < 0 ? 'Expired' : 'Near expiry')}</div>` : ''}`;
+  const fssaiValid = x => {
+    if (!x?.fssaiValid) return '—';
+    const d = daysFrom(x.fssaiValid);
+    return `${fmtDate(x.fssaiValid)}${d < 0 ? ' ' + pill('Expired') : d <= 60 ? ' ' + pill('Near expiry') : ''}`;
+  };
+  const soon = v => v && daysFrom(v) <= 60;
+  const licCell = x => `<span class="small">${esc(x.dl1 || '—')}<br>${esc(x.dl2 || '')}${x.fssai ? `<br><span class="muted">FSSAI</span> ${esc(x.fssai)}` : ''}</span>${soon(x.dlValid) || soon(x.fssaiValid) ? `<div>${pill([x.dlValid, x.fssaiValid].some(v => v && daysFrom(v) < 0) ? 'Expired' : 'Near expiry')}</div>` : ''}`;
   const licFields = (x, required) => `
+    <div class="field full form-sec">Licences</div>
     ${field('GSTIN', 'gstin', { value: x.gstin || '', attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN, e.g. 02ABCDE1234F1Z5" style="text-transform:uppercase"` })}
     ${field('Drug licence 1 (Form 20 / 20B)', 'dl1', { value: x.dl1 || '', required })}
     ${field('Drug licence 2 (Form 21 / 21B)', 'dl2', { value: x.dl2 || '' })}
-    ${field('Licence valid upto', 'dlValid', { type: 'date', value: x.dlValid || '' })}`;
-  const readLic = d => ({ gstin: (d.gstin || '').trim().toUpperCase(), dl1: (d.dl1 || '').trim(), dl2: (d.dl2 || '').trim(), dlValid: d.dlValid || '' });
+    ${field('Drug licence valid upto', 'dlValid', { type: 'date', value: x.dlValid || '' })}
+    ${field('FSSAI licence / registration no.', 'fssai', { value: x.fssai || '', attrs: 'inputmode="numeric" maxlength="14" pattern="[0-9]{14}" title="14-digit FSSAI number"' })}
+    ${field('FSSAI valid upto', 'fssaiValid', { type: 'date', value: x.fssaiValid || '' })}`;
+  const readLic = d => ({ gstin: (d.gstin || '').trim().toUpperCase(), dl1: (d.dl1 || '').trim(), dl2: (d.dl2 || '').trim(), dlValid: d.dlValid || '', fssai: (d.fssai || '').trim(), fssaiValid: d.fssaiValid || '' });
   const licReadBox = kind => `<div class="lic-box">
       <div class="cta-icon">${icon('spark')}</div>
-      <div style="flex:1;min-width:200px"><div class="strong">Fill from licence / GST certificate</div>
-        <div class="small muted" id="licNote">Add photos or PDFs of the drug licences and GST certificate. AI reads them and fills the details below — check them before saving. The files are kept with this record.</div></div>
+      <div style="flex:1;min-width:200px"><div class="strong">Fill from drug licence / FSSAI / GST certificate</div>
+        <div class="small muted" id="licNote">Add photos or PDFs of the drug licences, FSSAI licence and GST certificate. AI reads them and fills the details below — check them before saving. The files are kept with this record.</div></div>
       <label class="btn sm">${icon('clip')}Choose files<input type="file" id="licFiles" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden></label>
       <button type="button" class="btn sm primary" data-lic-read="${kind}">${icon('spark')}Read with AI</button>
     </div>`;
@@ -1649,7 +1708,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       const x = await extractLicence(files);
       const phone = String(x.phone || '').replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '');
       const valid = /^\d{4}-\d{2}-\d{2}$/.test(x.valid_upto || '') ? x.valid_upto : '';
-      const values = { name: x.firm_name, owner: x.proprietor_name, contact: x.proprietor_name, address: x.address, city: x.city, gstin: String(x.gstin || '').toUpperCase(), dl1: x.dl_form_20, dl2: x.dl_form_21, dlValid: valid, phone };
+      const fValid = /^\d{4}-\d{2}-\d{2}$/.test(x.fssai_valid_upto || '') ? x.fssai_valid_upto : '';
+      const values = { name: x.firm_name, owner: x.proprietor_name, contact: x.proprietor_name, district: x.district, tehsil: x.tehsil, subTehsil: x.sub_tehsil, locality: x.locality, address: x.address, pincode: String(x.pincode || '').replace(/\D/g, ''), gstin: String(x.gstin || '').toUpperCase(), dl1: x.dl_form_20, dl2: x.dl_form_21, dlValid: valid, fssai: String(x.fssai_no || '').replace(/\s/g, ''), fssaiValid: fValid, phone };
       const filled = [];
       Object.entries(values).forEach(([name, v]) => {
         const el = $(`#mform [name="${name}"]`); v = String(v || '').trim();
@@ -1658,6 +1718,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         el.value = v; el.classList.add('filled'); filled.push(el.closest('.field')?.querySelector('label')?.textContent.replace(' *', '') || name);
       });
       const note = $('#licNote');
+      refreshAddrLists();
       if (note) note.textContent = filled.length ? `Filled from ${files.map(f => f.name).join(', ')}: ${filled.join(', ')}. Check the highlighted boxes, then save.` : 'Nothing could be read from these files. Enter the details by hand.';
       toast(filled.length ? `${filled.length} details filled — check them before saving.` : 'No details found in these files.');
     } catch (err) {
@@ -1673,6 +1734,22 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       delete x.dl;
     };
     (d.chemists || []).forEach(fix); (d.suppliers || []).forEach(fix);
+    // Old single-line addresses → district / tehsil / locality
+    const splitAddr = x => {
+      if (!x || x.district || x.tehsil || x.locality) return;
+      const a = String(x.address || '');
+      const teh = /Teh\.?\s*([^,]+)/i.exec(a)?.[1]?.trim() || '';
+      const pin = /\b([1-9]\d{5})\b/.exec(a)?.[1] || '';
+      const dist = HP_DISTRICTS.find(n => new RegExp(`\\b${n}\\b`, 'i').test(a)) || TOWN_DISTRICT[x.city] || TOWN_DISTRICT[teh] || '';
+      const first = a.split(',')[0].trim();
+      Object.assign(x, {
+        district: dist, tehsil: teh || (x.city && x.city !== dist ? x.city : ''), subTehsil: '',
+        locality: (teh && first && !/teh/i.test(first) ? first : '') || x.city || '', pincode: x.pincode || pin, hospital: x.hospital || '',
+        address: teh || pin ? '' : a,
+      });
+      x.city = placeCity(x) || x.city || '';
+    };
+    [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(splitAddr);
     return d;
   }
 
@@ -1683,7 +1760,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     return `<div class="bill">
       <div class="bill-title">${title}</div>
       <div class="bill-head">
-        <div><div class="bill-firm">${esc(f.name)}</div><div>${esc(f.address)}</div><div>Ph: ${esc(f.phone)}</div><div>GST NO: ${esc(f.gstin)}</div><div>DL NO: ${esc(f.dl1)}${f.dl2 ? ', ' + esc(f.dl2) : ''}</div></div>
+        <div><div class="bill-firm">${esc(f.name)}</div><div>${esc(addrText(f))}</div><div>Ph: ${esc(f.phone)}</div><div>GST NO: ${esc(f.gstin)}</div><div>DL NO: ${esc(f.dl1)}${f.dl2 ? ', ' + esc(f.dl2) : ''}</div>${f.fssai ? `<div>FSSAI NO: ${esc(f.fssai)}</div>` : ''}</div>
         <div><div><b>Bill no:</b> ${esc(no)}</div><div><b>Date:</b> ${fmtDate(date)}</div>${extraHead}</div>
         <div>${partyHtml}</div>
       </div>
@@ -1958,7 +2035,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     const s = db.sales.find(x => x.no === no); if (!s) return;
     const c = s.party.type === 'chemist' ? chem(s.party.chemistId) : null;
     const partyHtml = c
-      ? `<div class="strong">M/S: ${esc(c.name)}</div><div>${esc(c.city)}</div><div>DL NO: ${esc(dlText(c) || '—')}</div><div>GST NO: ${esc(c.gstin || '—')}</div><div>Mob: ${esc(c.phone)}</div>`
+      ? `<div class="strong">M/S: ${esc(c.name)}</div><div>${esc(addrText(c))}</div><div>DL NO: ${esc(dlText(c) || '—')}</div>${c.fssai ? `<div>FSSAI NO: ${esc(c.fssai)}</div>` : ''}<div>GST NO: ${esc(c.gstin || '—')}</div><div>Mob: ${esc(c.phone)}</div>`
       : `<div class="strong">${esc(s.party.name)}</div><div>Mob: ${esc(s.party.phone || '—')}</div><div class="small muted">Individual customer</div>`;
     openModal({
       title: `Sale bill ${s.no}`, size: 'xl',
@@ -2122,15 +2199,15 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ${field('Firm name', 'name', { value: c.name || '', required: true })}
       ${field('Owner / pharmacist', 'owner', { value: c.owner || '', required: true })}
       ${field('Mobile', 'phone', { type: 'tel', value: c.phone || '', required: true, attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
-      ${field('City', 'city', { value: c.city || '', required: true })}
+      ${addrFields(c, true)}
       ${licFields(c, true)}
+      <div class="field full form-sec">Credit &amp; discount</div>
       ${field('Credit limit (₹)', 'creditLimit', { type: 'number', value: c.creditLimit ?? 100000, required: true, attrs: numAttrs('1') })}
       ${field('Payment terms (days)', 'terms', { type: 'number', value: c.terms ?? 14, required: true, attrs: numAttrs('1') })}
       ${field('Default CD %', 'cd', { type: 'number', value: c.cd ?? db.settings.defaultCd ?? 0, attrs: numAttrs() })}
       ${field('Default TD %', 'td', { type: 'number', value: c.td ?? 0, attrs: numAttrs() })}
-      ${field('Address', 'address', { value: c.address || '', full: true })}
     </div>`;
-  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, city: d.city.trim(), ...readLic(d), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td), address: d.address });
+  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, ...readAddr(d), ...readLic(d), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td) });
   // Portal login section inside the chemist form: optional when onboarding, edits the login when it exists
   const chemistPortalBlock = c => !SERVER ? '' : `<label class="check-line"><input type="checkbox" name="pWant" id="pWant" ${portalLogins[c.id] ? 'checked disabled' : ''}> ${portalLogins[c.id] ? 'Has a portal login' : 'Create a portal login for this chemist'}</label>
     <div id="pBlock" class="${portalLogins[c.id] ? '' : 'hidden'}">${portalFields(c, portalLogins[c.id])}</div>`;
@@ -2155,7 +2232,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       body: chemistForm() + `<div class="form-grid">${field('Status', 'status', { value: 'Pending verification', options: ['Pending verification', 'Active'] })}</div>
         <div class="small muted">Choose “Pending verification” until the drug licence is checked. Only Active chemists can be billed and can sign in to the portal.</div>${chemistPortalBlock({})}`,
       onSubmit: d => {
-        if (d.pWant && !portalFieldsOk(d)) return false;
+        if (!addrOk(d) || (d.pWant && !portalFieldsOk(d))) return false;
         const c = { id: nextId('C', db.chemists), joined: todayIso, status: d.status === 'Active' ? 'Active' : 'Pending verification' };
         readChemist(d, c); db.chemists.push(c); fileLicence('chemist', c.id);
         afterChemistSave(c, d);
@@ -2168,7 +2245,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     const c = chem(id); if (!c) return;
     openModal({
       title: `Edit ${c.name}`, size: 'lg', body: chemistForm(c) + chemistPortalBlock(c),
-      onSubmit: d => { if (!portalFieldsOk({ ...d, _id: c.id })) return false; readChemist(d, c); fileLicence('chemist', c.id); afterChemistSave(c, d); return `${c.name} updated.`; },
+      onSubmit: d => { if (!addrOk(d) || !portalFieldsOk({ ...d, _id: c.id })) return false; readChemist(d, c); fileLicence('chemist', c.id); afterChemistSave(c, d); return `${c.name} updated.`; },
     });
     $('#pWant')?.addEventListener('change', e => $('#pBlock').classList.toggle('hidden', !e.target.checked));
   };
@@ -2186,7 +2263,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     openModal({
       title: c.name, size: 'lg',
       extraFoot: `<div class="foot-left">${btns}<button type="button" class="btn" data-act="edit-chemist" data-id="${c.id}">Edit</button>${SERVER ? `<button type="button" class="btn" data-act="portal-login" data-id="${c.id}">${portalLogins[c.id] ? 'Portal login' : 'Create portal login'}</button>` : ''}</div>`,
-      body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['City', esc(c.city)], ['Drug licence 1', esc(c.dl1 || '—')], ['Drug licence 2', esc(c.dl2 || '—')], ['Licence valid upto', licValid(c)], ['GSTIN', esc(c.gstin || '—')], ['Licence copies', licDocsBtn('chemist', c.id)], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Default CD / TD', `${dec(c.cd)}% / ${dec(c.td)}%`], ...(SERVER ? [['Portal login', portalCell(c)], ['Portal orders', String(chemOrders.filter(o => o.chemistId === c.id).length)]] : [])])}
+      body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['Address', esc(addrText(c) || '—')], ['Nearby hospital', esc(c.hospital || '—')], ['Drug licence 1', esc(c.dl1 || '—')], ['Drug licence 2', esc(c.dl2 || '—')], ['Drug licence valid upto', licValid(c)], ['FSSAI no.', esc(c.fssai || '—')], ['FSSAI valid upto', fssaiValid(c)], ['GSTIN', esc(c.gstin || '—')], ['Licence copies', licDocsBtn('chemist', c.id)], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Default CD / TD', `${dec(c.cd)}% / ${dec(c.td)}%`], ...(SERVER ? [['Portal login', portalCell(c)], ['Portal orders', String(chemOrders.filter(o => o.chemistId === c.id).length)]] : [])])}
         <div class="card-title" style="font-size:15px">Bills (${inv.length})</div>
         ${miniTable([{ h: 'Bill', c: s => s.no }, { h: 'Date', c: s => fmtDate(s.date) }, { h: 'Amount', r: 1, c: s => money(s.total) }, { h: 'Balance', r: 1, c: s => money(balance(s)) }, { h: 'Status', c: s => pill(saleStatus(s)) }], inv.slice(0, 12))}`,
     });
@@ -2227,7 +2304,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         ${o.status !== 'Arranging' ? `<button type="button" class="btn" data-act="order-status" data-id="${esc(o.id)}|Arranging">Mark arranging</button>` : ''}
         ${o.status === 'New' ? `<button type="button" class="btn" data-act="order-status" data-id="${esc(o.id)}|Accepted">Accept</button>` : ''}
         <button type="button" class="btn ghost danger" data-act="order-status" data-id="${esc(o.id)}|Rejected">Reject</button></div>` : '',
-      body: `${detailGrid([['Chemist', esc(c?.name || o.chemistId)], ['City', esc(c?.city || '—')], ['Mobile', esc(c?.phone || '—')], ['Placed', new Date(o.created).toLocaleString('en-IN')], ['Status', pill(o.status)], ['Sale bill', esc(o.saleNo || '—')]])}
+      body: `${detailGrid([['Chemist', esc(c?.name || o.chemistId)], ['Address', esc(addrText(c) || '—')], ['Mobile', esc(c?.phone || '—')], ['Placed', new Date(o.created).toLocaleString('en-IN')], ['Status', pill(o.status)], ['Sale bill', esc(o.saleNo || '—')]])}
         ${o.note ? `<div><div class="small muted">Chemist’s note</div><div>${esc(o.note)}</div></div>` : ''}
         ${miniTable([
           { h: 'Item', c: l => `<span class="strong">${esc(l.name)}</span><div class="small muted">${esc([l.pack, l.company].filter(Boolean).join(' · '))}${l.productId ? '' : ' · not in your product list'}</div>${l.note ? `<div class="small">${esc(l.note)}</div>` : ''}` },
@@ -2330,14 +2407,13 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     ${field('Supplier name', 'name', { value: s.name || '', required: true })}
     ${field('Contact person', 'contact', { value: s.contact || '' })}
     ${field('Mobile', 'phone', { type: 'tel', value: s.phone || '', attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
-    ${field('City', 'city', { value: s.city || '' })}
-    ${licFields(s, false)}
     ${field('Payment terms (days)', 'terms', { type: 'number', value: s.terms ?? 30, required: true, attrs: numAttrs('1') })}
-    ${field('Address', 'address', { value: s.address || '', full: true })}
+    ${addrFields(s, false)}
+    ${licFields(s, false)}
   </div>`;
-  const readSupplier = (d, s) => Object.assign(s, { name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, city: d.city.trim(), ...readLic(d), terms: num(d.terms), address: (d.address || '').trim() });
-  ACTIONS['new-supplier'] = () => openModal({ title: 'Add supplier', body: supplierForm(), submitLabel: 'Add supplier', onSubmit: d => { const s = { id: nextId('S', db.suppliers) }; readSupplier(d, s); db.suppliers.push(s); fileLicence('supplier', s.id); return `${s.name} added.`; } });
-  ACTIONS['edit-supplier'] = id => { const s = sup(id); if (!s) return; openModal({ title: `Edit ${s.name}`, body: supplierForm(s), onSubmit: d => { readSupplier(d, s); fileLicence('supplier', s.id); return `${s.name} updated.`; } }); };
+  const readSupplier = (d, s) => Object.assign(s, { name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, ...readAddr(d), ...readLic(d), terms: num(d.terms) });
+  ACTIONS['new-supplier'] = () => openModal({ title: 'Add supplier', body: supplierForm(), submitLabel: 'Add supplier', onSubmit: d => { if (!addrOk(d)) return false; const s = { id: nextId('S', db.suppliers) }; readSupplier(d, s); db.suppliers.push(s); fileLicence('supplier', s.id); return `${s.name} added.`; } });
+  ACTIONS['edit-supplier'] = id => { const s = sup(id); if (!s) return; openModal({ title: `Edit ${s.name}`, body: supplierForm(s), onSubmit: d => { if (!addrOk(d)) return false; readSupplier(d, s); fileLicence('supplier', s.id); return `${s.name} updated.`; } }); };
   ACTIONS['del-supplier'] = id => {
     const s = sup(id); if (!s) return;
     const n = db.pos.filter(p => p.supplierId === id).length + db.grns.filter(g => g.supplierId === id).length + db.pinvoices.filter(p => p.supplierId === id).length;
@@ -2685,7 +2761,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         <div class="form-grid">
           ${field('Firm name', 'name', { value: f.name, required: true })}
           ${field('Phone', 'phone', { value: f.phone })}
-          ${field('Address', 'address', { value: f.address, full: true })}
+          ${addrFields(f, false)}
           ${licFields(f, false)}
           ${field('Default CD % for new chemists', 'defcd', { type: 'number', value: db.settings.defaultCd ?? 0, attrs: numAttrs() })}
           <div class="field"><label>Licence copies</label><div>${licDocsBtn('firm', 'firm')}</div></div>
@@ -2699,7 +2775,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         <div class="toolbar"><button type="button" class="btn" data-act="export-data" data-id="">Download backup (JSON)</button><label class="btn">Restore backup<input type="file" id="restoreFile" accept="application/json,.json" hidden></label><button type="button" class="btn ghost danger" data-act="reset-data" data-id="">Reset to sample data</button></div>
         <div class="small muted">All data lives in this browser. Download a backup regularly.</div>`,
       onSubmit: d => {
-        Object.assign(db.settings.firm, { name: d.name.trim(), phone: d.phone.trim(), address: d.address.trim(), ...readLic(d) });
+        if (!addrOk(d)) return false;
+        Object.assign(db.settings.firm, { name: d.name.trim(), phone: d.phone.trim(), ...readAddr(d), ...readLic(d) });
         fileLicence('firm', 'firm');
         db.settings.defaultCd = num(d.defcd);
         setApiKey((d.apikey || '').trim());
@@ -2791,6 +2868,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   });
 
   document.addEventListener('input', e => {
+    if (e.target.matches('#mform [name="district"]')) refreshAddrLists();
     const s = e.target.closest('[data-list-search]');
     if (s) { listState[s.dataset.listSearch].q = s.value; fillList(s.dataset.listSearch); return; }
     const ei = e.target.closest('[data-e]');
