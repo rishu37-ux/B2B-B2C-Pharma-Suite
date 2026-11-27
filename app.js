@@ -1757,11 +1757,51 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     const near = tehsil ? hs.filter(h => norm(h.tehsil) === norm(tehsil)) : [];
     const rest = hs.filter(h => !near.includes(h));
     const sel = hospById(selId);
-    const outside = sel && !hs.includes(sel) ? `<optgroup label="Saved earlier">${opt(sel)}</optgroup>` : '';
+    const outside = sel && !hs.includes(sel) ? `<optgroup label="Other district${sel.district ? ': ' + esc(sel.district) : ''}">${opt(sel)}</optgroup>` : '';
     return `<option value="">— None —</option>${outside}
       ${near.length ? `<optgroup label="In ${esc(tehsil)} (${near.length})">${near.map(opt).join('')}</optgroup>` : ''}
       ${rest.length ? `<optgroup label="${near.length ? 'Elsewhere in ' : ''}${esc(district)} district (${rest.length})">${rest.map(opt).join('')}</optgroup>` : ''}
       <option value="__other" ${selId === '__other' ? 'selected' : ''}>+ Hospital not in the list…</option>`;
+  }
+  // Search box above a hospital dropdown: finds hospitals anywhere in the directory as you type
+  const hospSearchBox = mode => `<div class="field full hosp-search" data-area="${mode}">
+      <label for="hospSearch">Search hospital</label>
+      <div class="hosp-search-wrap">${icon('search')}<input id="hospSearch" autocomplete="off" placeholder="Type hospital name, village, tehsil or district — e.g. Ghumarwin, CHC Bharari, IGMC"></div>
+      <div class="hosp-results hidden" id="hospResults" role="listbox"></div>
+    </div>`;
+  function hospSearchResults(q) {
+    const words = norm(q).split(' ').filter(Boolean);
+    if (!words.length) return [];
+    const dist = norm($('#mform [name="district"]')?.value);
+    const hay = h => norm([h.name, h.locality, h.tehsil, h.district, h.type, h.pincode].join(' '));
+    return (db.hospitals || []).filter(h => { const t = hay(h); return words.every(w => t.includes(w)); })
+      .sort((a, b) => (norm(b.district) === dist) - (norm(a.district) === dist) || norm(b.name).startsWith(words[0]) - norm(a.name).startsWith(words[0]) || hospSort(a, b))
+      .slice(0, 30);
+  }
+  function renderHospResults() {
+    const box = $('#hospResults'); const q = $('#hospSearch')?.value || ''; if (!box) return;
+    if (!q.trim()) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    const rs = hospSearchResults(q);
+    box.innerHTML = rs.length
+      ? rs.map((h, i) => `<button type="button" class="hosp-res ${i === 0 ? 'active' : ''}" data-pick-hosp="${esc(h.id)}" role="option"><span class="strong">${esc(h.name)}</span> <span class="small muted">${esc(h.type)}</span><div class="small muted">${esc([h.locality && h.locality !== h.name ? h.locality : '', h.tehsil && 'Teh. ' + h.tehsil, h.district].filter(Boolean).join(' · '))}</div></button>`).join('')
+        + (rs.length === 30 ? '<div class="small muted hosp-more">Showing the first 30 — type more to narrow down.</div>' : '')
+      : `<div class="small muted hosp-more">No hospital matches “${esc(q)}”. Choose “+ Hospital not in the list…” below to add it.</div>`;
+    box.classList.remove('hidden');
+  }
+  function pickHospital(id) {
+    const h = hospById(id); if (!h) return;
+    const always = $('.hosp-search')?.dataset.area === 'always';
+    const dEl = $('#mform [name="district"]'), tEl = $('#mform [name="tehsil"]');
+    if (dEl && h.district && (always || !dEl.value.trim())) { dEl.value = h.district; refreshAddrLists(); }
+    if (tEl && h.tehsil && (always || !tEl.value.trim())) tEl.value = h.tehsil;
+    const sel = $('#f-hospitalId');
+    sel.innerHTML = hospitalOptions(dEl?.value.trim(), tEl?.value.trim(), h.id);
+    sel.value = h.id;
+    $('#hospOtherWrap')?.classList.add('hidden');
+    refreshHospitalSelect();
+    $('#hospSearch').value = ''; renderHospResults();
+    sel.classList.add('filled'); setTimeout(() => sel.classList.remove('filled'), 1500);
+    toast(`${h.name} selected.`);
   }
   function refreshHospitalSelect() {
     const sel = $('#f-hospitalId'); if (!sel) return;
@@ -1781,6 +1821,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     ${field('Village / locality', 'locality', { value: x.locality || '', required, attrs: 'list="dl-a-locality" autocomplete="off"' })}
     ${field('House / shop no., street, landmark', 'address', { value: x.address || '', full: true })}
     ${field('PIN code', 'pincode', { value: x.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6" title="6-digit PIN code"' })}
+    ${hospSearchBox('empty')}
     <div class="field"><label for="f-hospitalId">Nearby hospital <span class="muted small" id="hospHint"></span></label><select id="f-hospitalId" name="hospitalId">${hospitalOptions(x.district, x.tehsil, x.hospitalId || (x.hospital && ((db.hospitals || []).find(h => norm(h.name) === norm(x.hospital))?.id || '__other')) || '')}</select></div>
     <div class="field ${x.hospital && !x.hospitalId && !(db.hospitals || []).some(h => norm(h.name) === norm(x.hospital)) ? '' : 'hidden'}" id="hospOtherWrap"><label for="f-hospitalOther">Hospital name (it will be added to the directory)</label><input id="f-hospitalOther" name="hospitalOther" value="${esc(x.hospital && !x.hospitalId ? x.hospital : '')}"></div>
     <datalist id="dl-a-district">${dlOptions([...new Set([...HP_DISTRICTS, ...usedValues('district')])].sort())}</datalist>
@@ -2534,6 +2575,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       <div class="field full form-sec">Working at</div>
       ${field('District', 'district', { value: dist, attrs: 'list="dl-a-district" autocomplete="off"' })}
       ${field('Tehsil (optional, to list its hospitals first)', 'tehsil', { value: docHosp(d)?.tehsil || '', attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+      ${hospSearchBox('always')}
       <div class="field full"><label for="f-hospitalId">Hospital <span class="muted small" id="hospHint"></span></label><select id="f-hospitalId" name="hospitalId">${hospitalOptions(dist, docHosp(d)?.tehsil || '', d.hospitalId || (d.hospital ? '__other' : ''))}</select></div>
       <div class="field full ${d.hospital && !d.hospitalId ? '' : 'hidden'}" id="hospOtherWrap"><label for="f-hospitalOther">Hospital / clinic name (it will be added to the directory)</label><input id="f-hospitalOther" name="hospitalOther" value="${esc(d.hospital && !d.hospitalId ? d.hospital : '')}"></div>
       ${field('Notes', 'notes', { value: d.notes || '', full: true, attrs: 'placeholder="OPD days, preferred brands, visit notes…"' })}
@@ -3151,6 +3193,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       $$('button', tab.parentElement).forEach(b => b.classList.toggle('active', b === tab));
       fillList(key); return;
     }
+    const ph = e.target.closest('[data-pick-hosp]');
+    if (ph) { pickHospital(ph.dataset.pickHosp); return; }
     const lr = e.target.closest('[data-lic-read]');
     if (lr) { readLicenceIntoForm(lr); return; }
     const ba = e.target.closest('[data-bulkapply]');
@@ -3212,6 +3256,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   document.addEventListener('input', e => {
     if (e.target.matches('#mform [name="district"]')) refreshAddrLists();
     if (e.target.matches('#mform [name="tehsil"]')) refreshHospitalSelect();
+    if (e.target.id === 'hospSearch') { renderHospResults(); return; }
     const s = e.target.closest('[data-list-search]');
     if (s) { listState[s.dataset.listSearch].q = s.value; fillList(s.dataset.listSearch); return; }
     const ei = e.target.closest('[data-e]');
@@ -3335,8 +3380,18 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     searchTimer = setTimeout(() => { searchQuery = e.target.value.trim(); render(); }, 180);
   });
   document.addEventListener('keydown', e => {
+    if (e.target.id === 'hospSearch' && ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) {
+      const items = $$('#hospResults [data-pick-hosp]'); let i = items.findIndex(x => x.classList.contains('active'));
+      if (e.key === 'Escape') { if ($('#hospSearch').value) { e.preventDefault(); e.stopImmediatePropagation(); $('#hospSearch').value = ''; renderHospResults(); } return; }
+      e.preventDefault();
+      if (e.key === 'Enter') { if (items[i]) pickHospital(items[i].dataset.pickHosp); return; }
+      if (!items.length) return;
+      i = e.key === 'ArrowDown' ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1);
+      items.forEach((x, j) => x.classList.toggle('active', j === i)); items[i].scrollIntoView({ block: 'nearest' });
+      return;
+    }
     if (e.key === 'Escape' && $('#modalBack').classList.contains('open')) closeModal();
-    if (e.key === 'Enter' && $('#modalBack').classList.contains('open') && e.target.closest('#mform') && e.target.tagName === 'INPUT' && !e.target.closest('#lineBody, #grnLines, .bulk-inline')) { e.preventDefault(); submitModal(); }
+    if (e.key === 'Enter' && $('#modalBack').classList.contains('open') && e.target.closest('#mform') && e.target.tagName === 'INPUT' && !e.target.closest('#lineBody, #grnLines, .bulk-inline, .hosp-search')) { e.preventDefault(); submitModal(); }
   });
   $('#modalClose').addEventListener('click', () => closeModal());
   $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));

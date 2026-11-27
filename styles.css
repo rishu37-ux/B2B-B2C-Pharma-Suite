@@ -473,3 +473,15 @@ td a:hover { text-decoration: underline; }
 /* Form section headings */
 .form-sec { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--gold); font-weight: 600; padding-top: 6px; border-top: 1px solid var(--line-2); margin-top: 2px; }
 .form-grid > .form-sec:first-child { border-top: 0; padding-top: 0; }
+
+/* Hospital search above the hospital dropdown */
+.hosp-search { position: relative; }
+.hosp-search-wrap { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; background: var(--surface); }
+.hosp-search-wrap:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.hosp-search-wrap svg { width: 16px; height: 16px; color: var(--ink-3); flex: none; }
+.field .hosp-search-wrap input { border: 0; box-shadow: none; padding: 9px 0; flex: 1; min-width: 0; background: transparent; outline: none; }
+.hosp-results { position: absolute; left: 0; right: 0; top: 100%; z-index: 20; margin-top: 4px; max-height: 300px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px rgba(20,32,29,.14); }
+.hosp-res { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line-2); background: none; padding: 9px 12px; font: inherit; color: inherit; cursor: pointer; }
+.hosp-res:hover, .hosp-res.active { background: var(--brand-soft); }
+.hosp-more { padding: 9px 12px; }
+.field select.filled { background: #fffbe9; border-color: var(--gold); }
