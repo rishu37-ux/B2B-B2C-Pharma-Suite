@@ -412,6 +412,7 @@
     upload: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+    doctor: '<circle cx="12" cy="7" r="4"/><path d="M5 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2"/><path d="M12 14v4M10 16h4"/>',
     hospital: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 7v6M9 10h6"/><path d="M9 21v-4h6v4"/>',
     folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     clip: '<path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
@@ -429,7 +430,7 @@
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
     { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemorders', 'Chemist Orders', 'cart'], ['chemists', 'Onboard Chemists', 'store']] },
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
-    { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital']] },
+    { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
   { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
   ];
   const SUBTITLES = {
@@ -448,6 +449,7 @@
     search: 'Search results',
     folder: 'Every bill from this supplier, and what was bought when',
     hospitals: 'Medical colleges, hospitals, CHCs and PHCs of Himachal Pradesh — and the chemists near them',
+    doctors: 'Medical officers and doctors — specialization, mobile and the hospital they work at',
   };
 
   function renderNav(route) {
@@ -826,7 +828,7 @@
           actions: { delete: items => { deleteHospitals(items); return false; } },
         },
         rows: () => [...(db.hospitals || [])].sort((a, b) => (a.district || 'zz').localeCompare(b.district || 'zz') || hospSort(a, b)),
-        text: h => [h.name, h.type, h.district, h.tehsil, h.locality, h.pincode, h.phone].join(' '),
+        text: h => [h.name, h.type, h.district, h.tehsil, h.locality, h.pincode, h.phone, h.headName, h.headMobile, h.pharmName, h.pharmMobile].join(' '),
         empty: 'No hospitals match.',
         columns: [
           { h: 'Hospital / health centre', c: h => `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}" class="strong">${esc(h.name)}</a>${h.source && h.source !== 'HPPCB list' ? `<div class="small muted">${esc(h.source)}</div>` : ''}` },
@@ -835,12 +837,56 @@
           { h: 'Tehsil / block', c: h => esc(h.tehsil || '—') },
           { h: 'Village / locality', c: h => esc(h.locality || '—') },
           { h: 'PIN', c: h => esc(h.pincode || '—') },
-          { h: 'Phone', c: h => esc(h.phone || '—') },
+          { h: 'Head of hospital', c: h => contactHtml(h.headName, h.headMobile) },
+          { h: 'Pharmacist', c: h => contactHtml(h.pharmName, h.pharmMobile) },
+          { h: 'Doctors', r: 1, c: h => { const n = (db.doctors || []).filter(d => d.hospitalId === h.id).length; return n ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${n}</a>` : '<span class="muted">0</span>'; } },
           { h: 'Chemists near', r: 1, c: h => { const n = nearChemists(h).length; return n ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${n}</a>` : '<span class="muted">0</span>'; } },
           { h: '', c: h => rowActs(actBtn('edit-hospital', h.id, 'Edit', 'ghost'), actBtn('del-hospital', h.id, 'Delete', 'ghost danger')) },
         ],
       })}
       <div class="small muted">Starting list: PHCs, CHCs, civil, sub-divisional, ESI and ayurvedic hospitals from the HP State Pollution Control Board’s health-care-facility list, with district and block filled from India Post PIN data where it was not printed. Medical colleges, AIIMS, the medical university and zonal/regional hospitals were added from a well-known list — please check them. The list may not have every health centre: add missing ones, or import an official list as CSV (columns: name, type, district, tehsil, locality, pincode, phone).</div>`;
+  };
+
+  const docHosp = d => hospById(d.hospitalId);
+  const docDistrict = d => docHosp(d)?.district || d.district || '';
+  VIEWS.doctors = () => {
+    const ds = db.doctors || [];
+    const spec = [...new Set(ds.map(d => d.specialization).filter(Boolean))];
+    return `
+      <div class="grid g-4">
+        ${kpi('Doctors', qty(ds.length), `${spec.length} specializations`)}
+        ${kpi('Specialists', qty(ds.filter(d => d.specialization && !/^(general|medical officer|mbbs)/i.test(d.specialization)).length), 'Other than general / MO')}
+        ${kpi('Hospitals covered', qty(new Set(ds.map(d => d.hospitalId).filter(Boolean)).size), `of ${(db.hospitals || []).length} in the directory`)}
+        ${kpi('With mobile number', qty(ds.filter(d => d.mobile).length), ds.length ? `${Math.round(ds.filter(d => d.mobile).length / ds.length * 100)}% of doctors` : '—')}
+      </div>
+      ${useList({
+        key: 'doctors', title: 'Doctors & medical officers',
+        actions: `<label class="btn sm">${icon('file')}Import CSV<input type="file" id="docCsv" accept=".csv,text/csv" hidden></label>${actBtn('doc-export', '', 'Export CSV', 'ghost')}${actBtn('new-doctor', '', icon('plus') + 'Add doctor', 'primary')}`,
+        filters: [
+          { k: 'district', label: 'District', options: [...new Set(ds.map(docDistrict).filter(Boolean))].sort().map(v => [v, v]), test: (d, v) => docDistrict(d) === v },
+          { k: 'spec', label: 'Specialization', options: spec.sort().map(v => [v, v]), test: (d, v) => d.specialization === v },
+          { k: 'desig', label: 'Designation', options: [...new Set(ds.map(d => d.designation).filter(Boolean))].sort().map(v => [v, v]), test: (d, v) => d.designation === v },
+          { k: 'hosp', label: 'Hospital', options: [...new Set(ds.map(d => d.hospitalId).filter(Boolean))].map(id => [id, hospById(id)?.name || id]).sort(byName), test: (d, v) => d.hospitalId === v },
+        ],
+        select: {
+          id: d => d.id,
+          fields: [{ k: 'specialization', label: 'Specialization', type: 'select', options: DOC_SPECS.map(v => [v, v]) }, { k: 'designation', label: 'Designation', type: 'select', options: DOC_DESIGS.map(v => [v, v]) }],
+          extra: `<button type="button" class="btn sm ghost danger" data-bulkact="doctors|delete">Delete</button>`,
+          actions: { delete: items => { deleteDoctors(items); return false; } },
+        },
+        rows: () => [...(db.doctors || [])].sort((a, b) => a.name.localeCompare(b.name)),
+        text: d => [d.name, d.designation, d.specialization, d.qualification, d.mobile, d.hospital, docHosp(d)?.name, docDistrict(d), docHosp(d)?.tehsil].join(' '),
+        empty: (db.doctors || []).length ? 'No doctors match.' : 'No doctors yet. Use “Add doctor”, or import a CSV (name, designation, specialization, qualification, mobile, hospital, district).',
+        columns: [
+          { h: 'Doctor', c: d => `<a href="#" data-act="view-doctor" data-id="${esc(d.id)}" class="strong">${esc(d.name)}</a>${d.qualification ? `<div class="small muted">${esc(d.qualification)}</div>` : ''}` },
+          { h: 'Designation', c: d => esc(d.designation || '—') },
+          { h: 'Specialization', c: d => d.specialization ? pill(d.specialization) : '—' },
+          { h: 'Mobile', c: d => telLink(d.mobile) },
+          { h: 'Hospital', c: d => { const h = docHosp(d); return h ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${esc(h.name)}</a><div class="small muted">${esc(h.type)}</div>` : esc(d.hospital || '—'); } },
+          { h: 'District', c: d => `${esc(docDistrict(d) || '—')}${docHosp(d)?.tehsil ? `<div class="small muted">${esc(docHosp(d).tehsil)}</div>` : ''}` },
+          { h: '', c: d => rowActs(actBtn('edit-doctor', d.id, 'Edit', 'ghost'), actBtn('del-doctor', d.id, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
   };
 
   const stockText = b => { const p = prod(b.productId); return [p?.name, company(p?.companyId)?.name, p?.mfg, p?.pack, p?.hsn, b.batch, b.source, sup(b.supplierId)?.name].join(' '); };
@@ -1589,6 +1635,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ['Stock batches', db.batches.filter(b => avail(b) > 0 && has(b.batch, prod(b.productId)?.name)), b => `${esc(prod(b.productId)?.name)} <span class="muted small">Batch ${esc(b.batch)} · ${isoToExp(b.expiry)} · ${qty(avail(b))}</span>`, 'edit-batch', b => b.id],
       ['Chemists', db.chemists.filter(c => has(c.name, c.owner, c.city, c.id, c.gstin)), c => `${esc(c.name)} <span class="muted small">${esc(c.city)}</span>`, 'view-chemist', c => c.id],
       ['Suppliers', db.suppliers.filter(s => has(s.name, s.contact, s.city, s.id)), s => esc(s.name), 'view-supplier', s => s.id],
+      ['Doctors', (db.doctors || []).filter(d => has(d.name, d.specialization, d.designation, d.mobile, docHosp(d)?.name || d.hospital)).slice(0, 20), d => `${esc(d.name)} <span class="muted small">${esc([d.specialization, docHosp(d)?.name || d.hospital].filter(Boolean).join(' · '))}</span>`, 'view-doctor', d => d.id],
+      ['Hospitals', (db.hospitals || []).filter(h => has(h.name, h.locality, h.tehsil, h.headName, h.pharmName)).slice(0, 20), h => `${esc(h.name)} <span class="muted small">${esc([h.tehsil, h.district].filter(Boolean).join(', '))}</span>`, 'view-hospital', h => h.id],
       ['Sale bills', db.sales.filter(s => has(s.no, partyName(s))).slice(0, 20), s => `${s.no} <span class="muted small">${esc(partyName(s))} · ${money(s.total)}</span>`, 'view-sale', s => s.no],
       ['Purchase orders', db.pos.filter(p => has(p.no, sup(p.supplierId)?.name)), p => `${p.no} <span class="muted small">${esc(sup(p.supplierId)?.name)}</span>`, 'view-po', p => p.no],
       ['Goods receipts', db.grns.filter(g => has(g.no, g.poNo, g.challan)), g => `${g.no} <span class="muted small">${esc(g.poNo)}</span>`, 'view-grn', g => g.no],
@@ -1745,17 +1793,22 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   }
   const readAddr = d => {
     const a = { district: (d.district || '').trim(), tehsil: (d.tehsil || '').trim(), subTehsil: (d.subTehsil || '').trim(), locality: (d.locality || '').trim(), address: (d.address || '').trim(), pincode: (d.pincode || '').trim(), hospitalId: '', hospital: '' };
-    if (d.hospitalId === '__other') {
-      const name = String(d.hospitalOther || '').trim();
-      if (name) {
-        let h = (db.hospitals || []).find(x => norm(x.name) === norm(name) && (!a.district || x.district === a.district));
-        if (!h) { h = { id: nextId('H', db.hospitals, 4), name, type: 'Other', district: a.district, tehsil: a.tehsil, locality: a.locality, pincode: a.pincode, source: 'Added by you' }; db.hospitals.push(h); }
-        a.hospitalId = h.id; a.hospital = h.name;
-      }
-    } else if (d.hospitalId && hospById(d.hospitalId)) { a.hospitalId = d.hospitalId; a.hospital = hospById(d.hospitalId).name; }
+    Object.assign(a, resolveHospital(d, a));
     a.city = placeCity(a);
     return a;
   };
+  // The hospital chosen in a form's dropdown; "+ not in the list" adds it to the directory
+  function resolveHospital(d, area) {
+    if (d.hospitalId === '__other') {
+      const name = String(d.hospitalOther || '').trim();
+      if (!name) return { hospitalId: '', hospital: '' };
+      let h = (db.hospitals || []).find(x => norm(x.name) === norm(name) && (!area.district || x.district === area.district));
+      if (!h) { h = { id: nextId('H', db.hospitals, 4), name, type: 'Other', district: area.district || '', tehsil: area.tehsil || '', locality: area.locality || '', pincode: area.pincode || '', source: 'Added by you' }; db.hospitals.push(h); }
+      return { hospitalId: h.id, hospital: h.name };
+    }
+    const h = d.hospitalId && hospById(d.hospitalId);
+    return h ? { hospitalId: h.id, hospital: h.name } : { hospitalId: '', hospital: '' };
+  }
   const addrOk = d => {
     if (d.pincode && !/^[1-9]\d{5}$/.test(String(d.pincode).trim())) { toast('PIN code must be 6 digits.'); return false; }
     if (d.fssai && !/^\d{14}$/.test(String(d.fssai).trim())) { toast('FSSAI licence number must be 14 digits.'); return false; }
@@ -1853,6 +1906,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(splitAddr);
     // Hospital directory (added later): start from the bundled Himachal list and link saved hospital names to it
     if (!Array.isArray(d.hospitals)) d.hospitals = seedHospitals();
+    if (!Array.isArray(d.doctors)) d.doctors = [];
     [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(x => {
       if (!x || x.hospitalId || !x.hospital) return;
       const h = d.hospitals.find(h => norm(h.name) === norm(x.hospital));
@@ -2384,12 +2438,19 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ${field('Tehsil / block', 'tehsil', { value: h.tehsil || '', attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
       ${field('Village / locality', 'locality', { value: h.locality || '', attrs: 'list="dl-a-locality" autocomplete="off"' })}
       ${field('PIN code', 'pincode', { value: h.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6"' })}
-      ${field('Phone', 'phone', { value: h.phone || '' })}
+      ${field('Hospital phone / landline', 'phone', { value: h.phone || '' })}
+      <div class="field full form-sec">Contacts</div>
+      ${field('Head of hospital (name)', 'headName', { value: h.headName || '', attrs: 'placeholder="e.g. BMO / SMO / Principal"' })}
+      ${field('Head of hospital — mobile', 'headMobile', { type: 'tel', value: h.headMobile || '', attrs: 'pattern=\"[6-9][0-9]{9}\" inputmode=\"numeric\" maxlength=\"10\" title=\"10-digit mobile number\"' })}
+      ${field('Pharmacist (name)', 'pharmName', { value: h.pharmName || '' })}
+      ${field('Pharmacist — mobile', 'pharmMobile', { type: 'tel', value: h.pharmMobile || '', attrs: 'pattern=\"[6-9][0-9]{9}\" inputmode=\"numeric\" maxlength=\"10\" title=\"10-digit mobile number\"' })}
       <datalist id="dl-a-district">${dlOptions(HP_DISTRICTS)}</datalist>
       <datalist id="dl-a-tehsil">${dlOptions(usedValues('tehsil', h.district))}</datalist>
       <datalist id="dl-a-locality">${dlOptions(usedValues('locality', h.district))}</datalist>
     </div>`;
-  const readHospital = (d, h) => Object.assign(h, { name: d.name.trim(), type: d.type, district: d.district.trim(), tehsil: (d.tehsil || '').trim(), locality: (d.locality || '').trim(), pincode: (d.pincode || '').trim(), phone: (d.phone || '').trim() });
+  const readHospital = (d, h) => Object.assign(h, { name: d.name.trim(), type: d.type, district: d.district.trim(), tehsil: (d.tehsil || '').trim(), locality: (d.locality || '').trim(), pincode: (d.pincode || '').trim(), phone: (d.phone || '').trim(), headName: (d.headName || '').trim(), headMobile: (d.headMobile || '').trim(), pharmName: (d.pharmName || '').trim(), pharmMobile: (d.pharmMobile || '').trim() });
+  const telLink = v => v ? `<a href="tel:${esc(String(v).replace(/[^\d+]/g, ''))}">${esc(v)}</a>` : '—';
+  const contactHtml = (name, mob) => name || mob ? `${name ? `<span>${esc(name)}</span>` : ''}${mob ? `<div class="small">${telLink(mob)}</div>` : ''}` : '<span class="muted">—</span>';
   const hospDup = (d, self) => (db.hospitals || []).find(x => x !== self && norm(x.name) === norm(d.name) && norm(x.district) === norm(d.district));
   ACTIONS['new-hospital'] = () => openModal({
     title: 'Add hospital / health centre', submitLabel: 'Add', body: hospitalForm(),
@@ -2402,16 +2463,16 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       onSubmit: d => {
         if (hospDup(d, h)) { toast(`${d.name} is already in ${d.district}.`); return false; }
         readHospital(d, h); if (h.source === 'HPPCB list' || /verify/i.test(h.source || '')) h.source = 'Checked by you';
-        addrHolders().forEach(x => { if (x.hospitalId === h.id) x.hospital = h.name; });
+        [...addrHolders(), ...(db.doctors || [])].forEach(x => { if (x.hospitalId === h.id) x.hospital = h.name; });
         return `${h.name} saved.`;
       },
     });
   };
   function deleteHospitals(items) {
     const ids = new Set(items.map(h => h.id));
-    const linked = addrHolders().filter(x => ids.has(x.hospitalId)).length;
-    confirmModal(`Delete ${items.length === 1 ? items[0].name : items.length + ' hospitals'}?`, `${linked ? `${linked} chemist/supplier record(s) point to ${items.length === 1 ? 'it' : 'them'}; their “Nearby hospital” will keep the name but no longer link to the directory. ` : ''}This cannot be undone.`, 'Delete', () => {
-      addrHolders().forEach(x => { if (ids.has(x.hospitalId)) x.hospitalId = ''; });
+    const linked = [...addrHolders(), ...(db.doctors || [])].filter(x => ids.has(x.hospitalId)).length;
+    confirmModal(`Delete ${items.length === 1 ? items[0].name : items.length + ' hospitals'}?`, `${linked ? `${linked} chemist/supplier record(s) point to ${items.length === 1 ? 'it' : 'them'} (chemists, suppliers or doctors); they will keep the hospital name but no longer link to the directory. ` : ''}This cannot be undone.`, 'Delete', () => {
+      [...addrHolders(), ...(db.doctors || [])].forEach(x => { if (ids.has(x.hospitalId)) x.hospitalId = ''; });
       db.hospitals = db.hospitals.filter(h => !ids.has(h.id));
       if (listState.hospitals) listState.hospitals.sel.clear();
       return `${items.length} deleted.`;
@@ -2421,24 +2482,27 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   ACTIONS['view-hospital'] = id => {
     const h = hospById(id); if (!h) return;
     const near = nearChemists(h);
+    const docs = (db.doctors || []).filter(d => d.hospitalId === h.id).sort((a, b) => a.name.localeCompare(b.name));
     const sameArea = db.chemists.filter(c => !near.includes(c) && h.tehsil && norm(c.tehsil) === norm(h.tehsil) && norm(c.district) === norm(h.district));
     const chemCols = [{ h: 'Chemist', c: c => `<a href="#" data-act="view-chemist" data-id="${esc(c.id)}">${esc(c.name)}</a>` }, { h: 'Village / locality', c: c => esc(c.locality || c.city || '—') }, { h: 'Mobile', c: c => esc(c.phone) }, { h: 'Status', c: c => pill(c.status) }, { h: 'Outstanding', r: 1, c: c => money(chemOutstanding(c.id)) }];
     openModal({
       title: h.name, size: 'lg',
-      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-hospital" data-id="${esc(h.id)}">Edit</button></div>`,
-      body: `${detailGrid([['Type', pill(h.type)], ['District', esc(h.district || '—')], ['Tehsil / block', esc(h.tehsil || '—')], ['Village / locality', esc(h.locality || '—')], ['PIN', esc(h.pincode || '—')], ['Phone', esc(h.phone || '—')], ['Source', esc(h.source || '—')]])}
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-hospital" data-id="${esc(h.id)}">Edit</button><button type="button" class="btn" data-act="new-doctor" data-id="${esc(h.id)}">Add doctor here</button></div>`,
+      body: `${detailGrid([['Type', pill(h.type)], ['District', esc(h.district || '—')], ['Tehsil / block', esc(h.tehsil || '—')], ['Village / locality', esc(h.locality || '—')], ['PIN', esc(h.pincode || '—')], ['Hospital phone', telLink(h.phone)], ['Head of hospital', contactHtml(h.headName, h.headMobile)], ['Pharmacist', contactHtml(h.pharmName, h.pharmMobile)], ['Source', esc(h.source || '—')]])}
+        <div class="card-title" style="font-size:15px">Doctors working here (${docs.length})</div>
+        ${docs.length ? miniTable([{ h: 'Doctor', c: d => `<a href="#" data-act="view-doctor" data-id="${esc(d.id)}">${esc(d.name)}</a>` }, { h: 'Designation', c: d => esc(d.designation || '—') }, { h: 'Specialization', c: d => esc(d.specialization || '—') }, { h: 'Mobile', c: d => telLink(d.mobile) }], docs) : '<div class="small muted">No doctors saved for this hospital yet.</div>'}
         <div class="card-title" style="font-size:15px">Chemists with this as nearby hospital (${near.length})</div>
         ${near.length ? miniTable(chemCols, near) : '<div class="small muted">None yet. Set it as “Nearby hospital” when onboarding or editing a chemist.</div>'}
         ${sameArea.length ? `<div class="card-title" style="font-size:15px">Other chemists in ${esc(h.tehsil)} (${sameArea.length})</div>${miniTable(chemCols, sameArea)}` : ''}`,
     });
   };
-  const HOSP_CSV = ['name', 'type', 'district', 'tehsil', 'locality', 'pincode', 'phone'];
+  const HOSP_CSV = ['name', 'type', 'district', 'tehsil', 'locality', 'pincode', 'phone', 'headName', 'headMobile', 'pharmName', 'pharmMobile'];
   ACTIONS['hosp-export'] = () => downloadText(`hospital-directory-${todayIso}.csv`, [HOSP_CSV.join(','), ...listRows('hospitals').map(h => HOSP_CSV.map(k => csvCell(h[k])).join(','))].join('\r\n'));
   function importHospitals(text) {
     const rows = parseCsv(text.replace(/^﻿/, ''));
     if (rows.length < 2) throw new Error('The CSV has no rows.');
     const head = rows[0].map(h => h.trim().toLowerCase().replace(/[^a-z]/g, ''));
-    const alias = { name: 'name', hospital: 'name', facility: 'name', facilityname: 'name', type: 'type', facilitytype: 'type', district: 'district', tehsil: 'tehsil', block: 'tehsil', subdistrict: 'tehsil', locality: 'locality', village: 'locality', place: 'locality', pincode: 'pincode', pin: 'pincode', phone: 'phone', mobile: 'phone' };
+    const alias = { name: 'name', hospital: 'name', facility: 'name', facilityname: 'name', type: 'type', facilitytype: 'type', district: 'district', tehsil: 'tehsil', block: 'tehsil', subdistrict: 'tehsil', locality: 'locality', village: 'locality', place: 'locality', pincode: 'pincode', pin: 'pincode', phone: 'phone', landline: 'phone', headname: 'headName', head: 'headName', headofhospital: 'headName', headmobile: 'headMobile', headofhospitalmobile: 'headMobile', pharmname: 'pharmName', pharmacist: 'pharmName', pharmacistname: 'pharmName', pharmmobile: 'pharmMobile', pharmacistmobile: 'pharmMobile' };
     const map = head.map(h => alias[h] || null);
     if (!map.includes('name') || !map.includes('district')) throw new Error('The CSV needs at least “name” and “district” columns.');
     let added = 0, updated = 0;
@@ -2448,10 +2512,102 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       const dist = HP_DISTRICTS.find(x => norm(x) === norm(d.district)) || d.district;
       const type = HOSP_TYPES.find(t => norm(t) === norm(d.type)) || (/\bPHC\b/i.test(d.type + ' ' + d.name) ? 'PHC' : /\bCHC\b/i.test(d.type + ' ' + d.name) ? 'CHC' : /civil/i.test(d.type + ' ' + d.name) ? 'Civil Hospital' : 'Other');
       const ex = db.hospitals.find(h => norm(h.name) === norm(d.name) && norm(h.district) === norm(dist));
-      const vals = { name: d.name, type, district: dist, tehsil: d.tehsil || ex?.tehsil || '', locality: d.locality || ex?.locality || '', pincode: d.pincode || ex?.pincode || '', phone: d.phone || ex?.phone || '' };
+      const vals = { name: d.name, type, district: dist, tehsil: d.tehsil || ex?.tehsil || '', locality: d.locality || ex?.locality || '', pincode: d.pincode || ex?.pincode || '', phone: d.phone || ex?.phone || '', headName: d.headName || ex?.headName || '', headMobile: d.headMobile || ex?.headMobile || '', pharmName: d.pharmName || ex?.pharmName || '', pharmMobile: d.pharmMobile || ex?.pharmMobile || '' };
       if (ex) { Object.assign(ex, vals); updated++; } else { db.hospitals.push({ id: nextId('H', db.hospitals, 4), ...vals, source: 'Imported' }); added++; }
     });
     return { added, updated };
+  }
+
+  // Doctors directory
+  const DOC_SPECS = ['Medical Officer (General)', 'General Medicine', 'General Surgery', 'Paediatrics', 'Obstetrics & Gynaecology', 'Orthopaedics', 'ENT', 'Ophthalmology', 'Dermatology', 'Psychiatry', 'Anaesthesia', 'Radiology', 'Pathology', 'Cardiology', 'Neurology', 'Nephrology', 'Gastroenterology', 'Pulmonology / Chest', 'Endocrinology / Diabetes', 'Oncology', 'Urology', 'Community Medicine', 'Dental', 'Ayurveda', 'Homoeopathy', 'Other'];
+  const DOC_DESIGS = ['Medical Officer', 'Senior Medical Officer', 'Block Medical Officer', 'Chief Medical Officer', 'Medical Superintendent', 'Specialist', 'Principal', 'Professor', 'Associate Professor', 'Assistant Professor', 'Senior Resident', 'Junior Resident', 'Dental Officer', 'Ayurvedic Medical Officer', 'Private Practitioner', 'Other'];
+  const doctorById = id => (db.doctors || []).find(d => d.id === id);
+  const doctorForm = (d = {}) => {
+    const dist = docDistrict(d);
+    return `<div class="form-grid">
+      ${field('Doctor name', 'name', { value: d.name || '', required: true, attrs: 'placeholder="e.g. Dr. A. Sharma"' })}
+      ${field('Mobile', 'mobile', { type: 'tel', value: d.mobile || '', attrs: 'pattern="[6-9][0-9]{9}" inputmode="numeric" maxlength="10" title="10-digit mobile number"' })}
+      ${field('Designation', 'designation', { value: d.designation || '', attrs: 'list="dl-doc-desig" autocomplete="off" placeholder="e.g. Medical Officer"' })}
+      ${field('Specialization', 'specialization', { value: d.specialization || '', required: true, attrs: 'list="dl-doc-spec" autocomplete="off" placeholder="e.g. Paediatrics"' })}
+      ${field('Qualification', 'qualification', { value: d.qualification || '', attrs: 'placeholder="e.g. MBBS, MD (Paediatrics)"' })}
+      ${field('Email', 'email', { type: 'email', value: d.email || '' })}
+      <div class="field full form-sec">Working at</div>
+      ${field('District', 'district', { value: dist, attrs: 'list="dl-a-district" autocomplete="off"' })}
+      ${field('Tehsil (optional, to list its hospitals first)', 'tehsil', { value: docHosp(d)?.tehsil || '', attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+      <div class="field full"><label for="f-hospitalId">Hospital <span class="muted small" id="hospHint"></span></label><select id="f-hospitalId" name="hospitalId">${hospitalOptions(dist, docHosp(d)?.tehsil || '', d.hospitalId || (d.hospital ? '__other' : ''))}</select></div>
+      <div class="field full ${d.hospital && !d.hospitalId ? '' : 'hidden'}" id="hospOtherWrap"><label for="f-hospitalOther">Hospital / clinic name (it will be added to the directory)</label><input id="f-hospitalOther" name="hospitalOther" value="${esc(d.hospital && !d.hospitalId ? d.hospital : '')}"></div>
+      ${field('Notes', 'notes', { value: d.notes || '', full: true, attrs: 'placeholder="OPD days, preferred brands, visit notes…"' })}
+      <datalist id="dl-doc-spec">${dlOptions(DOC_SPECS)}</datalist>
+      <datalist id="dl-doc-desig">${dlOptions(DOC_DESIGS)}</datalist>
+      <datalist id="dl-a-district">${dlOptions(HP_DISTRICTS)}</datalist>
+      <datalist id="dl-a-tehsil">${dlOptions(usedValues('tehsil', dist))}</datalist>
+    </div>`;
+  };
+  function readDoctor(f, d) {
+    const area = { district: (f.district || '').trim(), tehsil: (f.tehsil || '').trim() };
+    const h = resolveHospital(f, area);
+    Object.assign(d, { name: f.name.trim(), mobile: (f.mobile || '').trim(), designation: (f.designation || '').trim(), specialization: (f.specialization || '').trim(), qualification: (f.qualification || '').trim(), email: (f.email || '').trim(), notes: (f.notes || '').trim(), district: hospById(h.hospitalId)?.district || area.district, ...h });
+  }
+  const doctorOk = (f, self) => {
+    if (f.mobile && (db.doctors || []).some(x => x !== self && x.mobile === f.mobile.trim())) { toast(`Mobile ${f.mobile} is already saved for ${(db.doctors || []).find(x => x !== self && x.mobile === f.mobile.trim()).name}.`); return false; }
+    if (f.hospitalId === '__other' && !String(f.hospitalOther || '').trim()) { toast('Type the hospital or clinic name, or pick one from the list.'); return false; }
+    return true;
+  };
+  ACTIONS['new-doctor'] = presetHosp => {
+    const h = hospById(presetHosp);
+    openModal({
+      title: 'Add doctor', size: 'lg', submitLabel: 'Add doctor', body: doctorForm(h ? { hospitalId: h.id, district: h.district } : {}),
+      onSubmit: f => { if (!doctorOk(f)) return false; const d = { id: nextId('D', db.doctors, 4), added: todayIso }; readDoctor(f, d); db.doctors.push(d); return `${d.name} added${d.hospital ? ' at ' + d.hospital : ''}.`; },
+    });
+    refreshHospitalSelect();
+  };
+  ACTIONS['edit-doctor'] = id => {
+    const d = doctorById(id); if (!d) return;
+    openModal({ title: `Edit ${d.name}`, size: 'lg', body: doctorForm(d), onSubmit: f => { if (!doctorOk(f, d)) return false; readDoctor(f, d); return `${d.name} saved.`; } });
+    refreshHospitalSelect();
+  };
+  function deleteDoctors(items) {
+    confirmModal(`Delete ${items.length === 1 ? items[0].name : items.length + ' doctors'}?`, 'This cannot be undone.', 'Delete', () => {
+      const ids = new Set(items.map(d => d.id)); db.doctors = db.doctors.filter(d => !ids.has(d.id));
+      if (listState.doctors) listState.doctors.sel.clear();
+      return `${items.length} deleted.`;
+    });
+  }
+  ACTIONS['del-doctor'] = id => { const d = doctorById(id); if (d) deleteDoctors([d]); };
+  ACTIONS['view-doctor'] = id => {
+    const d = doctorById(id); if (!d) return;
+    const h = docHosp(d);
+    const near = h ? nearChemists(h) : [];
+    openModal({
+      title: d.name, size: 'lg',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-doctor" data-id="${esc(d.id)}">Edit</button>${h ? `<button type="button" class="btn" data-act="view-hospital" data-id="${esc(h.id)}">Open hospital</button>` : ''}</div>`,
+      body: `${detailGrid([['Designation', esc(d.designation || '—')], ['Specialization', esc(d.specialization || '—')], ['Qualification', esc(d.qualification || '—')], ['Mobile', telLink(d.mobile)], ['Email', d.email ? `<a href="mailto:${esc(d.email)}">${esc(d.email)}</a>` : '—'], ['Hospital', esc(h?.name || d.hospital || '—')], ['Hospital type', esc(h?.type || '—')], ['District', esc(docDistrict(d) || '—')], ['Tehsil / block', esc(h?.tehsil || '—')]])}
+        ${d.notes ? `<div><div class="small muted">Notes</div><div>${esc(d.notes)}</div></div>` : ''}
+        ${h ? `<div class="card-title" style="font-size:15px">Chemists near ${esc(h.name)} (${near.length})</div>${near.length ? miniTable([{ h: 'Chemist', c: c => `<a href="#" data-act="view-chemist" data-id="${esc(c.id)}">${esc(c.name)}</a>` }, { h: 'Village / locality', c: c => esc(c.locality || c.city || '—') }, { h: 'Mobile', c: c => telLink(c.phone) }], near) : '<div class="small muted">No chemist has this hospital as nearby hospital yet.</div>'}` : ''}`,
+    });
+  };
+  const DOC_CSV = ['name', 'designation', 'specialization', 'qualification', 'mobile', 'email', 'hospital', 'district', 'notes'];
+  ACTIONS['doc-export'] = () => downloadText(`doctors-directory-${todayIso}.csv`, [DOC_CSV.join(','), ...listRows('doctors').map(d => DOC_CSV.map(k => csvCell(k === 'hospital' ? (docHosp(d)?.name || d.hospital) : k === 'district' ? docDistrict(d) : d[k])).join(','))].join('\r\n'));
+  function importDoctors(text) {
+    const rows = parseCsv(text.replace(/^﻿/, ''));
+    if (rows.length < 2) throw new Error('The CSV has no rows.');
+    const head = rows[0].map(h => h.trim().toLowerCase().replace(/[^a-z]/g, ''));
+    const alias = { name: 'name', doctor: 'name', doctorname: 'name', designation: 'designation', post: 'designation', specialization: 'specialization', specialisation: 'specialization', speciality: 'specialization', specialty: 'specialization', qualification: 'qualification', degree: 'qualification', mobile: 'mobile', phone: 'mobile', mobileno: 'mobile', email: 'email', hospital: 'hospital', hospitalname: 'hospital', workingat: 'hospital', district: 'district', notes: 'notes' };
+    const map = head.map(h => alias[h] || null);
+    if (!map.includes('name')) throw new Error('The CSV needs a “name” column.');
+    let added = 0, updated = 0, newHosp = 0;
+    rows.slice(1).forEach(r => {
+      const f = {}; map.forEach((k, i) => { if (k) f[k] = String(r[i] ?? '').trim(); });
+      if (!f.name) return;
+      const mobile = f.mobile ? f.mobile.replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '') : '';
+      const district = HP_DISTRICTS.find(x => norm(x) === norm(f.district)) || f.district || '';
+      let h = f.hospital ? (db.hospitals || []).filter(x => norm(x.name) === norm(f.hospital)).sort((a, b) => (norm(b.district) === norm(district)) - (norm(a.district) === norm(district)))[0] : null;
+      if (f.hospital && !h) { h = { id: nextId('H', db.hospitals, 4), name: f.hospital, type: 'Other', district, tehsil: '', locality: '', pincode: '', source: 'Imported with doctors' }; db.hospitals.push(h); newHosp++; }
+      const vals = { name: f.name, designation: f.designation || '', specialization: f.specialization || '', qualification: f.qualification || '', mobile, email: f.email || '', notes: f.notes || '', hospitalId: h?.id || '', hospital: h?.name || '', district: h?.district || district };
+      const ex = (db.doctors || []).find(x => (mobile && x.mobile === mobile) || (norm(x.name) === norm(f.name) && x.hospitalId === vals.hospitalId));
+      if (ex) { Object.keys(vals).forEach(k => { if (vals[k]) ex[k] = vals[k]; }); updated++; } else { db.doctors.push({ id: nextId('D', db.doctors, 4), added: todayIso, ...vals }); added++; }
+    });
+    return { added, updated, newHosp };
   }
 
   // Chemist orders
@@ -3099,6 +3255,11 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     }
     if (t.matches('[data-lselall]')) { $$('#lineBody [data-lsel]').forEach(c => { c.checked = t.checked; }); updateSaleSel(); return; }
     if (t.matches('#lineBody [data-lsel]')) { updateSaleSel(); return; }
+    if (t.id === 'docCsv' && t.files[0]) {
+      try { const r = importDoctors(await t.files[0].text()); refresh(); toast(`${r.added} doctors added, ${r.updated} updated${r.newHosp ? `, ${r.newHosp} new hospitals added to the directory` : ''}.`); }
+      catch (err) { toast(err.message || 'Could not read the CSV.'); }
+      t.value = ''; return;
+    }
     if (t.id === 'hospCsv' && t.files[0]) {
       try { const r = importHospitals(await t.files[0].text()); refresh(); toast(`${r.added} added, ${r.updated} updated in the hospital directory.`); }
       catch (err) { toast(err.message || 'Could not read the CSV.'); }
