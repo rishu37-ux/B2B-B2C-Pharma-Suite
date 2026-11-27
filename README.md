@@ -14,6 +14,9 @@ Dashboard for a medical supplies distributor. Plain HTML, CSS and JavaScript —
 - **Purchase Orders** — create, receive and cancel POs
 - **Goods Receipt (GRN)** — receive goods against a PO and add batches to stock
 - **Purchase Invoices** — supplier bills, due dates and payments
+- **Supplier folders** — each supplier's bills (with the uploaded bill copy), item purchase history and item summary
+
+Lists for sales, stock, products, purchased items and invoices have filters for company/brand, category, type/form, item, supplier and month. Stock, products and chemists can be ticked to set the same CD%, TD% or GST% on many rows at once; the bill entry grid and the sale bill editor have the same option for their lines. Bill copies are stored in the browser's IndexedDB and are not part of the JSON backup.
 
 ## Run
 

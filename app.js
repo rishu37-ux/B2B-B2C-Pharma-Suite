@@ -343,6 +343,9 @@
     file: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/>',
     upload: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    clip: '<path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.01"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -372,6 +375,7 @@
     grn: 'Goods received against purchase orders',
     invoices: 'Supplier bills and payments due',
     search: 'Search results',
+    folder: 'Every bill from this supplier, and what was bought when',
   };
 
   function renderNav(route) {
@@ -406,33 +410,114 @@
       <tbody>${rows.map((row, i) => `<tr>${columns.map(c => `<td class="${c.r ? 'r num' : ''}">${c.c(row, i)}</td>`).join('')}</tr>`).join('')}</tbody>${foot}</table>`;
   }
 
+  // Generic list card: tabs, search, dropdown filters, and (optionally) checkbox selection with a bulk-edit bar.
+  // cfg.filters: [{ k, label, options: [[value, label]], test(row, value) }]
+  // cfg.select:  { id(row), fields: [{ k, label, type: 'pct' | 'gst' | 'select', options? }], apply?(items, vals), extra?, actions? }
   const lists = {};
   const listState = {};
+  const bulkInput = (key, f) => {
+    const name = `data-bulk="${key}|${f.k}"`;
+    if (f.type === 'select') return `<label class="bf"><span>${f.label}</span><select ${name}><option value="">— keep —</option>${f.options.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select></label>`;
+    return `<label class="bf"><span>${f.label}</span><input ${name} inputmode="decimal" placeholder="—" ${f.type === 'gst' ? 'list="dl-gst"' : ''}></label>`;
+  };
   function useList(cfg) {
     lists[cfg.key] = cfg;
-    const st = listState[cfg.key] || (listState[cfg.key] = { q: '', tab: cfg.tabs ? cfg.tabs[0].id : null });
+    const st = listState[cfg.key] || (listState[cfg.key] = { q: '', tab: cfg.tabs ? cfg.tabs[0].id : null, f: {}, sel: new Set(), visible: [] });
+    const k = cfg.key;
     return `<section class="card">
       <div class="card-head">
-        <h2 class="card-title">${cfg.title}</h2><span class="hint" id="cnt-${cfg.key}"></span>
+        <h2 class="card-title">${cfg.title}</h2><span class="hint" id="cnt-${k}"></span>
         <div class="spacer"></div>
         <div class="toolbar">
-          ${cfg.tabs ? `<div class="tabs" data-tabs="${cfg.key}">${cfg.tabs.map(t => `<button type="button" data-tab="${t.id}" class="${st.tab === t.id ? 'active' : ''}">${t.label}</button>`).join('')}</div>` : ''}
-          ${cfg.noSearch ? '' : `<label class="search">${icon('search')}<input data-list-search="${cfg.key}" value="${esc(st.q)}" placeholder="Search…"></label>`}
+          ${cfg.tabs ? `<div class="tabs" data-tabs="${k}">${cfg.tabs.map(t => `<button type="button" data-tab="${t.id}" class="${st.tab === t.id ? 'active' : ''}">${t.label}</button>`).join('')}</div>` : ''}
+          ${cfg.noSearch ? '' : `<label class="search">${icon('search')}<input data-list-search="${k}" value="${esc(st.q)}" placeholder="Search…"></label>`}
           ${cfg.actions || ''}
         </div>
       </div>
-      <div class="table-wrap" id="tbl-${cfg.key}"></div>
+      ${cfg.filters ? `<div class="filter-bar">${icon('filter')}${cfg.filters.map(f => `<label class="filter"><span>${f.label}</span><select data-list-filter="${k}|${f.k}"><option value="">All</option>${f.options.map(([v, l]) => `<option value="${esc(v)}" ${st.f[f.k] === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`).join('')}
+        <button type="button" class="btn sm ghost ${Object.values(st.f).some(Boolean) ? '' : 'hidden'}" data-filter-clear="${k}" id="fclr-${k}">Clear filters</button></div>` : ''}
+      ${cfg.select ? `<div class="bulk-bar hidden" id="bulk-${k}">
+        <span class="bulk-n" id="bulkn-${k}"></span>
+        ${cfg.select.fields.map(f => bulkInput(k, f)).join('')}
+        <button type="button" class="btn sm primary" data-bulkapply="${k}">Apply to selected</button>
+        ${cfg.select.extra || ''}
+        <button type="button" class="btn sm ghost" data-bulkclear="${k}">Clear selection</button>
+        <span class="small muted bulk-hint">Type a value to set it on every ticked row. Empty boxes are left as they are.</span>
+      </div>` : ''}
+      <div class="table-wrap" id="tbl-${k}"></div>
     </section>`;
+  }
+  function listRows(key) {
+    const cfg = lists[key]; const st = listState[key];
+    let rows = cfg.rows();
+    if (cfg.tabs) { const t = cfg.tabs.find(t => t.id === st.tab); if (t && t.filter) rows = rows.filter(t.filter); }
+    (cfg.filters || []).forEach(f => { const v = st.f[f.k]; if (v) rows = rows.filter(r => f.test(r, v)); });
+    if (st.q) { const q = st.q.toLowerCase(); rows = rows.filter(r => cfg.text(r).toLowerCase().includes(q)); }
+    return rows;
   }
   function fillList(key) {
     const cfg = lists[key]; const st = listState[key];
     const el = $('#tbl-' + key); if (!cfg || !el) return;
-    let rows = cfg.rows();
-    if (cfg.tabs) { const t = cfg.tabs.find(t => t.id === st.tab); if (t && t.filter) rows = rows.filter(t.filter); }
-    if (st.q) { const q = st.q.toLowerCase(); rows = rows.filter(r => cfg.text(r).toLowerCase().includes(q)); }
-    el.innerHTML = table(cfg.columns, rows, cfg.empty, cfg.foot ? cfg.foot(rows) : '');
-    const cnt = $('#cnt-' + key); if (cnt) cnt.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}`;
+    const rows = listRows(key);
+    let columns = cfg.columns;
+    if (cfg.select) {
+      const ids = rows.map(r => String(cfg.select.id(r)));
+      st.visible = ids;
+      const all = ids.length > 0 && ids.every(id => st.sel.has(id));
+      columns = [{ h: `<input type="checkbox" class="cb" data-selall="${key}" ${all ? 'checked' : ''} aria-label="Select all shown rows">`, c: r => { const id = String(cfg.select.id(r)); return `<input type="checkbox" class="cb" data-sel="${key}" value="${esc(id)}" ${st.sel.has(id) ? 'checked' : ''} aria-label="Select row">`; } }, ...columns];
+    }
+    el.innerHTML = table(columns, rows, cfg.empty, cfg.foot ? cfg.foot(rows) : '');
+    updateListMeta(key, rows.length);
   }
+  function updateListMeta(key, shown) {
+    const st = listState[key]; const cfg = lists[key];
+    if (shown == null) shown = $$(`#tbl-${key} tbody tr`).length;
+    const cnt = $('#cnt-' + key);
+    if (cnt) cnt.textContent = `${shown} record${shown === 1 ? '' : 's'}${cfg.select && st.sel.size ? ` · ${st.sel.size} selected` : ''}`;
+    $('#fclr-' + key)?.classList.toggle('hidden', !Object.values(st.f).some(Boolean));
+    const bar = $('#bulk-' + key);
+    if (bar) { bar.classList.toggle('hidden', !st.sel.size); $('#bulkn-' + key).textContent = `${st.sel.size} selected`; }
+    const sa = $(`[data-selall="${key}"]`);
+    if (sa) { const n = st.visible.filter(id => st.sel.has(id)).length; sa.checked = n > 0 && n === st.visible.length; sa.indeterminate = n > 0 && n < st.visible.length; }
+  }
+  const selectedItems = key => { const cfg = lists[key], st = listState[key]; return cfg.rows().filter(r => st.sel.has(String(cfg.select.id(r)))); };
+  function bulkApply(key) {
+    const cfg = lists[key]; const st = listState[key];
+    const items = selectedItems(key);
+    if (!items.length) { toast('Tick at least one row first.'); return; }
+    const vals = {}; const said = [];
+    for (const f of cfg.select.fields) {
+      const el = $(`[data-bulk="${key}|${f.k}"]`); const raw = (el?.value || '').trim();
+      if (raw === '') continue;
+      if (f.type === 'select') { vals[f.k] = raw; said.push(`${f.label} ${f.options.find(o => String(o[0]) === raw)?.[1] || raw}`); continue; }
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0 || v > 100) { toast(`${f.label} must be a number from 0 to 100.`); el.focus(); return; }
+      vals[f.k] = v; said.push(`${f.label} ${dec(v)}`);
+    }
+    if (!said.length) { toast('Type at least one value to apply.'); return; }
+    const msg = cfg.select.apply ? cfg.select.apply(items, vals) : (items.forEach(it => Object.assign(it, vals)), null);
+    st.sel.clear(); refresh();
+    toast(msg || `${said.join(', ')} set on ${items.length} row${items.length === 1 ? '' : 's'}.`);
+  }
+
+  // Ready-made filters
+  const byName = (a, b) => String(a[1]).localeCompare(String(b[1]));
+  const PROD_FILTERS = {
+    company: ['Company / brand', () => db.companies.map(c => [c.id, c.name]).sort(byName), (p, v) => p.companyId === v],
+    category: ['Category', () => db.categories.map(c => [c.id, c.name]), (p, v) => p.categoryId === v],
+    form: ['Type / form', () => db.forms.map(f => [f.name, f.name]), (p, v) => p.form === v],
+    item: ['Item', () => db.products.map(p => [p.id, p.name]).sort(byName), (p, v) => p.id === v],
+  };
+  // getProds(row) returns the products on that row (one for a stock line, several for a bill)
+  const prodFilters = (getProds, keys = ['company', 'category', 'form', 'item']) => keys.map(k => {
+    const [label, opts, match] = PROD_FILTERS[k];
+    return { k, label, options: opts(), test: (r, v) => getProds(r).some(p => p && match(p, v)) };
+  });
+  const monthLabel = k => parse(k + '-01').toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+  const monthFilter = (dates, getDate) => ({ k: 'month', label: 'Month', options: [...new Set(dates.map(monthKey))].sort().reverse().map(m => [m, monthLabel(m)]), test: (r, v) => monthKey(getDate(r)) === v });
+  const supplierFilter = getSid => ({ k: 'supplier', label: 'Supplier', options: db.suppliers.map(s => [s.id, s.name]).sort(byName), test: (r, v) => getSid(r) === v });
+  const PCT_FIELDS = [{ k: 'cd', label: 'CD%', type: 'pct' }, { k: 'td', label: 'TD%', type: 'pct' }];
+  const GST_FIELD = { k: 'gst', label: 'GST%', type: 'gst' };
 
   const niceMax = v => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); const n = v / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; };
   const axisMoney = v => v >= 1e7 ? '₹' + +(v / 1e7).toFixed(1) + 'Cr' : v >= 1e5 ? '₹' + +(v / 1e5).toFixed(1) + 'L' : v >= 1e3 ? '₹' + +(v / 1e3).toFixed(0) + 'K' : '₹' + Math.round(v);
@@ -551,6 +636,7 @@
         key: 'sales', title: 'Sale bills',
         actions: actBtn('new-sale', '', icon('plus') + 'New sale', 'primary'),
         tabs: [{ id: 'all', label: 'All' }, { id: 'chem', label: 'Chemists', filter: s => s.party.type === 'chemist' }, { id: 'ind', label: 'Individuals', filter: s => s.party.type === 'individual' }, ...['Due', 'Overdue'].map(s => ({ id: s, label: s, filter: x => saleStatus(x) === s }))],
+        filters: [...prodFilters(s => s.lines.map(l => prod(l.productId))), { k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (s, v) => s.party.chemistId === v }, monthFilter(db.sales.map(s => s.date), s => s.date)],
         rows: () => [...db.sales].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
         text: s => [s.no, partyName(s), partyCity(s), ...s.lines.map(l => prod(l.productId)?.name + ' ' + l.batch)].join(' '),
         columns: [
@@ -585,6 +671,7 @@
         actions: actBtn('new-chemist', '', icon('plus') + 'Onboard chemist', 'primary'),
         tabs: [{ id: 'all', label: 'All' }, ...['Active', 'Pending verification', 'On hold'].map(s => ({ id: s, label: s === 'Pending verification' ? 'Pending' : s, filter: c => c.status === s }))],
         rows: () => db.chemists,
+        select: { id: c => c.id, fields: PCT_FIELDS, apply: (items, v) => { items.forEach(c => Object.assign(c, v)); return `Default ${Object.keys(v).map(k => k.toUpperCase() + ' ' + dec(v[k]) + '%').join(', ')} set for ${items.length} chemist(s). Used on their new bills.`; } },
         text: c => [c.id, c.name, c.owner, c.city, c.phone, c.dl, c.gstin].join(' '),
         columns: [
           { h: 'Chemist', c: c => `<span class="strong">${esc(c.name)}</span><div class="small muted">${esc(c.owner)} · ${esc(c.id)}</div>` },
@@ -626,7 +713,21 @@
         ],
         rows: () => [...db.batches].sort((a, b) => (prod(a.productId)?.name || '').localeCompare(prod(b.productId)?.name || '') || a.expiry.localeCompare(b.expiry)),
         text: stockText,
-        foot: rows => rows.length ? `<tfoot><tr><td colspan="8" class="strong">Total</td><td class="r num strong">${qty(rows.reduce((a, b) => a + (b.qty || 0), 0))}</td><td class="r num">${qty(rows.reduce((a, b) => a + (b.free || 0), 0))}</td><td colspan="5"></td><td class="r num strong">${dec(rows.reduce((a, b) => a + batchAmount(b), 0))}</td><td colspan="2"></td></tr></tfoot>` : '',
+        filters: [...prodFilters(b => [prod(b.productId)]), supplierFilter(b => b.supplierId)],
+        select: {
+          id: b => b.id, fields: [...PCT_FIELDS, GST_FIELD],
+          extra: `<button type="button" class="btn sm" data-bulkact="stock|verify">Mark checked</button><button type="button" class="btn sm ghost danger" data-bulkact="stock|delete">Delete</button>`,
+          actions: {
+            verify: items => { items.forEach(b => { b.verified = true; }); return `${items.length} line(s) marked checked.`; },
+            delete: items => {
+              confirmModal(`Delete ${items.length} stock line(s)?`, `This removes ${qty(items.reduce((a, b) => a + avail(b), 0))} units from stock. Bills that used these batches keep their record. This cannot be undone.`, 'Delete lines', () => {
+                const ids = new Set(items.map(b => b.id)); db.batches = db.batches.filter(b => !ids.has(b.id)); listState.stock.sel.clear(); return `${items.length} stock line(s) deleted.`;
+              });
+              return false;
+            },
+          },
+        },
+        foot: rows => rows.length ? `<tfoot><tr><td colspan="9" class="strong">Total</td><td class="r num strong">${qty(rows.reduce((a, b) => a + (b.qty || 0), 0))}</td><td class="r num">${qty(rows.reduce((a, b) => a + (b.free || 0), 0))}</td><td colspan="5"></td><td class="r num strong">${dec(rows.reduce((a, b) => a + batchAmount(b), 0))}</td><td colspan="2"></td></tr></tfoot>` : '',
         columns: [
           { h: 'SN', c: (b, i) => `<span class="muted">${i + 1}</span>` },
           { h: 'Item name', c: b => `<span class="strong">${esc(prod(b.productId)?.name)}</span>${b.source ? `<div class="small muted">${esc(b.source)}</div>` : ''}` },
@@ -681,7 +782,22 @@
     ${useList({
       key: 'products', title: 'Products',
       actions: actBtn('new-product', '', icon('plus') + 'Add product', 'primary'),
-      tabs: [{ id: 'all', label: 'All' }, ...db.categories.map(c => ({ id: c.id, label: c.name, filter: p => p.categoryId === c.id })).filter(t => db.products.some(t.filter)), { id: 'low', label: 'Low stock', filter: p => { const q = sellableQty(p.id); return q > 0 && q < p.reorder; } }, { id: 'out', label: 'Out of stock', filter: p => sellableQty(p.id) <= 0 }],
+      tabs: [{ id: 'all', label: 'All' }, { id: 'low', label: 'Low stock', filter: p => { const q = sellableQty(p.id); return q > 0 && q < p.reorder; } }, { id: 'out', label: 'Out of stock', filter: p => sellableQty(p.id) <= 0 }],
+      filters: prodFilters(p => [p], ['company', 'category', 'form']),
+      select: {
+        id: p => p.id,
+        fields: [GST_FIELD, { k: 'categoryId', label: 'Category', type: 'select', options: db.categories.map(c => [c.id, c.name]) }, { k: 'form', label: 'Form', type: 'select', options: db.forms.map(f => [f.name, f.name]) }, { k: 'companyId', label: 'Company', type: 'select', options: db.companies.map(c => [c.id, c.name]).sort(byName) }],
+        extra: '<label class="check-line small"><input type="checkbox" id="bulkSyncGst" checked> Also change GST on their stock</label>',
+        apply: (items, v) => {
+          const sync = $('#bulkSyncGst')?.checked;
+          let nb = 0;
+          items.forEach(p => {
+            Object.assign(p, v);
+            if (v.gst != null && sync) db.batches.filter(b => b.productId === p.id && avail(b) > 0).forEach(b => { b.gst = v.gst; nb++; });
+          });
+          return `${items.length} product(s) updated${nb ? ` · GST changed on ${nb} stock line(s)` : ''}.`;
+        },
+      },
       rows: () => [...db.products].sort((a, b) => a.name.localeCompare(b.name)),
       text: p => [p.id, p.name, p.salt, company(p.companyId)?.name, p.mfg, category(p.categoryId)?.name, p.form, p.hsn].join(' '),
       columns: [
@@ -702,6 +818,46 @@
       ],
     })}
     <div class="grid g-3">${masterCard('companies')}${masterCard('categories')}${masterCard('forms')}</div>`;
+
+  // Every purchased line (from purchase bills, and goods receipts not yet billed), newest first
+  function purchaseLines(sid) {
+    const out = [];
+    db.pinvoices.filter(p => !sid || p.supplierId === sid).forEach(p => piLines(p).forEach((l, i) => out.push({ ...l, key: `${p.no}#${i}`, date: p.date, docNo: p.no, ref: p.supplierInvNo, supplierId: p.supplierId, act: 'view-pi' })));
+    db.grns.filter(g => !g.invoiced && (!sid || g.supplierId === sid)).forEach(g => g.lines.forEach((l, i) => out.push({ ...l, key: `${g.no}#${i}`, date: g.date, docNo: g.no, ref: g.challan, supplierId: g.supplierId, act: 'view-grn' })));
+    return out.sort((a, b) => b.date.localeCompare(a.date) || b.docNo.localeCompare(a.docNo));
+  }
+  const lineAmount = l => calcLine(l).amount;
+  const plineCols = (withSupplier) => [
+    { h: 'Date', c: l => fmtDate(l.date) },
+    { h: 'Bill', c: l => `<a href="#" data-act="${l.act}" data-id="${esc(l.docNo)}" class="strong">${esc(l.docNo)}</a><div class="small muted">${esc(l.ref || '')}</div>` },
+    ...(withSupplier ? [{ h: 'Supplier', c: l => `<a href="#" data-nav="folder/${esc(l.supplierId)}">${esc(sup(l.supplierId)?.name || '—')}</a>` }] : []),
+    { h: 'Item name', c: l => `<span class="strong">${esc(prod(l.productId)?.name || l.name)}</span>` },
+    { h: 'Company', c: l => esc(company(prod(l.productId)?.companyId)?.name || '—') },
+    { h: 'Type', c: l => esc(prod(l.productId)?.form || '') },
+    { h: 'Batch', c: l => esc(l.batch) },
+    { h: 'Exp', c: l => isoToExp(l.expiry) },
+    { h: 'Qty', r: 1, c: l => qty(l.qty) },
+    { h: 'Free', r: 1, c: l => qty(l.free) },
+    { h: 'Rate', r: 1, c: l => dec(l.rate) },
+    { h: 'MRP', r: 1, c: l => dec(l.mrp) },
+    { h: 'CD%', r: 1, c: l => dec(l.cd) },
+    { h: 'GST%', r: 1, c: l => dec(l.gst) },
+    { h: 'Amount', r: 1, c: l => dec(lineAmount(l)) },
+  ];
+  const plineFoot = (span) => rows => rows.length ? `<tfoot><tr><td colspan="${span}" class="strong">Total</td><td class="r num strong">${qty(rows.reduce((a, l) => a + (l.qty || 0), 0))}</td><td class="r num">${qty(rows.reduce((a, l) => a + (l.free || 0), 0))}</td><td colspan="4"></td><td class="r num strong">${dec(rows.reduce((a, l) => a + lineAmount(l), 0))}</td></tr></tfoot>` : '';
+  const supplierDocs = sid => [...db.pinvoices.filter(p => p.supplierId === sid), ...db.grns.filter(g => g.supplierId === sid && !g.invoiced)];
+  function folderCard(s) {
+    const bills = db.pinvoices.filter(p => p.supplierId === s.id);
+    const last = [...bills.map(p => p.date), ...db.grns.filter(g => g.supplierId === s.id).map(g => g.date)].sort().pop();
+    const pay = supPayable(s.id);
+    return `<button type="button" class="folder-card" data-nav="folder/${esc(s.id)}">
+      <div class="folder-ic">${icon('folder')}</div>
+      <div class="folder-main"><div class="strong ellipsis">${esc(s.name)}</div>
+        <div class="small muted">${bills.length} bill${bills.length === 1 ? '' : 's'} · ${last ? 'last ' + fmtDate(last) : 'no purchases yet'}</div>
+        <div class="small"><span class="num strong">${compact(bills.reduce((a, p) => a + p.total, 0))}</span> bought${pay > 0.5 ? ` · <span class="bad-text">${compact(pay)} due</span>` : ''}</div></div>
+    </button>`;
+  }
+  const lastPurchase = sid => [...db.pinvoices.filter(p => p.supplierId === sid), ...db.grns.filter(g => g.supplierId === sid)].map(x => x.date).sort().pop() || '';
 
   VIEWS.purchase = () => {
     const pM = sumBy(db.pinvoices, p => monthKey(p.date) === thisM), pP = sumBy(db.pinvoices, p => monthKey(p.date) === prevM);
@@ -732,6 +888,10 @@
           <button type="button" class="btn primary" data-nav="billentry">${icon('upload')}Upload bill</button>
         </div>
       </section>
+      <section class="card">
+        <div class="card-head"><h2 class="card-title">Supplier folders</h2><span class="hint">Every bill is filed under its supplier — open a folder for its bills and item history</span><div class="spacer"></div>${actBtn('new-supplier', '', icon('plus') + 'Add supplier', 'sm')}</div>
+        <div class="card-body"><div class="folder-grid">${[...db.suppliers].sort((a, b) => lastPurchase(b.id).localeCompare(lastPurchase(a.id)) || a.name.localeCompare(b.name)).map(folderCard).join('') || '<div class="muted">No suppliers yet.</div>'}</div></div>
+      </section>
       <div class="grid g-2-1">
         <section class="card"><div class="card-head"><h2 class="card-title">Monthly purchases</h2><span class="hint">Purchase bills by date</span></div>
           <div class="card-body">${barChart(months.map(m => m.label), series)}</div></section>
@@ -750,7 +910,85 @@
           { h: 'Status', c: a => pill(a.status) },
           { h: '', c: a => actBtn(a.act, a.no, 'View', 'ghost') },
         ], activity)}</div>
-      </section>`;
+      </section>
+      ${useList({
+        key: 'plines', title: 'Purchased items',
+        filters: [supplierFilter(l => l.supplierId), ...prodFilters(l => [prod(l.productId)]), monthFilter(purchaseLines().map(l => l.date), l => l.date)],
+        rows: () => purchaseLines(),
+        text: l => [l.docNo, l.ref, sup(l.supplierId)?.name, prod(l.productId)?.name, company(prod(l.productId)?.companyId)?.name, l.batch].join(' '),
+        columns: plineCols(true),
+        foot: plineFoot(8),
+      })}`;
+  };
+
+  // Supplier folder: one supplier's bills and everything bought from them
+  let folderId = '';
+  VIEWS.folder = () => {
+    const s = sup(folderId);
+    const docs = supplierDocs(s.id);
+    const lines = purchaseLines(s.id);
+    const total = db.pinvoices.filter(p => p.supplierId === s.id).reduce((a, p) => a + p.total, 0);
+    const byItem = {};
+    lines.forEach(l => {
+      const k = l.productId; const x = byItem[k] || (byItem[k] = { productId: k, times: 0, qty: 0, free: 0, amount: 0, last: '', lastRate: 0 });
+      x.times++; x.qty += l.qty || 0; x.free += l.free || 0; x.amount += lineAmount(l);
+      if (l.date >= x.last) { x.last = l.date; x.lastRate = l.rate; }
+    });
+    return `
+      <section class="card">
+        <div class="card-head"><button type="button" class="btn sm ghost" data-nav="suppliers">← Suppliers</button><div class="folder-ic sm">${icon('folder')}</div><h2 class="card-title">${esc(s.name)}</h2><span class="hint">${esc(s.id)}</span><div class="spacer"></div>
+          <div class="toolbar">${actBtn('edit-supplier', s.id, 'Edit supplier', 'ghost')}${actBtn('new-po', '', icon('plus') + 'Purchase order')}<button type="button" class="btn sm primary" data-act="upload-for" data-id="${esc(s.id)}">${icon('upload')}Upload bill</button></div></div>
+        <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['City', esc(s.city || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence', esc(s.dl || '—')], ['Terms', (s.terms ?? 30) + ' days']])}</div>
+      </section>
+      <div class="grid g-4">
+        ${kpi('Purchase bills', qty(db.pinvoices.filter(p => p.supplierId === s.id).length), `${db.grns.filter(g => g.supplierId === s.id && !g.invoiced).length} receipts awaiting a bill`)}
+        ${kpi('Total purchased', compact(total), `${Object.keys(byItem).length} different items`)}
+        ${kpi('Payable', compact(supPayable(s.id)), `${db.pinvoices.filter(p => p.supplierId === s.id && piStatus(p) === 'Overdue').length} overdue bills`)}
+        ${kpi('Last purchase', lastPurchase(s.id) ? fmtDate(lastPurchase(s.id)) : '—', lastPurchase(s.id) ? `${-daysFrom(lastPurchase(s.id))} days ago` : 'Nothing bought yet')}
+      </div>
+      ${useList({
+        key: 'fbills', title: 'Bills in this folder',
+        filters: [monthFilter(docs.map(d => d.date), d => d.date)],
+        rows: () => supplierDocs(s.id).sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
+        text: d => [d.no, d.supplierInvNo, d.challan, ...(d.files || []), ...piLines(d).map(l => prod(l.productId)?.name)].join(' '),
+        empty: 'No bills from this supplier yet. Use “Upload bill” to add one.',
+        columns: [
+          { h: 'Date', c: d => fmtDate(d.date) },
+          { h: 'Our no.', c: d => `<span class="strong">${esc(d.no)}</span>` },
+          { h: 'Supplier bill', c: d => esc(d.supplierInvNo || (d.challan ? 'Challan ' + d.challan : '—')) },
+          { h: 'Source', c: d => d.supplierInvNo != null ? pill(d.grnNo ? 'GRN' : (d.source || 'Manual')) : pill('Awaiting invoice') },
+          { h: 'Items', c: d => { const ls = piLines(d); return `${ls.length}<div class="small muted ellipsis" style="max-width:260px">${esc(ls.map(l => prod(l.productId)?.name).join(', '))}</div>`; } },
+          { h: 'Amount', r: 1, c: d => money(d.total) },
+          { h: 'Balance', r: 1, c: d => d.supplierInvNo != null ? money(balance(d)) : '—' },
+          { h: 'Status', c: d => d.supplierInvNo != null ? pill(piStatus(d)) : '' },
+          { h: 'Bill copy', c: d => d.supplierInvNo == null ? '' : d.files?.length ? `<button type="button" class="btn sm ghost" data-act="open-bill-file" data-id="${esc(d.no)}">${icon('clip')}${d.files.length} file${d.files.length === 1 ? '' : 's'}</button>` : `<button type="button" class="btn sm ghost" data-act="attach-bill" data-id="${esc(d.no)}">${icon('clip')}Attach</button>` },
+          { h: '', c: d => d.supplierInvNo != null ? rowActs(actBtn('view-pi', d.no, 'View', 'ghost'), balance(d) > 0.5 && actBtn('pay-pi', d.no, 'Pay')) : rowActs(actBtn('view-grn', d.no, 'View', 'ghost'), actBtn('invoice-grn', d.no, 'Add invoice')) },
+        ],
+      })}
+      ${useList({
+        key: 'fitems', title: 'Item purchase history',
+        filters: [...prodFilters(l => [prod(l.productId)]), monthFilter(lines.map(l => l.date), l => l.date)],
+        rows: () => purchaseLines(s.id),
+        text: l => [l.docNo, l.ref, prod(l.productId)?.name, company(prod(l.productId)?.companyId)?.name, l.batch].join(' '),
+        empty: 'Nothing bought from this supplier yet.',
+        columns: plineCols(false),
+        foot: plineFoot(7),
+      })}
+      ${useList({
+        key: 'fsum', title: 'Items bought — summary',
+        rows: () => Object.values(byItem).sort((a, b) => b.amount - a.amount),
+        text: x => [prod(x.productId)?.name, company(prod(x.productId)?.companyId)?.name].join(' '),
+        empty: 'Nothing bought from this supplier yet.',
+        columns: [
+          { h: 'Item name', c: x => `<span class="strong">${esc(prod(x.productId)?.name || '—')}</span><div class="small muted">${esc(company(prod(x.productId)?.companyId)?.name || '')}</div>` },
+          { h: 'Times bought', r: 1, c: x => x.times },
+          { h: 'Total qty', r: 1, c: x => qty(x.qty) },
+          { h: 'Free', r: 1, c: x => qty(x.free) },
+          { h: 'Last rate', r: 1, c: x => dec(x.lastRate) },
+          { h: 'Last bought', c: x => fmtDate(x.last) },
+          { h: 'Amount', r: 1, c: x => dec(x.amount) },
+        ],
+      })}`;
   };
 
   VIEWS.suppliers = () => {
@@ -761,7 +999,9 @@
       rows: () => db.suppliers,
       text: s => [s.id, s.name, s.contact, s.city, s.gstin, s.dl, s.phone].join(' '),
       columns: [
-        { h: 'Supplier', c: s => `<span class="strong">${esc(s.name)}</span><div class="small muted">${esc(s.contact || '—')} · ${esc(s.id)}</div>` },
+        { h: 'Supplier', c: s => `<a href="#" data-nav="folder/${esc(s.id)}" class="folder-link">${icon('folder')}<span class="strong">${esc(s.name)}</span></a><div class="small muted">${esc(s.contact || '—')} · ${esc(s.id)}</div>` },
+        { h: 'Bills', r: 1, c: s => db.pinvoices.filter(p => p.supplierId === s.id).length },
+        { h: 'Last purchase', c: s => lastPurchase(s.id) ? fmtDate(lastPurchase(s.id)) : '—' },
         { h: 'City', c: s => esc(s.city || '—') },
         { h: 'Phone', c: s => esc(s.phone || '—') },
         { h: 'GSTIN', c: s => `<span class="small">${esc(s.gstin || '—')}</span>` },
@@ -769,7 +1009,7 @@
         { h: 'Terms', r: 1, c: s => s.terms + ' days' },
         { h: 'Purchases (6 mo)', r: 1, c: s => money(sumBy(db.pinvoices, p => p.supplierId === s.id && monthKey(p.date) >= since)) },
         { h: 'Payable', r: 1, c: s => money(supPayable(s.id)) },
-        { h: '', c: s => rowActs(actBtn('view-supplier', s.id, 'View', 'ghost'), actBtn('edit-supplier', s.id, 'Edit', 'ghost'), actBtn('del-supplier', s.id, 'Delete', 'ghost danger')) },
+        { h: '', c: s => rowActs(`<button type="button" class="btn sm" data-nav="folder/${esc(s.id)}">${icon('folder')}Open folder</button>`, actBtn('edit-supplier', s.id, 'Edit', 'ghost'), actBtn('del-supplier', s.id, 'Delete', 'ghost danger')) },
       ],
     });
   };
@@ -827,13 +1067,14 @@
         key: 'invoices', title: 'Purchase invoices',
         actions: `<button type="button" class="btn sm" data-nav="billentry">${icon('upload')}Upload bill</button>${actBtn('new-pi', '', icon('plus') + 'Invoice for a GRN', 'primary')}`,
         tabs: [{ id: 'all', label: 'All' }, { id: 'unpaid', label: 'Unpaid', filter: p => piStatus(p) !== 'Paid' }, { id: 'Overdue', label: 'Overdue', filter: p => piStatus(p) === 'Overdue' }, { id: 'Paid', label: 'Paid', filter: p => piStatus(p) === 'Paid' }],
+        filters: [supplierFilter(p => p.supplierId), ...prodFilters(p => piLines(p).map(l => prod(l.productId)), ['company', 'form', 'item']), monthFilter(db.pinvoices.map(p => p.date), p => p.date)],
         rows: () => [...db.pinvoices].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
         text: p => [p.no, p.supplierInvNo, p.grnNo, sup(p.supplierId)?.name].join(' '),
         columns: [
           { h: 'Invoice', c: p => `<span class="strong">${p.no}</span><div class="small muted">Supplier bill ${esc(p.supplierInvNo)}</div>` },
           { h: 'Date', c: p => fmtDate(p.date) },
-          { h: 'Supplier', c: p => esc(sup(p.supplierId)?.name) },
-          { h: 'Source', c: p => p.grnNo ? esc(p.grnNo) : pill(p.source || 'Manual') },
+          { h: 'Supplier', c: p => `<a href="#" data-nav="folder/${esc(p.supplierId)}">${esc(sup(p.supplierId)?.name)}</a>` },
+          { h: 'Source', c: p => (p.grnNo ? esc(p.grnNo) : pill(p.source || 'Manual')) + (p.files?.length ? ` <span class="muted ic-inline" title="Bill copy saved">${icon('clip')}</span>` : '') },
           { h: 'Amount', r: 1, c: p => money(p.total) },
           { h: 'Paid', r: 1, c: p => money(p.paid) },
           { h: 'Balance', r: 1, c: p => `<span class="${balance(p) > 0 ? 'strong' : 'muted'}">${money(balance(p))}</span>` },
@@ -847,6 +1088,8 @@
   // ---------- Bill upload / entry (purchase) ----------
   // entry = { source, files:[names], supplierId, supplierName, gstin, billNo, date, lines:[...], printed:{...}, csv }
   let entry = null;
+  let uploadFor = ''; // supplier chosen from a supplier folder's "Upload bill"
+  const withUploadFor = e => { if (uploadFor && sup(uploadFor)) e.supplierId = uploadFor; uploadFor = ''; return e; };
   let entryBusy = false;
   let pendingFiles = [];
   const ENTRY_COLS = [
@@ -910,6 +1153,7 @@
             <div class="dz-icon">${icon('upload')}</div>
             <div class="strong">Drop bill pages here or click to choose</div>
             <div class="small muted" id="fileList">${pendingFiles.length ? pendingFiles.map(f => esc(f.name)).join(', ') : 'No file chosen'}</div>
+            ${uploadFor && sup(uploadFor) ? `<div class="small">${icon('folder')} Will be filed under <b>${esc(sup(uploadFor).name)}</b></div>` : ''}
           </label>
           <div class="toolbar" style="margin-top:14px">
             <button type="button" class="btn primary" data-act="entry-ai" ${entryBusy ? 'disabled' : ''}>${icon('spark')}${entryBusy ? 'Reading bill…' : 'Read bill with AI'}</button>
@@ -935,6 +1179,10 @@
           <div class="field ${entry.supplierId ? 'hidden' : ''}" id="newSupGst"><label>Supplier GSTIN</label><input data-eh="gstin" value="${esc(entry.gstin)}" style="text-transform:uppercase"></div>
           <div class="field"><label>Supplier bill no. *</label><input data-eh="billNo" value="${esc(entry.billNo)}"></div>
           <div class="field"><label>Bill date *</label><input type="date" data-eh="date" value="${esc(entry.date)}" max="${todayIso}"></div>
+        </div>
+        <div class="toolbar" style="margin-top:14px">
+          <label class="btn sm">${icon('clip')}Attach bill copy<input type="file" id="entryAttach" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden></label>
+          <span class="small muted" id="entryFilesNote">${(entry.fileObjs || []).length ? `Will be filed in the supplier’s folder: ${esc(entry.fileObjs.map(f => f.name).join(', '))}` : 'Optional — the bill photo/PDF is kept in the supplier’s folder on this computer.'}</span>
         </div></div>
       </section>`;
 
@@ -942,8 +1190,17 @@
       <section class="card">
         <div class="card-head"><h2 class="card-title">3 · Check every line</h2><span class="hint">${entry.lines.length} lines · edit any cell</span><div class="spacer"></div>
           <div class="toolbar">${actBtn('entry-csv', '', 'Download CSV', 'ghost')}${actBtn('entry-add-row', '', icon('plus') + 'Add row')}</div></div>
+        <div class="bulk-bar" id="entryBulk">
+          <span class="bulk-n" id="eSelN">${entrySelText()}</span>
+          <label class="bf"><span>CD%</span><input id="ebCd" inputmode="decimal" placeholder="—"></label>
+          <label class="bf"><span>TD%</span><input id="ebTd" inputmode="decimal" placeholder="—"></label>
+          <label class="bf"><span>GST%</span><input id="ebGst" inputmode="decimal" placeholder="—" list="dl-gst"></label>
+          ${actBtn('entry-bulk', '', 'Apply', 'primary')}
+          ${actBtn('entry-del-sel', '', 'Delete ticked', 'ghost danger')}
+          <span class="small muted bulk-hint">Tick rows to give them the same discount or GST. With nothing ticked, the value goes on every row.</span>
+        </div>
         <div class="table-wrap"><table class="entry-grid">
-          <thead><tr><th>SN</th>${ENTRY_COLS.map(([, h, t]) => `<th class="${t === 'num' ? 'r' : ''}">${h}</th>`).join('')}<th class="r">Qty × Rate</th><th>Check</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" class="cb" data-eselall ${entry.lines.length && entry.lines.every(l => l.sel) ? 'checked' : ''} aria-label="Tick all rows"></th><th>SN</th>${ENTRY_COLS.map(([, h, t]) => `<th class="${t === 'num' ? 'r' : ''}">${h}</th>`).join('')}<th class="r">Qty × Rate</th><th>Check</th><th></th></tr></thead>
           <tbody id="entryBody">${entry.lines.map((l, i) => entryRow(l, i)).join('')}</tbody>
         </table></div>
         <div class="card-body" id="entrySummary">${entrySummary()}</div>
@@ -956,11 +1213,15 @@
   };
   function entryRow(l, i) {
     const c = checkLine(l);
-    return `<tr data-row="${i}" class="lv-${c.level}"><td class="muted">${i + 1}</td>${ENTRY_COLS.map(([k, , t, w]) =>
+    return `<tr data-row="${i}" class="lv-${c.level}"><td><input type="checkbox" class="cb" data-esel="${i}" ${l.sel ? 'checked' : ''} aria-label="Tick row ${i + 1}"></td><td class="muted">${i + 1}</td>${ENTRY_COLS.map(([k, , t, w]) =>
       `<td><input data-e="${i}|${k}" value="${esc(t === 'num' ? (l[k] || l[k] === 0 ? l[k] : '') : l[k])}" ${t === 'num' ? 'inputmode="decimal" class="r"' : ''} style="width:${w}px" ${k === 'name' ? 'list="dl-products"' : k === 'company' ? 'list="dl-companies"' : ''}></td>`).join('')}
       <td class="r num" data-calc>${dec(num(l.qty) * num(l.rate))}</td>
       <td data-check style="min-width:150px">${lineCheckHtml(l)}</td>
       <td>${actBtn('entry-del-row', i, '✕', 'ghost danger')}</td></tr>`;
+  }
+  function entrySelText() {
+    const n = entry ? entry.lines.filter(l => l.sel).length : 0;
+    return n ? `${n} row${n === 1 ? '' : 's'} ticked` : 'All rows';
   }
   function refreshEntryRow(i) {
     const tr = $(`#entryBody tr[data-row="${i}"]`); if (!tr) return;
@@ -1003,6 +1264,37 @@
     const blob = new Blob([text], { type: type + ';charset=utf-8' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  // ----- Bill copies (photos/PDFs) kept in this browser's IndexedDB, keyed by purchase invoice number -----
+  const billStore = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('pharmaSuite.billFiles', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('bills');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => { dbp = null; rej(r.error); };
+    }));
+    const run = async (mode, fn) => {
+      const d = await open();
+      return new Promise((res, rej) => {
+        const t = d.transaction('bills', mode); const req = fn(t.objectStore('bills'));
+        t.oncomplete = () => res(req.result); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+      });
+    };
+    return {
+      put: (k, files) => run('readwrite', s => s.put(files.map(f => ({ name: f.name, type: f.type, blob: f })), k)),
+      get: k => run('readonly', s => s.get(k)),
+      del: k => run('readwrite', s => s.delete(k)),
+      clear: () => run('readwrite', s => s.clear()),
+    };
+  })();
+  function fileBillCopies(pi, files) {
+    if (!files || !files.length) return;
+    pi.files = [...(pi.files || []), ...files.map(f => f.name)];
+    billStore.get(pi.no).catch(() => null)
+      .then(old => billStore.put(pi.no, [...(old || []).map(o => new File([o.blob], o.name, { type: o.type })), ...files]))
+      .catch(() => { pi.files = (pi.files || []).filter(n => !files.some(f => f.name === n)); save(); toast('The bill copy could not be saved in this browser (storage blocked or full).'); if (route === 'folder') render(); });
   }
 
   // ----- AI bill reading (Claude API, called from the browser with the user's own key) -----
@@ -1085,7 +1377,7 @@
     }
   }
   function entryFromExtraction(x, files) {
-    const e = newEntry('AI', { files: files.map(f => f.name) });
+    const e = newEntry('AI', { files: files.map(f => f.name), fileObjs: files.slice() });
     e.supplierName = (x.seller_name || '').trim();
     e.gstin = (x.seller_gstin || '').trim().toUpperCase();
     const match = db.suppliers.find(s => (e.gstin && norm(s.gstin) === norm(e.gstin)) || norm(s.name) === norm(e.supplierName));
@@ -1125,15 +1417,20 @@
   let route = 'overview';
   function renderDatalists() {
     $('#datalists').innerHTML = `<datalist id="dl-products">${db.products.map(p => `<option value="${esc(p.name)}">`).join('')}</datalist>
-      <datalist id="dl-companies">${db.companies.map(c => `<option value="${esc(c.name)}">`).join('')}</datalist>`;
+      <datalist id="dl-companies">${db.companies.map(c => `<option value="${esc(c.name)}">`).join('')}</datalist>
+      <datalist id="dl-gst">${[0, 5, 12, 18, 28].map(g => `<option value="${g}">`).join('')}</datalist>`;
   }
   function render() {
-    const hash = location.hash.replace('#', '');
-    route = VIEWS[hash] && hash !== 'search' ? hash : 'overview';
+    const hash = decodeURIComponent(location.hash.replace('#', ''));
+    if (hash.startsWith('folder/') && sup(hash.slice(7))) {
+      const id = hash.slice(7);
+      if (id !== folderId) ['fbills', 'fitems', 'fsum'].forEach(k => delete listState[k]);
+      folderId = id; route = 'folder';
+    } else route = VIEWS[hash] && !['search', 'folder'].includes(hash) ? hash : 'overview';
     const r = searchQuery.length >= 2 ? 'search' : route;
-    renderNav(r === 'search' ? '' : route);
+    renderNav(r === 'search' ? '' : r === 'folder' ? 'suppliers' : route);
     renderDatalists();
-    const item = NAV.flatMap(g => g.items).find(i => i[0] === r);
+    const item = r === 'folder' ? ['folder', `Supplier folder · ${sup(folderId).name}`] : NAV.flatMap(g => g.items).find(i => i[0] === r);
     $('#pageTitle').textContent = r === 'search' ? `Search: “${searchQuery}”` : item[1];
     $('#pageSub').textContent = `${SUBTITLES[r]} · ${TODAY.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}`;
     document.title = `${r === 'search' ? 'Search' : item[1]} · ${db.settings.firm.name || 'Pharma Suite'}`;
@@ -1229,6 +1526,7 @@
   function saleRowHtml(l = {}) {
     const opts = [...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => { const q = sellableQty(p.id); return `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''} ${q <= 0 && p.id !== l.productId ? 'disabled' : ''}>${esc(p.name)}${q <= 0 ? ' (no stock)' : ''}</option>`; }).join('');
     return `<tr data-line>
+      <td><input type="checkbox" class="cb" data-lsel aria-label="Tick line"></td>
       <td style="min-width:210px"><select data-f="productId"><option value="">Select item</option>${opts}</select></td>
       <td style="min-width:170px"><select data-f="batchId"></select></td>
       <td class="small" data-exp>—</td>
@@ -1273,6 +1571,11 @@
     const t = billCalc(readSaleLines());
     $('#tGross').textContent = dec(t.gross); $('#tCd').textContent = dec(t.cd); $('#tTd').textContent = dec(t.td);
     $('#tGst').textContent = dec(t.gst); $('#tRo').textContent = dec(t.roundOff); $('#tTot').textContent = money2(t.total);
+  }
+  function updateSaleSel() {
+    const boxes = $$('#lineBody [data-lsel]'); const n = boxes.filter(c => c.checked).length;
+    const el = $('#sbN'); if (el) el.textContent = n ? `${n} ticked line${n === 1 ? '' : 's'}` : 'All lines';
+    const all = $('[data-lselall]'); if (all) { all.checked = n > 0 && n === boxes.length; all.indeterminate = n > 0 && n < boxes.length; }
   }
   function readSaleRow(tr) {
     const b = batchById($('[data-f=batchId]', tr).value);
@@ -1323,9 +1626,14 @@
         </div>
         <div id="chemInfo" class="small muted"></div>
         <div class="lines"><div class="table-wrap"><table>
-          <thead><tr><th>Item</th><th>Batch</th><th>Exp</th><th>Qty</th><th>Free</th><th>Rate ₹</th><th class="r">MRP</th><th>CD%</th><th>TD%</th><th class="r">GST</th><th class="r">Amount</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" class="cb" data-lselall aria-label="Tick all lines"></th><th>Item</th><th>Batch</th><th>Exp</th><th>Qty</th><th>Free</th><th>Rate ₹</th><th class="r">MRP</th><th>CD%</th><th>TD%</th><th class="r">GST</th><th class="r">Amount</th><th></th></tr></thead>
           <tbody id="lineBody">${(s.lines.length ? s.lines : [{}]).map(saleRowHtml).join('')}</tbody></table></div>
-          <div class="add-line"><button type="button" class="btn sm" data-add-line>+ Add line</button></div></div>
+          <div class="add-line bulk-inline"><button type="button" class="btn sm" data-add-line>+ Add line</button>
+            <span class="spacer"></span>
+            <span class="small strong" id="sbN">All lines</span>
+            <label class="bf"><span>CD%</span><input id="sbCd" inputmode="decimal" placeholder="—"></label>
+            <label class="bf"><span>TD%</span><input id="sbTd" inputmode="decimal" placeholder="—"></label>
+            <button type="button" class="btn sm primary" data-sbulk>Apply discount</button></div></div>
         <div class="totals wrap"><div>Gross <b id="tGross" class="num">0</b></div><div>Less CD <b id="tCd" class="num">0</b></div><div>Less TD <b id="tTd" class="num">0</b></div><div>GST <b id="tGst" class="num">0</b></div><div>Round off <b id="tRo" class="num">0</b></div><div class="grand">Net <span id="tTot" class="num">₹0</span></div></div>
         <div class="form-grid g4">${field('Payment received (₹)', 'paid', { type: 'number', value: s.paid || 0, attrs: numAttrs() })}</div>
         <div class="small muted">Stock is taken from the batch you pick (earliest expiry is picked first). Qty is taken before free goods.</div>`,
@@ -1685,16 +1993,44 @@
     if (n) { toast(`${s.name} has ${n} purchase document(s), so it can’t be deleted.`); return; }
     confirmModal(`Delete ${s.name}?`, 'This cannot be undone.', 'Delete supplier', () => { db.suppliers = db.suppliers.filter(x => x !== s); return `${s.name} deleted.`; });
   };
-  ACTIONS['view-supplier'] = id => {
-    const s = sup(id); if (!s) return;
-    const bills = db.pinvoices.filter(p => p.supplierId === id).sort((a, b) => b.date.localeCompare(a.date));
-    openModal({
-      title: s.name, size: 'lg',
-      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-supplier" data-id="${s.id}">Edit</button></div>`,
-      body: `${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['City', esc(s.city || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence', esc(s.dl || '—')], ['Terms', s.terms + ' days'], ['Payable', money(supPayable(id))], ['Purchase bills', bills.length]])}
-        <div class="card-title" style="font-size:15px">Recent purchase bills</div>
-        ${miniTable([{ h: 'Invoice', c: p => p.no }, { h: 'Bill no', c: p => esc(p.supplierInvNo) }, { h: 'Date', c: p => fmtDate(p.date) }, { h: 'Amount', r: 1, c: p => money(p.total) }, { h: 'Status', c: p => pill(piStatus(p)) }], bills.slice(0, 10))}`,
+  const goFolder = id => {
+    if (!sup(id)) return;
+    searchQuery = ''; $('#globalSearch').value = '';
+    if (location.hash === '#folder/' + id) render(); else location.hash = 'folder/' + id;
+    window.scrollTo(0, 0);
+  };
+  ACTIONS['view-supplier'] = goFolder;
+
+  // Supplier folder: bill copies
+  ACTIONS['open-bill-file'] = async no => {
+    try {
+      const files = await billStore.get(no);
+      if (!files || !files.length) { toast('The bill copy is not in this browser. It may have been saved on another computer or cleared.'); return; }
+      files.forEach(f => {
+        const url = URL.createObjectURL(f.blob);
+        const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        if (!/^(image\/|application\/pdf)/.test(f.type)) a.download = f.name;
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+      });
+    } catch { toast('Could not open the bill copy — browser storage is blocked.'); }
+  };
+  ACTIONS['attach-bill'] = no => {
+    const p = db.pinvoices.find(x => x.no === no); if (!p) return;
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.multiple = true; inp.accept = 'image/jpeg,image/png,image/webp,image/gif,application/pdf';
+    inp.addEventListener('change', () => {
+      const files = [...inp.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
+      if (!files.length) { toast('Choose a JPG, PNG, WEBP or PDF up to 25 MB.'); return; }
+      fileBillCopies(p, files); refresh(); toast(`Bill copy filed with ${p.no}.`);
     });
+    inp.click();
+  };
+  ACTIONS['upload-for'] = sid => {
+    if (entry && entry.lines.length && !confirm('Discard the bill you are checking now?')) return;
+    const s = sup(sid);
+    entry = null; uploadFor = s ? s.id : '';
+    location.hash = 'billentry';
+    toast(s ? `Upload, import or type the bill. It will be filed under ${s.name}.` : 'Upload the bill.');
   };
 
   // Purchase orders
@@ -1881,7 +2217,9 @@
       : `The goods receipt ${esc(p.grnNo)} will go back to “Awaiting invoice”. Stock is not changed. This cannot be undone.`, 'Delete invoice', () => {
       if (direct) { const short = removeFromStock(p.lines); if (short.length) { toast(`Some of this stock is already sold: ${short.join(', ')}. The bill can’t be deleted.`); return false; } }
       else { const g = db.grns.find(x => x.no === p.grnNo); if (g) g.invoiced = ''; }
-      db.pinvoices = db.pinvoices.filter(x => x !== p); return `${no} deleted.`;
+      db.pinvoices = db.pinvoices.filter(x => x !== p);
+      if (p.files?.length) billStore.del(no).catch(() => {});
+      return `${no} deleted.`;
     });
   };
   ACTIONS['pay-pi'] = no => {
@@ -1907,7 +2245,7 @@
     try {
       const files = pendingFiles.slice();
       const x = await extractBill(files);
-      entry = entryFromExtraction(x, files);
+      entry = withUploadFor(entryFromExtraction(x, files));
       pendingFiles = [];
       toast(entry.lines.length ? `Read ${entry.lines.length} lines. Check them below, then add to stock.` : 'No item rows were found on this bill.');
     } catch (err) {
@@ -1918,7 +2256,29 @@
   };
   ACTIONS['entry-manual'] = () => {
     if (entry && entry.lines.length && !confirm('Discard the bill you are checking now?')) return;
-    entry = newEntry('Manual'); entry.lines = [blankLine()]; render();
+    entry = withUploadFor(newEntry('Manual')); entry.lines = [blankLine()]; render();
+  };
+  const entryTargets = () => { const t = entry.lines.filter(l => l.sel); return t.length ? t : entry.lines; };
+  ACTIONS['entry-bulk'] = () => {
+    if (!entry) return;
+    const vals = {}; const said = [];
+    for (const [id, k, label] of [['#ebCd', 'cd', 'CD%'], ['#ebTd', 'td', 'TD%'], ['#ebGst', 'gst', 'GST%']]) {
+      const raw = $(id).value.trim(); if (raw === '') continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0 || v > 100) { toast(`${label} must be a number from 0 to 100.`); $(id).focus(); return; }
+      vals[k] = v; said.push(`${label} ${dec(v)}`);
+    }
+    if (!said.length) { toast('Type a CD%, TD% or GST% value to apply.'); $('#ebCd').focus(); return; }
+    const rows = entryTargets();
+    rows.forEach(l => Object.assign(l, vals));
+    render();
+    toast(`${said.join(', ')} set on ${rows.length === entry.lines.length ? 'all ' : ''}${rows.length} row${rows.length === 1 ? '' : 's'}.`);
+  };
+  ACTIONS['entry-del-sel'] = () => {
+    if (!entry) return;
+    const n = entry.lines.filter(l => l.sel).length;
+    if (!n) { toast('Tick the rows you want to delete.'); return; }
+    entry.lines = entry.lines.filter(l => !l.sel); render(); toast(`${n} row${n === 1 ? '' : 's'} deleted.`);
   };
   ACTIONS['entry-template'] = () => downloadText('purchase-bill-template.csv', CSV_HEAD.join(',') + '\r\nBASUGINE PEN,LUPIN,LUPIN,1PACK,90183100,A25036CL,01/29,1,0,823.57,1153.00,2.00,0,12,823.57\r\n');
   ACTIONS['entry-csv'] = () => { if (entry) downloadText(`bill-${(entry.billNo || 'draft').replace(/[^\w-]+/g, '_')}.csv`, linesToCsv(entry.lines)); };
@@ -1954,9 +2314,12 @@
       });
       const no = nextNo('PI-', db.pinvoices);
       addToStock(stockLines, { supplierId: s.id, source: `${no} · bill ${entry.billNo}`, verified: false });
-      db.pinvoices.push({ no, supplierInvNo: entry.billNo.trim(), date: entry.date, due: addDays(entry.date, s.terms ?? 30), supplierId: s.id, grnNo: '', source: entry.source, lines: stockLines, ...t, paid: 0 });
+      const pi = { no, supplierInvNo: entry.billNo.trim(), date: entry.date, due: addDays(entry.date, s.terms ?? 30), supplierId: s.id, grnNo: '', source: entry.source, lines: stockLines, ...t, paid: 0 };
+      db.pinvoices.push(pi);
+      fileBillCopies(pi, entry.fileObjs);
       entry = null;
-      return `${no} saved — ${stockLines.length} lines added to stock. Check them in Stock Details.`;
+      setTimeout(() => goFolder(s.id), 0);
+      return `${no} saved — ${stockLines.length} lines added to stock and filed in the folder for ${s.name}.`;
     });
   };
 
@@ -1993,7 +2356,7 @@
   };
   ACTIONS['export-data'] = () => downloadText(`pharma-suite-backup-${todayIso}.json`, JSON.stringify(db, null, 1), 'application/json');
   ACTIONS['reset-data'] = () => confirmModal('Reset to sample data?', 'Everything in this browser will be replaced with the sample data. Download a backup first if you need it. This cannot be undone.', 'Reset', () => {
-    db = seed(); entry = null; Object.keys(listState).forEach(k => delete listState[k]); return 'Sample data restored.';
+    db = seed(); entry = null; Object.keys(listState).forEach(k => delete listState[k]); billStore.clear().catch(() => {}); return 'Sample data restored.';
   });
   ACTIONS['print'] = () => window.print();
 
@@ -2015,6 +2378,39 @@
       listState[key].tab = tab.dataset.tab;
       $$('button', tab.parentElement).forEach(b => b.classList.toggle('active', b === tab));
       fillList(key); return;
+    }
+    const ba = e.target.closest('[data-bulkapply]');
+    if (ba) { bulkApply(ba.dataset.bulkapply); return; }
+    const bc = e.target.closest('[data-bulkclear]');
+    if (bc) { listState[bc.dataset.bulkclear].sel.clear(); fillList(bc.dataset.bulkclear); return; }
+    const bx = e.target.closest('[data-bulkact]');
+    if (bx) {
+      const [key, name] = bx.dataset.bulkact.split('|');
+      const items = selectedItems(key);
+      if (!items.length) { toast('Tick at least one row first.'); return; }
+      const msg = lists[key].select.actions[name](items);
+      if (msg !== false) { listState[key].sel.clear(); refresh(); if (msg) toast(msg); }
+      return;
+    }
+    const fc = e.target.closest('[data-filter-clear]');
+    if (fc) { const key = fc.dataset.filterClear; listState[key].f = {}; $$(`[data-list-filter^="${key}|"]`).forEach(s => { s.value = ''; }); fillList(key); return; }
+    if (e.target.closest('[data-sbulk]')) {
+      const trs = $$('#lineBody tr[data-line]');
+      const ticked = trs.filter(tr => $('[data-lsel]', tr)?.checked);
+      const target = (ticked.length ? ticked : trs).filter(tr => $('[data-f=productId]', tr).value);
+      const vals = {};
+      for (const [id, k, label] of [['#sbCd', 'cd', 'CD%'], ['#sbTd', 'td', 'TD%']]) {
+        const raw = $(id).value.trim(); if (raw === '') continue;
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v < 0 || v > 100) { toast(`${label} must be a number from 0 to 100.`); $(id).focus(); return; }
+        vals[k] = v;
+      }
+      if (!Object.keys(vals).length) { toast('Type a CD% or TD% to apply.'); $('#sbCd').focus(); return; }
+      if (!target.length) { toast('Pick an item on at least one line first.'); return; }
+      target.forEach(tr => Object.entries(vals).forEach(([k, v]) => { $(`[data-f=${k}]`, tr).value = v; }));
+      recalcSale();
+      toast(`Discount set on ${target.length} line${target.length === 1 ? '' : 's'}.`);
+      return;
     }
     const act = e.target.closest('[data-act]');
     if (act && ACTIONS[act.dataset.act]) {
@@ -2056,6 +2452,40 @@
 
   document.addEventListener('change', async e => {
     const t = e.target;
+    if (t.matches('[data-sel]')) {
+      const key = t.dataset.sel; const st = listState[key];
+      if (t.checked) st.sel.add(t.value); else st.sel.delete(t.value);
+      updateListMeta(key); return;
+    }
+    if (t.matches('[data-selall]')) {
+      const key = t.dataset.selall; const st = listState[key];
+      st.visible.forEach(id => { if (t.checked) st.sel.add(id); else st.sel.delete(id); });
+      fillList(key); return;
+    }
+    if (t.matches('[data-list-filter]')) {
+      const [key, k] = t.dataset.listFilter.split('|');
+      listState[key].f[k] = t.value; fillList(key); return;
+    }
+    if (t.matches('[data-esel]') && entry) {
+      entry.lines[+t.dataset.esel].sel = t.checked;
+      $('#eSelN').textContent = entrySelText();
+      const all = $('[data-eselall]'); if (all) all.checked = entry.lines.every(l => l.sel);
+      return;
+    }
+    if (t.matches('[data-eselall]') && entry) {
+      entry.lines.forEach(l => { l.sel = t.checked; });
+      $$('[data-esel]').forEach(c => { c.checked = t.checked; });
+      $('#eSelN').textContent = entrySelText(); return;
+    }
+    if (t.matches('[data-lselall]')) { $$('#lineBody [data-lsel]').forEach(c => { c.checked = t.checked; }); updateSaleSel(); return; }
+    if (t.matches('#lineBody [data-lsel]')) { updateSaleSel(); return; }
+    if (t.id === 'entryAttach' && entry) {
+      const files = [...t.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
+      if (files.length < t.files.length) toast('Only JPG, PNG, WEBP, GIF and PDF files up to 25 MB can be attached.');
+      entry.fileObjs = [...(entry.fileObjs || []), ...files];
+      $('#entryFilesNote').textContent = entry.fileObjs.length ? `Will be filed in the supplier’s folder: ${entry.fileObjs.map(f => f.name).join(', ')}` : '';
+      t.value = ''; return;
+    }
     if (t.matches('#lineBody [data-f=productId]')) {
       const tr = t.closest('tr'); const p = prod(t.value);
       if ($('#lineBody').dataset.mode === 'po') { if (p) $('[data-f=rate]', tr).value = p.pts; recalcPo(); return; }
@@ -2072,7 +2502,7 @@
         const lines = csvToLines(text);
         if (!lines.length) { toast('No item rows found in this CSV.'); return; }
         if (entry && entry.lines.length && !confirm('Replace the bill you are checking now with this CSV?')) return;
-        entry = newEntry('CSV', { files: [t.files[0].name] }); entry.lines = lines; render();
+        entry = withUploadFor(newEntry('CSV', { files: [t.files[0].name] })); entry.lines = lines; render();
         toast(`Imported ${lines.length} lines. Fill in the supplier and bill number, then check each line.`);
       } catch (err) { toast(err.message || 'Could not read the CSV.'); }
       t.value = ''; return;
@@ -2112,7 +2542,7 @@
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && $('#modalBack').classList.contains('open')) closeModal();
-    if (e.key === 'Enter' && $('#modalBack').classList.contains('open') && e.target.closest('#mform') && e.target.tagName === 'INPUT' && !e.target.closest('#lineBody, #grnLines')) { e.preventDefault(); submitModal(); }
+    if (e.key === 'Enter' && $('#modalBack').classList.contains('open') && e.target.closest('#mform') && e.target.tagName === 'INPUT' && !e.target.closest('#lineBody, #grnLines, .bulk-inline')) { e.preventDefault(); submitModal(); }
   });
   $('#modalClose').addEventListener('click', () => closeModal());
   $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
