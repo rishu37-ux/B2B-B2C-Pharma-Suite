@@ -251,7 +251,13 @@
       firm: { name: 'Shankar Medical Store', district: 'Bilaspur', tehsil: 'Ghumarwin', subTehsil: '', locality: 'Bajoha', address: '', pincode: '174021', hospital: '', city: 'Bajoha', phone: '01978-315172', gstin: '02AFNFS3835D1Z4', dl1: '20B 20160', dl2: '21B 20161' },
       defaultCd: 2, individualTerms: 0,
     };
-    return { version: 2, settings, companies, categories, forms, products, batches, chemists, suppliers, sales, pos, grns, pinvoices };
+    // Hospital directory, with each sample chemist linked to a civil hospital or CHC in its tehsil where one is listed
+    const hospitals = seedHospitals();
+    chemists.forEach(c => {
+      const h = hospitals.filter(x => x.district === c.district && norm(x.tehsil) === norm(c.tehsil)).sort(hospSort)[0];
+      if (h) { c.hospitalId = h.id; c.hospital = h.name; }
+    });
+    return { version: 2, settings, companies, categories, forms, products, batches, chemists, suppliers, sales, pos, grns, pinvoices, hospitals };
   }
 
   function load() {
@@ -385,6 +391,7 @@
     Active: 'ok', 'Pending verification': 'warn', 'On hold': 'bad',
     Good: 'ok', 'Near expiry': 'warn', Expired: 'bad', 'Low stock': 'warn', 'Out of stock': 'bad', 'In stock': 'ok',
     PO: 'info', GRN: 'ok', Invoice: 'neutral', Chemist: 'info', Individual: 'neutral',
+    'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
     New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
     Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
   };
@@ -405,6 +412,7 @@
     upload: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+    hospital: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 7v6M9 10h6"/><path d="M9 21v-4h6v4"/>',
     folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     clip: '<path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
@@ -421,7 +429,8 @@
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
     { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemorders', 'Chemist Orders', 'cart'], ['chemists', 'Onboard Chemists', 'store']] },
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
-    { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
+    { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital']] },
+  { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
   ];
   const SUBTITLES = {
     overview: 'Your business at a glance',
@@ -438,6 +447,7 @@
     invoices: 'Supplier bills and payments due',
     search: 'Search results',
     folder: 'Every bill from this supplier, and what was bought when',
+    hospitals: 'Medical colleges, hospitals, CHCs and PHCs of Himachal Pradesh — and the chemists near them',
   };
 
   function renderNav(route) {
@@ -703,7 +713,7 @@
         key: 'sales', title: 'Sale bills',
         actions: actBtn('new-sale', '', icon('plus') + 'New sale', 'primary'),
         tabs: [{ id: 'all', label: 'All' }, { id: 'chem', label: 'Chemists', filter: s => s.party.type === 'chemist' }, { id: 'ind', label: 'Individuals', filter: s => s.party.type === 'individual' }, ...['Due', 'Overdue'].map(s => ({ id: s, label: s, filter: x => saleStatus(x) === s }))],
-        filters: [...prodFilters(s => s.lines.map(l => prod(l.productId))), { k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (s, v) => s.party.chemistId === v }, { k: 'district', label: 'District', options: usedValues('district').map(v => [v, v]), test: (s, v) => chem(s.party.chemistId)?.district === v }, monthFilter(db.sales.map(s => s.date), s => s.date)],
+        filters: [...prodFilters(s => s.lines.map(l => prod(l.productId))), { k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (s, v) => s.party.chemistId === v }, { k: 'district', label: 'District', options: [...new Set(db.chemists.map(c => c.district).filter(Boolean))].sort().map(v => [v, v]), test: (s, v) => chem(s.party.chemistId)?.district === v }, monthFilter(db.sales.map(s => s.date), s => s.date)],
         rows: () => [...db.sales].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
         text: s => [s.no, partyName(s), partyCity(s), ...s.lines.map(l => prod(l.productId)?.name + ' ' + l.batch)].join(' '),
         columns: [
@@ -740,7 +750,7 @@
         rows: () => db.chemists,
         select: { id: c => c.id, fields: PCT_FIELDS, apply: (items, v) => { items.forEach(c => Object.assign(c, v)); return `Default ${Object.keys(v).map(k => k.toUpperCase() + ' ' + dec(v[k]) + '%').join(', ')} set for ${items.length} chemist(s). Used on their new bills.`; } },
         text: c => [c.id, c.name, c.owner, addrText(c), c.hospital, c.phone, c.dl1, c.dl2, c.fssai, c.gstin].join(' '),
-        filters: [{ k: 'district', label: 'District', options: usedValues('district').map(v => [v, v]), test: (c, v) => c.district === v }, { k: 'tehsil', label: 'Tehsil', options: usedValues('tehsil').map(v => [v, v]), test: (c, v) => c.tehsil === v }],
+        filters: [{ k: 'district', label: 'District', options: [...new Set(db.chemists.map(c => c.district).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => c.district === v }, { k: 'tehsil', label: 'Tehsil', options: [...new Set(db.chemists.map(c => c.tehsil).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => c.tehsil === v }, { k: 'hosp', label: 'Nearby hospital', options: [...new Set(db.chemists.map(hospitalName).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => hospitalName(c) === v }],
         columns: [
           { h: 'Chemist', c: c => `<span class="strong">${esc(c.name)}</span><div class="small muted">${esc(c.owner)} · ${esc(c.id)}</div>` },
           { h: 'Area', c: c => `${esc(c.locality || c.city || '—')}<div class="small muted">${esc([c.tehsil && 'Teh. ' + c.tehsil, c.district].filter(Boolean).join(' · '))}</div>` },
@@ -787,6 +797,50 @@
           { h: '', c: o => rowActs(actBtn('view-order', o.id, 'View', 'ghost'), ['New', 'Accepted', 'Arranging'].includes(o.status) && actBtn('order-bill', o.id, 'Make bill', 'primary'), o.status === 'New' && actBtn('order-status', o.id + '|Accepted', 'Accept')) },
         ],
       })}`;
+  };
+
+  VIEWS.hospitals = () => {
+    const hs = db.hospitals || [];
+    const count = (...t) => hs.filter(h => t.includes(h.type)).length;
+    const linked = db.chemists.filter(c => c.hospitalId || c.hospital).length;
+    return `
+      <div class="grid g-4">
+        ${kpi('Hospitals & health centres', qty(hs.length), `${usedValues('district').filter(d => hs.some(h => h.district === d)).length} districts`)}
+        ${kpi('Medical colleges & big hospitals', qty(count('Medical College', 'Medical University', 'AIIMS', 'Zonal Hospital', 'Regional Hospital', 'District Hospital')), 'Colleges, AIIMS, zonal & regional')}
+        ${kpi('Civil hospitals & CHCs', qty(count('Civil Hospital', 'Sub-Divisional Hospital', 'CHC')), `${count('PHC')} PHCs as well`)}
+        ${kpi('Chemists linked to a hospital', qty(linked), `of ${db.chemists.length} chemists`)}
+      </div>
+      ${useList({
+        key: 'hospitals', title: 'Hospital directory · Himachal Pradesh',
+        actions: `<label class="btn sm">${icon('file')}Import CSV<input type="file" id="hospCsv" accept=".csv,text/csv" hidden></label>${actBtn('hosp-export', '', 'Export CSV', 'ghost')}${actBtn('new-hospital', '', icon('plus') + 'Add hospital', 'primary')}`,
+        tabs: [{ id: 'all', label: 'All' }, { id: 'big', label: 'Colleges & big hospitals', filter: h => hospRank(h.type) <= 5 }, { id: 'civil', label: 'Civil & CHC', filter: h => ['Civil Hospital', 'Sub-Divisional Hospital', 'CHC'].includes(h.type) }, { id: 'phc', label: 'PHC', filter: h => h.type === 'PHC' }, { id: 'near', label: 'With chemists', filter: h => nearChemists(h).length > 0 }],
+        filters: [
+          { k: 'district', label: 'District', options: [...new Set(hs.map(h => h.district).filter(Boolean))].sort().map(v => [v, v]), test: (h, v) => h.district === v },
+          { k: 'tehsil', label: 'Tehsil / block', options: [...new Set(hs.map(h => h.tehsil).filter(Boolean))].sort().map(v => [v, v]), test: (h, v) => h.tehsil === v },
+          { k: 'type', label: 'Type', options: HOSP_TYPES.filter(t => hs.some(h => h.type === t)).map(t => [t, t]), test: (h, v) => h.type === v },
+        ],
+        select: {
+          id: h => h.id,
+          fields: [{ k: 'type', label: 'Type', type: 'select', options: HOSP_TYPES.map(t => [t, t]) }, { k: 'district', label: 'District', type: 'select', options: HP_DISTRICTS.map(d => [d, d]) }],
+          extra: `<button type="button" class="btn sm ghost danger" data-bulkact="hospitals|delete">Delete</button>`,
+          actions: { delete: items => { deleteHospitals(items); return false; } },
+        },
+        rows: () => [...(db.hospitals || [])].sort((a, b) => (a.district || 'zz').localeCompare(b.district || 'zz') || hospSort(a, b)),
+        text: h => [h.name, h.type, h.district, h.tehsil, h.locality, h.pincode, h.phone].join(' '),
+        empty: 'No hospitals match.',
+        columns: [
+          { h: 'Hospital / health centre', c: h => `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}" class="strong">${esc(h.name)}</a>${h.source && h.source !== 'HPPCB list' ? `<div class="small muted">${esc(h.source)}</div>` : ''}` },
+          { h: 'Type', c: h => pill(h.type) },
+          { h: 'District', c: h => esc(h.district || '—') },
+          { h: 'Tehsil / block', c: h => esc(h.tehsil || '—') },
+          { h: 'Village / locality', c: h => esc(h.locality || '—') },
+          { h: 'PIN', c: h => esc(h.pincode || '—') },
+          { h: 'Phone', c: h => esc(h.phone || '—') },
+          { h: 'Chemists near', r: 1, c: h => { const n = nearChemists(h).length; return n ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${n}</a>` : '<span class="muted">0</span>'; } },
+          { h: '', c: h => rowActs(actBtn('edit-hospital', h.id, 'Edit', 'ghost'), actBtn('del-hospital', h.id, 'Delete', 'ghost danger')) },
+        ],
+      })}
+      <div class="small muted">Starting list: PHCs, CHCs, civil, sub-divisional, ESI and ayurvedic hospitals from the HP State Pollution Control Board’s health-care-facility list, with district and block filled from India Post PIN data where it was not printed. Medical colleges, AIIMS, the medical university and zonal/regional hospitals were added from a well-known list — please check them. The list may not have every health centre: add missing ones, or import an official list as CSV (columns: name, type, district, tehsil, locality, pincode, phone).</div>`;
   };
 
   const stockText = b => { const p = prod(b.productId); return [p?.name, company(p?.companyId)?.name, p?.mfg, p?.pack, p?.hsn, b.batch, b.source, sup(b.supplierId)?.name].join(' '); };
@@ -1632,7 +1686,44 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     if (!x.district && !x.tehsil && !x.locality && x.city && !String(x.address || '').includes(x.city)) parts.push(x.city);
     return parts.join(', ') + (x.pincode ? ` - ${x.pincode}` : '');
   };
-  const usedValues = (key, district) => [...new Set(addrHolders().filter(h => !district || h.district === district).map(h => h[key]).filter(Boolean))].sort();
+  // Tehsil / locality suggestions come from your own records and from the hospital directory
+  const usedValues = (key, district) => [...new Set([...addrHolders(), ...(key === 'tehsil' || key === 'locality' || key === 'district' ? (db.hospitals || []) : [])]
+    .filter(h => !district || h.district === district).map(h => h[key]).filter(Boolean))].sort();
+
+  // ---------- Hospital directory ----------
+  const HOSP_TYPES = ['Medical College', 'Medical University', 'AIIMS', 'Zonal Hospital', 'Regional Hospital', 'District Hospital', 'Civil Hospital', 'Sub-Divisional Hospital', 'CHC', 'PHC', 'ESI', 'Ayurvedic Hospital', 'Other Govt Hospital', 'Private Hospital', 'Other'];
+  const hospRank = t => { const i = HOSP_TYPES.indexOf(t); return i < 0 ? 99 : i; };
+  const hospById = id => (db.hospitals || []).find(h => h.id === id);
+  const hospSort = (a, b) => hospRank(a.type) - hospRank(b.type) || a.name.localeCompare(b.name);
+  const hospitalName = x => (x?.hospitalId && hospById(x.hospitalId)?.name) || x?.hospital || '';
+  const seedHospitals = () => (window.HP_HOSPITALS?.rows || []).map(r => Object.fromEntries(window.HP_HOSPITALS.keys.map((k, i) => [k, r[i]])));
+  const nearChemists = h => db.chemists.filter(c => c.hospitalId === h.id || (!c.hospitalId && c.hospital && norm(c.hospital) === norm(h.name)));
+  // Options for the "Nearby hospital" dropdown: the chosen tehsil first, then the rest of the district
+  function hospitalOptions(district, tehsil, selId) {
+    const opt = (h) => `<option value="${esc(h.id)}" ${h.id === selId ? 'selected' : ''}>${esc(h.name)}${h.locality && !norm(h.name).includes(norm(h.locality)) ? ' — ' + esc(h.locality) : ''} (${esc(h.type)})</option>`;
+    if (!district) {
+      const sel = hospById(selId);
+      return `<option value="">— choose the district first —</option>${sel ? opt(sel) : ''}<option value="__other" ${selId === '__other' ? 'selected' : ''}>+ Hospital not in the list…</option>`;
+    }
+    const hs = (db.hospitals || []).filter(h => norm(h.district) === norm(district)).sort(hospSort);
+    const near = tehsil ? hs.filter(h => norm(h.tehsil) === norm(tehsil)) : [];
+    const rest = hs.filter(h => !near.includes(h));
+    const sel = hospById(selId);
+    const outside = sel && !hs.includes(sel) ? `<optgroup label="Saved earlier">${opt(sel)}</optgroup>` : '';
+    return `<option value="">— None —</option>${outside}
+      ${near.length ? `<optgroup label="In ${esc(tehsil)} (${near.length})">${near.map(opt).join('')}</optgroup>` : ''}
+      ${rest.length ? `<optgroup label="${near.length ? 'Elsewhere in ' : ''}${esc(district)} district (${rest.length})">${rest.map(opt).join('')}</optgroup>` : ''}
+      <option value="__other" ${selId === '__other' ? 'selected' : ''}>+ Hospital not in the list…</option>`;
+  }
+  function refreshHospitalSelect() {
+    const sel = $('#f-hospitalId'); if (!sel) return;
+    const keep = sel.value;
+    sel.innerHTML = hospitalOptions($('#mform [name="district"]')?.value.trim(), $('#mform [name="tehsil"]')?.value.trim(), keep);
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+    $('#hospOtherWrap')?.classList.toggle('hidden', sel.value !== '__other');
+    const n = sel.querySelectorAll('optgroup option').length;
+    const hint = $('#hospHint'); if (hint) hint.textContent = $('#mform [name="district"]')?.value.trim() ? `${n} in the directory for this area` : '';
+  }
   const dlOptions = vals => vals.map(v => `<option value="${esc(v)}">`).join('');
   const addrFields = (x, required) => `
     <div class="field full form-sec">Address</div>
@@ -1642,16 +1733,26 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     ${field('Village / locality', 'locality', { value: x.locality || '', required, attrs: 'list="dl-a-locality" autocomplete="off"' })}
     ${field('House / shop no., street, landmark', 'address', { value: x.address || '', full: true })}
     ${field('PIN code', 'pincode', { value: x.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6" title="6-digit PIN code"' })}
-    ${field('Nearby hospital', 'hospital', { value: x.hospital || '', attrs: 'list="dl-a-hospital" autocomplete="off" placeholder="e.g. Civil Hospital Ghumarwin"' })}
+    <div class="field"><label for="f-hospitalId">Nearby hospital <span class="muted small" id="hospHint"></span></label><select id="f-hospitalId" name="hospitalId">${hospitalOptions(x.district, x.tehsil, x.hospitalId || (x.hospital && ((db.hospitals || []).find(h => norm(h.name) === norm(x.hospital))?.id || '__other')) || '')}</select></div>
+    <div class="field ${x.hospital && !x.hospitalId && !(db.hospitals || []).some(h => norm(h.name) === norm(x.hospital)) ? '' : 'hidden'}" id="hospOtherWrap"><label for="f-hospitalOther">Hospital name (it will be added to the directory)</label><input id="f-hospitalOther" name="hospitalOther" value="${esc(x.hospital && !x.hospitalId ? x.hospital : '')}"></div>
     <datalist id="dl-a-district">${dlOptions([...new Set([...HP_DISTRICTS, ...usedValues('district')])].sort())}</datalist>
-    ${['tehsil', 'subTehsil', 'locality', 'hospital'].map(k => `<datalist id="dl-a-${k}">${dlOptions(usedValues(k, x.district))}</datalist>`).join('')}`;
-  // When the district changes, suggest only that district's tehsils, villages and hospitals
+    ${['tehsil', 'subTehsil', 'locality'].map(k => `<datalist id="dl-a-${k}">${dlOptions(usedValues(k, x.district))}</datalist>`).join('')}`;
+  // When the district or tehsil changes, suggest only that area's tehsils, villages and hospitals
   function refreshAddrLists() {
     const d = $('#mform [name="district"]')?.value.trim();
-    ['tehsil', 'subTehsil', 'locality', 'hospital'].forEach(k => { const el = $(`#dl-a-${k}`); if (el) el.innerHTML = dlOptions(usedValues(k, d)); });
+    ['tehsil', 'subTehsil', 'locality'].forEach(k => { const el = $(`#dl-a-${k}`); if (el) el.innerHTML = dlOptions(usedValues(k, d)); });
+    refreshHospitalSelect();
   }
   const readAddr = d => {
-    const a = { district: (d.district || '').trim(), tehsil: (d.tehsil || '').trim(), subTehsil: (d.subTehsil || '').trim(), locality: (d.locality || '').trim(), address: (d.address || '').trim(), pincode: (d.pincode || '').trim(), hospital: (d.hospital || '').trim() };
+    const a = { district: (d.district || '').trim(), tehsil: (d.tehsil || '').trim(), subTehsil: (d.subTehsil || '').trim(), locality: (d.locality || '').trim(), address: (d.address || '').trim(), pincode: (d.pincode || '').trim(), hospitalId: '', hospital: '' };
+    if (d.hospitalId === '__other') {
+      const name = String(d.hospitalOther || '').trim();
+      if (name) {
+        let h = (db.hospitals || []).find(x => norm(x.name) === norm(name) && (!a.district || x.district === a.district));
+        if (!h) { h = { id: nextId('H', db.hospitals, 4), name, type: 'Other', district: a.district, tehsil: a.tehsil, locality: a.locality, pincode: a.pincode, source: 'Added by you' }; db.hospitals.push(h); }
+        a.hospitalId = h.id; a.hospital = h.name;
+      }
+    } else if (d.hospitalId && hospById(d.hospitalId)) { a.hospitalId = d.hospitalId; a.hospital = hospById(d.hospitalId).name; }
     a.city = placeCity(a);
     return a;
   };
@@ -1750,6 +1851,13 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       x.city = placeCity(x) || x.city || '';
     };
     [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(splitAddr);
+    // Hospital directory (added later): start from the bundled Himachal list and link saved hospital names to it
+    if (!Array.isArray(d.hospitals)) d.hospitals = seedHospitals();
+    [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(x => {
+      if (!x || x.hospitalId || !x.hospital) return;
+      const h = d.hospitals.find(h => norm(h.name) === norm(x.hospital));
+      if (h) x.hospitalId = h.id;
+    });
     return d;
   }
 
@@ -2268,6 +2376,84 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         ${miniTable([{ h: 'Bill', c: s => s.no }, { h: 'Date', c: s => fmtDate(s.date) }, { h: 'Amount', r: 1, c: s => money(s.total) }, { h: 'Balance', r: 1, c: s => money(balance(s)) }, { h: 'Status', c: s => pill(saleStatus(s)) }], inv.slice(0, 12))}`,
     });
   };
+  // Hospital directory
+  const hospitalForm = (h = {}) => `<div class="form-grid">
+      ${field('Name', 'name', { value: h.name || '', required: true, full: true, attrs: 'placeholder="e.g. CHC Bharari"' })}
+      ${field('Type', 'type', { value: h.type || 'PHC', options: HOSP_TYPES })}
+      ${field('District', 'district', { value: h.district || '', required: true, attrs: 'list="dl-a-district" autocomplete="off"' })}
+      ${field('Tehsil / block', 'tehsil', { value: h.tehsil || '', attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+      ${field('Village / locality', 'locality', { value: h.locality || '', attrs: 'list="dl-a-locality" autocomplete="off"' })}
+      ${field('PIN code', 'pincode', { value: h.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6"' })}
+      ${field('Phone', 'phone', { value: h.phone || '' })}
+      <datalist id="dl-a-district">${dlOptions(HP_DISTRICTS)}</datalist>
+      <datalist id="dl-a-tehsil">${dlOptions(usedValues('tehsil', h.district))}</datalist>
+      <datalist id="dl-a-locality">${dlOptions(usedValues('locality', h.district))}</datalist>
+    </div>`;
+  const readHospital = (d, h) => Object.assign(h, { name: d.name.trim(), type: d.type, district: d.district.trim(), tehsil: (d.tehsil || '').trim(), locality: (d.locality || '').trim(), pincode: (d.pincode || '').trim(), phone: (d.phone || '').trim() });
+  const hospDup = (d, self) => (db.hospitals || []).find(x => x !== self && norm(x.name) === norm(d.name) && norm(x.district) === norm(d.district));
+  ACTIONS['new-hospital'] = () => openModal({
+    title: 'Add hospital / health centre', submitLabel: 'Add', body: hospitalForm(),
+    onSubmit: d => { if (hospDup(d)) { toast(`${d.name} is already in ${d.district}.`); return false; } const h = { id: nextId('H', db.hospitals, 4), source: 'Added by you' }; readHospital(d, h); db.hospitals.push(h); return `${h.name} added.`; },
+  });
+  ACTIONS['edit-hospital'] = id => {
+    const h = hospById(id); if (!h) return;
+    openModal({
+      title: `Edit ${h.name}`, body: hospitalForm(h),
+      onSubmit: d => {
+        if (hospDup(d, h)) { toast(`${d.name} is already in ${d.district}.`); return false; }
+        readHospital(d, h); if (h.source === 'HPPCB list' || /verify/i.test(h.source || '')) h.source = 'Checked by you';
+        addrHolders().forEach(x => { if (x.hospitalId === h.id) x.hospital = h.name; });
+        return `${h.name} saved.`;
+      },
+    });
+  };
+  function deleteHospitals(items) {
+    const ids = new Set(items.map(h => h.id));
+    const linked = addrHolders().filter(x => ids.has(x.hospitalId)).length;
+    confirmModal(`Delete ${items.length === 1 ? items[0].name : items.length + ' hospitals'}?`, `${linked ? `${linked} chemist/supplier record(s) point to ${items.length === 1 ? 'it' : 'them'}; their “Nearby hospital” will keep the name but no longer link to the directory. ` : ''}This cannot be undone.`, 'Delete', () => {
+      addrHolders().forEach(x => { if (ids.has(x.hospitalId)) x.hospitalId = ''; });
+      db.hospitals = db.hospitals.filter(h => !ids.has(h.id));
+      if (listState.hospitals) listState.hospitals.sel.clear();
+      return `${items.length} deleted.`;
+    });
+  }
+  ACTIONS['del-hospital'] = id => { const h = hospById(id); if (h) deleteHospitals([h]); };
+  ACTIONS['view-hospital'] = id => {
+    const h = hospById(id); if (!h) return;
+    const near = nearChemists(h);
+    const sameArea = db.chemists.filter(c => !near.includes(c) && h.tehsil && norm(c.tehsil) === norm(h.tehsil) && norm(c.district) === norm(h.district));
+    const chemCols = [{ h: 'Chemist', c: c => `<a href="#" data-act="view-chemist" data-id="${esc(c.id)}">${esc(c.name)}</a>` }, { h: 'Village / locality', c: c => esc(c.locality || c.city || '—') }, { h: 'Mobile', c: c => esc(c.phone) }, { h: 'Status', c: c => pill(c.status) }, { h: 'Outstanding', r: 1, c: c => money(chemOutstanding(c.id)) }];
+    openModal({
+      title: h.name, size: 'lg',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-hospital" data-id="${esc(h.id)}">Edit</button></div>`,
+      body: `${detailGrid([['Type', pill(h.type)], ['District', esc(h.district || '—')], ['Tehsil / block', esc(h.tehsil || '—')], ['Village / locality', esc(h.locality || '—')], ['PIN', esc(h.pincode || '—')], ['Phone', esc(h.phone || '—')], ['Source', esc(h.source || '—')]])}
+        <div class="card-title" style="font-size:15px">Chemists with this as nearby hospital (${near.length})</div>
+        ${near.length ? miniTable(chemCols, near) : '<div class="small muted">None yet. Set it as “Nearby hospital” when onboarding or editing a chemist.</div>'}
+        ${sameArea.length ? `<div class="card-title" style="font-size:15px">Other chemists in ${esc(h.tehsil)} (${sameArea.length})</div>${miniTable(chemCols, sameArea)}` : ''}`,
+    });
+  };
+  const HOSP_CSV = ['name', 'type', 'district', 'tehsil', 'locality', 'pincode', 'phone'];
+  ACTIONS['hosp-export'] = () => downloadText(`hospital-directory-${todayIso}.csv`, [HOSP_CSV.join(','), ...listRows('hospitals').map(h => HOSP_CSV.map(k => csvCell(h[k])).join(','))].join('\r\n'));
+  function importHospitals(text) {
+    const rows = parseCsv(text.replace(/^﻿/, ''));
+    if (rows.length < 2) throw new Error('The CSV has no rows.');
+    const head = rows[0].map(h => h.trim().toLowerCase().replace(/[^a-z]/g, ''));
+    const alias = { name: 'name', hospital: 'name', facility: 'name', facilityname: 'name', type: 'type', facilitytype: 'type', district: 'district', tehsil: 'tehsil', block: 'tehsil', subdistrict: 'tehsil', locality: 'locality', village: 'locality', place: 'locality', pincode: 'pincode', pin: 'pincode', phone: 'phone', mobile: 'phone' };
+    const map = head.map(h => alias[h] || null);
+    if (!map.includes('name') || !map.includes('district')) throw new Error('The CSV needs at least “name” and “district” columns.');
+    let added = 0, updated = 0;
+    rows.slice(1).forEach(r => {
+      const d = {}; map.forEach((k, i) => { if (k) d[k] = String(r[i] ?? '').trim(); });
+      if (!d.name || !d.district) return;
+      const dist = HP_DISTRICTS.find(x => norm(x) === norm(d.district)) || d.district;
+      const type = HOSP_TYPES.find(t => norm(t) === norm(d.type)) || (/\bPHC\b/i.test(d.type + ' ' + d.name) ? 'PHC' : /\bCHC\b/i.test(d.type + ' ' + d.name) ? 'CHC' : /civil/i.test(d.type + ' ' + d.name) ? 'Civil Hospital' : 'Other');
+      const ex = db.hospitals.find(h => norm(h.name) === norm(d.name) && norm(h.district) === norm(dist));
+      const vals = { name: d.name, type, district: dist, tehsil: d.tehsil || ex?.tehsil || '', locality: d.locality || ex?.locality || '', pincode: d.pincode || ex?.pincode || '', phone: d.phone || ex?.phone || '' };
+      if (ex) { Object.assign(ex, vals); updated++; } else { db.hospitals.push({ id: nextId('H', db.hospitals, 4), ...vals, source: 'Imported' }); added++; }
+    });
+    return { added, updated };
+  }
+
   // Chemist orders
   const orderById = id => chemOrders.find(o => o.id === id);
   async function setOrder(id, body, msg) {
@@ -2869,6 +3055,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
 
   document.addEventListener('input', e => {
     if (e.target.matches('#mform [name="district"]')) refreshAddrLists();
+    if (e.target.matches('#mform [name="tehsil"]')) refreshHospitalSelect();
     const s = e.target.closest('[data-list-search]');
     if (s) { listState[s.dataset.listSearch].q = s.value; fillList(s.dataset.listSearch); return; }
     const ei = e.target.closest('[data-e]');
@@ -2912,6 +3099,12 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     }
     if (t.matches('[data-lselall]')) { $$('#lineBody [data-lsel]').forEach(c => { c.checked = t.checked; }); updateSaleSel(); return; }
     if (t.matches('#lineBody [data-lsel]')) { updateSaleSel(); return; }
+    if (t.id === 'hospCsv' && t.files[0]) {
+      try { const r = importHospitals(await t.files[0].text()); refresh(); toast(`${r.added} added, ${r.updated} updated in the hospital directory.`); }
+      catch (err) { toast(err.message || 'Could not read the CSV.'); }
+      t.value = ''; return;
+    }
+    if (t.id === 'f-hospitalId') { $('#hospOtherWrap')?.classList.toggle('hidden', t.value !== '__other'); if (t.value === '__other') $('#f-hospitalOther')?.focus(); return; }
     if (t.id === 'licFiles') {
       const files = [...t.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
       if (files.length < t.files.length) toast('Only JPG, PNG, WEBP, GIF and PDF files up to 25 MB can be used.');

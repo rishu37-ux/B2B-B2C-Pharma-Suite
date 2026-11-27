@@ -282,7 +282,7 @@ async function api(req, res, url) {
 
 // ---------- Static files (only these are served) ----------
 const STATIC = {
-  '/index.html': 'text/html', '/app.js': 'text/javascript', '/styles.css': 'text/css',
+  '/index.html': 'text/html', '/app.js': 'text/javascript', '/hospitals-data.js': 'text/javascript', '/styles.css': 'text/css',
   '/login.html': 'text/html', '/login.js': 'text/javascript', '/portal.html': 'text/html', '/portal.js': 'text/javascript',
 };
 function serveStatic(req, res, url) {

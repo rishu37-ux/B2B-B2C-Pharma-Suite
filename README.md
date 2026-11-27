@@ -15,6 +15,9 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 - **Supplier Details** — supplier master with licences and payables
 - **Supplier folders** — each supplier's bills (with the uploaded bill copy), item purchase history and item summary
 - **Purchase Orders**, **Goods Receipt (GRN)**, **Purchase Invoices**
+- **Hospital Directory** — medical colleges, AIIMS, the medical university, zonal/regional/civil hospitals, CHCs and PHCs of Himachal Pradesh, filterable by district, tehsil/block and type, with the chemists near each one. The "Nearby hospital" in chemist, supplier and firm forms is a dropdown filtered to the chosen district, with that tehsil's hospitals first.
+
+  The starting list (`hospitals-data.js`, 538 entries) was taken from the HP State Pollution Control Board's list of health care facilities, with districts and blocks filled from India Post PIN data where the list did not print them. The medical colleges, AIIMS, the medical university and zonal/regional hospitals were added by hand and are marked "please verify". The list may not include every health centre: add missing ones in the app, or import an official list as CSV (name, type, district, tehsil, locality, pincode, phone).
 
 Lists have filters for company/brand, category, type/form, item, supplier and month. Stock, products and chemists can be ticked to set the same CD%, TD% or GST% on many rows at once; the bill entry grid and the sale bill editor have the same option for their lines.
 
