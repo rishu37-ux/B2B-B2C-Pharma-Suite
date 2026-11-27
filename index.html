@@ -13,16 +13,16 @@
   <div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <div class="brand-mark">P</div>
+        <div class="brand-mark" id="brandMark">P</div>
         <div>
-          <div class="brand-name">Pharma Suite</div>
-          <div class="brand-sub">Distribution</div>
+          <div class="brand-name" id="brandName">Pharma Suite</div>
+          <div class="brand-sub">Pharma Suite</div>
         </div>
       </div>
       <nav id="nav"></nav>
       <div class="sidebar-foot">
         Data is saved in this browser.
-        <br><button id="resetData" type="button">Reset sample data</button>
+        <br><button id="settingsBtn" type="button">Settings &amp; backup</button>
       </div>
     </aside>
 
@@ -58,6 +58,7 @@
   </div>
 
   <div class="toast" id="toast"></div>
+  <div id="datalists" hidden></div>
 
   <script src="app.js"></script>
 </body>
