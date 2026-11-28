@@ -1844,15 +1844,23 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       const text = msg.content.filter(b => b.type === 'text').map(b => b.text).join('');
       return JSON.parse(text);
     } catch (err) {
-      if (err instanceof Anthropic.AuthenticationError) throw new Error('The API key was not accepted. Check it in Settings.');
-      if (err instanceof Anthropic.PermissionDeniedError) throw new Error('This API key is not allowed to use the model. Check your Anthropic account.');
-      if (err instanceof Anthropic.RateLimitError) throw new Error('Too many requests right now. Wait a minute and try again.');
-      if (err instanceof Anthropic.BadRequestError) throw new Error('The file could not be read: ' + (err.message || 'bad request') + '. Try a JPG/PNG photo or a smaller PDF.');
-      if (err instanceof Anthropic.APIConnectionError) throw new Error('Could not reach Anthropic. Check your internet connection.');
-      if (err instanceof Anthropic.APIError) throw new Error('Anthropic returned an error: ' + (err.message || err.status));
       if (err instanceof SyntaxError) throw new Error('The AI reply could not be understood. Please try again.');
-      throw err;
+      throw new Error(aiErrorText(err, Anthropic, true));
     }
+  }
+  // Plain words for errors from the Anthropic API. Account problems (no credit, key not accepted) are told
+  // as such, so they are not mistaken for a problem with the uploaded file.
+  function aiErrorText(err, Anthropic, withFile) {
+    const raw = String(err?.error?.error?.message || err?.message || '');
+    if (/credit balance|billing|purchase credits|plans? ?& ?billing/i.test(raw)) return 'Your Anthropic account has no credit left, so the AI cannot read anything. Add credit at console.anthropic.com → Settings → Billing (the API is paid separately from a Claude.ai subscription), then try again. You can still import a CSV or type the bill in.';
+    if (err?.status === 401 || (Anthropic && err instanceof Anthropic.AuthenticationError)) return 'The API key was not accepted. Check it in Settings → Integrations → AI providers.';
+    if (err?.status === 403 || (Anthropic && err instanceof Anthropic.PermissionDeniedError)) return 'This API key is not allowed to use the model. Check your Anthropic account (console.anthropic.com).';
+    if (err?.status === 429 || (Anthropic && err instanceof Anthropic.RateLimitError)) return /spend|limit|quota/i.test(raw) && !/rate/i.test(raw) ? 'Your Anthropic account has reached its spend limit. Raise it at console.anthropic.com → Settings → Limits, then try again.' : 'Too many requests right now. Wait a minute and try again.';
+    if (err?.status === 529 || err?.status >= 500) return 'Anthropic is busy right now. Wait a minute and try again.';
+    if (Anthropic && err instanceof Anthropic.APIConnectionError) return 'Could not reach Anthropic. Check your internet connection.';
+    if (err?.status === 413 || /too large|too long|maximum.*(pages|size)|exceeds/i.test(raw)) return 'The file is too large to read in one go. Upload fewer pages, or a smaller photo / PDF (up to 100 pages, 32 MB).';
+    if (err?.status === 400 || (Anthropic && err instanceof Anthropic.BadRequestError)) return withFile ? `The file could not be read (${raw.replace(/^\d+\s*/, '').slice(0, 200) || 'bad request'}). Try a clear JPG/PNG photo or a smaller PDF.` : `Anthropic did not accept the request: ${raw.slice(0, 200)}`;
+    return raw ? `Anthropic returned an error: ${raw.slice(0, 200)}` : 'Could not reach the AI. Please try again.';
   }
   function entryFromExtraction(x, files) {
     const e = newEntry('AI', { files: files.map(f => f.name), fileObjs: files.slice() });
@@ -1959,7 +1967,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   let toastTimer;
   function toast(msg) {
     const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3800);
+    // Longer messages (such as AI account errors) stay up long enough to read
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), Math.min(12000, Math.max(3800, String(msg).length * 55)));
   }
 
   const field = (label, name, { type = 'text', value = '', required = false, full = false, attrs = '', options = null } = {}) => `
@@ -3645,7 +3654,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         const m = await client.messages.create({ model: aiModel('agent'), max_tokens: 16, messages: [{ role: 'user', content: 'Reply with the word OK.' }] });
         res = { ok: true, msg: `Key works (${m.model})` };
       } else res = await api('POST', `api/int/test/${encodeURIComponent(id)}`, {});
-    } catch (err) { res = { ok: false, msg: err?.status === 401 ? 'The API key was not accepted.' : (err.message || 'Could not connect') }; }
+    } catch (err) { res = { ok: false, msg: id === 'ai' && err?.status ? aiErrorText(err, null, false) : (err.message || 'Could not connect') }; }
     c.lastTest = { ok: !!res.ok, msg: res.msg || (res.ok ? 'OK' : 'Failed'), at: new Date().toISOString() };
     refresh(); toast(`${d.name}: ${c.lastTest.msg}`);
   };

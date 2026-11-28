@@ -278,6 +278,7 @@ Reply in the language the chemist writes in (Hindi, English or Hinglish), briefl
   let final;
   try { final = await runner.runUntilDone(); }
   catch (e) {
+    if (/credit balance/i.test(e?.message || '')) { console.error('Assistant: the Anthropic account has no credit left — add credit at console.anthropic.com'); throw Object.assign(new Error('The assistant is not available right now. Please call the distributor.'), { status: 503 }); }
     if (e instanceof Anthropic.AuthenticationError) throw Object.assign(new Error('The assistant is not set up correctly. Please call the distributor.'), { status: 503 });
     if (e instanceof Anthropic.RateLimitError) throw Object.assign(new Error('The assistant is busy. Please try again in a minute.'), { status: 429 });
     if (e instanceof Anthropic.APIError) { console.error('Assistant API error', e.status, e.message); throw Object.assign(new Error('The assistant could not answer right now. Please try again.'), { status: 502 }); }
