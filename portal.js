@@ -50,7 +50,7 @@
       (!f.company || i.company === f.company) && (!f.category || i.category === f.category) && (!f.form || i.form === f.form) &&
       (!f.avail || (f.avail === 'in' ? i.available > 0 : i.available <= 0)));
     const inStock = cat.items.filter(i => i.available > 0).length;
-    return `
+    return `${usualCard()}
       <section class="card">
         <div class="card-head"><h2 class="card-title">Stock list</h2><span class="hint">${inStock} of ${cat.items.length} items in stock · you can order anything, we arrange what is not in stock</span></div>
         <div class="filter-bar portal-filters">
@@ -73,13 +73,26 @@
         </form></div>
       </section>`;
   }
+  // Items this chemist orders regularly (worked out by the distributor's Smart Reorder agent)
+  function usualCard() {
+    const u = (cat.usual || []).map(x => ({ ...x, i: itemById(x.id) })).filter(x => x.i).sort((a, b) => b.due - a.due).slice(0, 6);
+    if (!u.length || f.q || f.company || f.category || f.form || f.avail) return '';
+    const due = u.filter(x => x.due);
+    return `<section class="card">
+        <div class="card-head"><h2 class="card-title">Your usual order</h2><span class="hint">${due.length ? `${due.length} item${due.length === 1 ? '' : 's'} due now` : 'Items you order regularly'}</span><div class="spacer"></div><button type="button" class="btn sm primary" id="addUsual">${due.length ? 'Add due items to cart' : 'Add all to cart'}</button></div>
+        <div class="cat-list">${u.map(x => `<div class="cat-item">
+          <div class="cat-main"><div class="strong">${esc(x.i.name)} ${x.due ? pill('Due') : ''}</div><div class="small muted">Usually ${nf.format(x.qty)} every ${x.gap} days · last ordered ${fmtDate(x.last)}</div>
+            <div class="cat-stock">${x.i.available > 0 ? `${pill(x.i.status)} <span class="small muted">${nf.format(x.i.available)} available</span>` : pill('Not in stock')}</div></div>
+          <div class="cat-price"><div class="strong num">Rate ${money(x.i.rate)}</div></div></div>`).join('')}</div>
+      </section>`;
+  }
   function itemRow(i) {
     const inCart = cart.find(l => l.productId === i.id);
     const st = i.available > 0 ? `${pill(i.status)} <span class="small muted">${nf.format(i.available)} available${i.nearestExpiry ? ' · exp ' + expTxt(i.nearestExpiry) : ''}</span>` : `${pill('Not in stock')} <span class="small muted">we can arrange it</span>`;
     return `<div class="cat-item">
       <div class="cat-main"><div class="strong">${esc(i.name)}</div>
         <div class="small muted">${esc([i.company, i.form, i.pack, i.category].filter(Boolean).join(' · '))}</div>
-        <div class="cat-stock">${st}</div></div>
+        <div class="cat-stock">${st}</div>${i.alts?.length ? `<div class="small">Same salt in stock: ${i.alts.map(itemById).filter(Boolean).map(a => `<a href="#" data-alt="${esc(a.id)}">${esc(a.name)}</a>`).join(', ')}</div>` : ''}</div>
       <div class="cat-price"><div class="small muted">MRP ${money(i.mrp)}</div><div class="strong num">Rate ${money(i.rate)}</div><div class="small muted">+ GST ${i.gst}%</div></div>
       <div class="cat-add"><input type="number" min="1" step="1" value="1" inputmode="numeric" data-qty="${esc(i.id)}" aria-label="Quantity for ${esc(i.name)}">
         <button type="button" class="btn sm ${i.available > 0 ? 'primary' : ''}" data-add="${esc(i.id)}">${i.available > 0 ? 'Add' : 'Order anyway'}</button>
@@ -199,6 +212,13 @@
       addToCart({ productId: i.id, qty: q });
       toast(i.available >= q ? `${i.name} × ${q} added to cart.` : `${i.name} × ${q} added — the distributor will arrange what is not in stock.`);
       refreshList(); return;
+    }
+    const alt = t.closest('[data-alt]');
+    if (alt) { e.preventDefault(); const a = itemById(alt.dataset.alt); if (a) { f.q = a.name; render(); window.scrollTo(0, 0); } return; }
+    if (t.closest('#addUsual')) {
+      const u = (cat.usual || []).filter(x => itemById(x.id)), due = u.filter(x => x.due), pick = due.length ? due : u;
+      pick.forEach(x => addToCart({ productId: x.id, qty: x.qty }));
+      toast(`${pick.length} item${pick.length === 1 ? '' : 's'} added to the cart — check the quantities there.`); render(); return;
     }
     const rm = t.closest('[data-rm]');
     if (rm) { cart.splice(+rm.dataset.rm, 1); saveCart(); render(); return; }

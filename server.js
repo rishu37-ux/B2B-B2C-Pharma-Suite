@@ -141,12 +141,14 @@ function readBody(req, limit) {
 const str = (v, max) => String(v ?? '').trim().slice(0, max);
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
+// Same ingredients and strengths, in any order and spacing (matches the dashboard's Substitute Finder)
+const saltKey = v => String(v || '').toUpperCase().replace(/\s+/g, ' ').split(/\s*\+\s*/).map(x => x.replace(/[^A-Z0-9.]/g, '')).filter(Boolean).sort().join('+');
 // What a chemist may see: the product list with availability and their own price — never purchase rates or suppliers.
 function catalogue() {
   const d = store.data; if (!d) return [];
   const now = new Date(); now.setHours(0, 0, 0, 0);
   const notExpired = exp => { if (!exp) return false; const [y, m] = exp.split('-').map(Number); return new Date(y, m, 0) >= now; };
-  return d.products.map(p => {
+  const list = d.products.map(p => {
     // Batches blocked after a drug alert / recall are not offered to chemists
     const bs = d.batches.filter(b => b.productId === p.id && !b.blocked && (b.qty || 0) + (b.free || 0) > 0 && notExpired(b.expiry)).sort((a, b) => a.expiry.localeCompare(b.expiry));
     const available = bs.reduce((a, b) => a + (b.qty || 0) + (b.free || 0), 0);
@@ -154,9 +156,23 @@ function catalogue() {
       id: p.id, name: p.name, company: d.companies.find(c => c.id === p.companyId)?.name || '', category: d.categories.find(c => c.id === p.categoryId)?.name || '',
       form: p.form || '', pack: p.pack || '', mrp: p.mrp || 0, rate: p.ptr || 0, gst: p.gst || 0, available,
       status: available <= 0 ? 'Not in stock' : available < (p.reorder || 0) ? 'Limited stock' : 'In stock',
-      nearestExpiry: bs[0]?.expiry || '',
+      nearestExpiry: bs[0]?.expiry || '', salt: p.salt || '', _k: saltKey(p.salt),
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
+  // For items not in stock: up to three products with the same salt and form that are in stock
+  return list.map(({ _k, ...i }) => ({ ...i, alts: i.available > 0 || !_k ? [] : list.filter(x => x._k === _k && x.id !== i.id && x.form === i.form && x.available > 0).slice(0, 3).map(x => x.id) }));
+}
+// A chemist's usual items: bought at least twice recently, how often and how much (the dashboard's Smart Reorder)
+function usualFor(cid) {
+  const d = store.data, c = d?.settings?.agents?.reorder || {};
+  if (!d || c.enabled === false) return [];
+  const DAY = 864e5, t0 = Date.parse(today()), since = new Date(t0 - (c.days || 180) * DAY).toISOString().slice(0, 10), m = {};
+  (d.sales || []).filter(s => s.party?.chemistId === cid && s.date >= since).forEach(s => s.lines.forEach(l => { const o = m[l.productId] || (m[l.productId] = { dates: new Set(), qty: 0 }); o.dates.add(s.date); o.qty += l.qty || 0; }));
+  return Object.entries(m).filter(([pid, o]) => d.products.some(p => p.id === pid) && o.dates.size >= (c.minBuys || 2)).map(([pid, o]) => {
+    const ds = [...o.dates].sort(), gaps = ds.slice(1).map((x, i) => (Date.parse(x) - Date.parse(ds[i])) / DAY);
+    const gap = Math.max(5, Math.round(gaps.reduce((a, x) => a + x, 0) / gaps.length)), last = ds[ds.length - 1], nextMs = Date.parse(last) + gap * DAY, until = Math.round((nextMs - t0) / DAY);
+    return { id: pid, qty: Math.max(1, Math.round(o.qty / ds.length)), gap, last, next: new Date(nextMs).toISOString().slice(0, 10), due: until <= (c.leadDays ?? 3) && until >= -gap };
+  }).sort((a, b) => a.next.localeCompare(b.next));
 }
 
 // ---------- Chemist orders (portal and assistant) ----------
@@ -370,7 +386,7 @@ async function api(req, res, url) {
     if (auth.chemists[cid]?.mustChange) return send(res, 403, { error: 'Please set your own password first.', mustChange: true });
     if (route === 'GET /api/portal/catalogue') {
       const c = chemistOf(cid);
-      return send(res, 200, { items: catalogue(), cd: c?.cd || 0, td: c?.td || 0, firm: store.data?.settings?.firm || {} });
+      return send(res, 200, { items: catalogue(), usual: usualFor(cid), cd: c?.cd || 0, td: c?.td || 0, firm: store.data?.settings?.firm || {} });
     }
     if (route === 'GET /api/portal/assistant') {
       const cfg = assistantCfg();
@@ -415,6 +431,13 @@ async function api(req, res, url) {
     return send(res, 200, { rev: store.rev });
   }
   if (route === 'GET /api/orders') return send(res, 200, orders);
+  if (route === 'GET /api/inbox') return send(res, 200, inbox.slice(0, 300));
+  const ib = /^POST \/api\/inbox\/([^/]+)$/.exec(route);
+  if (ib) {
+    const m = inbox.find(x => x.id === decodeURIComponent(ib[1])); if (!m) return send(res, 404, { error: 'Message not found.' });
+    const b = await readBody(req, 2000); if (!['New', 'Done'].includes(b.status)) return fail400(res, 'Bad status.');
+    m.status = b.status; saveInbox(); return send(res, 200, m);
+  }
   if (route === 'GET /api/assistant/log') {
     const chemName = id => (store.data?.chemists || []).find(c => c.id === id)?.name || id;
     return send(res, 200, { usage: assistantLog.usage[today()] || { total: 0, per: {} }, sdk: await loadServerSdk().then(() => true, () => false), key: !!secrets.ai?.serverKey, chats: Object.entries(assistantLog.chats).map(([id, m]) => ({ chemistId: id, name: chemName(id), last: m.at(-1)?.at || '', messages: m.slice(-20) })).sort((a, b) => b.last.localeCompare(a.last)).slice(0, 30) });
@@ -515,6 +538,47 @@ async function api(req, res, url) {
   return send(res, 404, { error: 'Not found.' });
 }
 
+// ---------- WhatsApp order inbox: messages to the business number arrive through the Cloud API webhook ----------
+// Meta checks the URL once with the verify token; every message after that is signed with the app secret.
+let inbox = readJson('inbox.json', []);
+const saveInbox = () => writeJson('inbox.json', inbox);
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on('data', c => { size += c.length; if (size > limit) { reject(Object.assign(new Error('Request is too large.'), { status: 413 })); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+async function whatsappHook(req, res, url) {
+  const w = secrets.whatsapp || {};
+  if (req.method === 'GET') {
+    const q = url.searchParams;
+    if (q.get('hub.mode') === 'subscribe' && w.verifyToken && q.get('hub.verify_token') === w.verifyToken) return send(res, 200, String(q.get('hub.challenge') || '').slice(0, 200));
+    return send(res, 403, 'Forbidden');
+  }
+  if (req.method !== 'POST') return send(res, 405, 'Method not allowed');
+  const raw = await readRaw(req, 1_000_000);
+  if (!w.appSecret) return send(res, 403, 'Not set up');
+  const sig = String(req.headers['x-hub-signature-256'] || '');
+  const want = 'sha256=' + crypto.createHmac('sha256', w.appSecret).update(raw).digest('hex');
+  if (sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return send(res, 401, 'Bad signature');
+  let body; try { body = JSON.parse(raw.toString('utf8')); } catch { return send(res, 400, 'Bad JSON'); }
+  let added = 0;
+  for (const e of body.entry || []) for (const ch of e.changes || []) {
+    const v = ch.value || {}, names = Object.fromEntries((v.contacts || []).map(c => [c.wa_id, c.profile?.name || '']));
+    for (const m of v.messages || []) {
+      if (!m.id || inbox.some(x => x.id === m.id)) continue;
+      const media = m[m.type] || {};
+      const text = m.type === 'text' ? m.text?.body : m.type === 'interactive' ? (m.interactive?.button_reply?.title || m.interactive?.list_reply?.title || '[reply]') : m.type === 'button' ? m.button?.text : `[${m.type}${media.caption ? ': ' + media.caption : ''}]`;
+      inbox.unshift({ id: str(m.id, 200), from: str(m.from, 20), name: str(names[m.from], 80), text: str(text, 4000), type: str(m.type, 20), at: new Date((Number(m.timestamp) || Date.now() / 1000) * 1000).toISOString(), status: 'New' });
+      added++;
+    }
+  }
+  if (added) { if (inbox.length > 1000) inbox.length = 1000; saveInbox(); }
+  return send(res, 200, 'OK');
+}
+
 // ---------- Static files (only these are served) ----------
 const STATIC = {
   '/index.html': 'text/html', '/app.js': 'text/javascript', '/hospitals-data.js': 'text/javascript', '/styles.css': 'text/css',
@@ -539,6 +603,7 @@ const server = http.createServer(async (req, res) => {
   let url;
   try { url = new URL(req.url, 'http://localhost'); } catch { return send(res, 400, 'Bad request'); }
   try {
+    if (url.pathname === '/api/hooks/whatsapp') return await whatsappHook(req, res, url);
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
     return serveStatic(req, res, url);

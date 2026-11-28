@@ -8,11 +8,12 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 - **Sales** — bills to chemists and individual customers (stock is deducted earliest-expiry first)
 - **Sales Returns** — pick the chemist or customer, tick the lines supplied to them (from all their bills) and enter how much is coming back; the return starts as a request. Approving puts the stock back into the same batch, credits the bill(s) and gives a printable credit note. Returns can be rejected, edited while requested, or deleted (an approved one is reversed)
 - **Enquiries** — who asked for what (chemist, customer or a new person), source, follow-up date and status (Open, Quoted, Converted, Lost); “Make bill” turns an enquiry into a sale bill. Due follow-ups show on the Overview
+- **Sales Team** — salesmen and MRs with their areas, monthly targets, sales, collections, overdue in their area and commission
 - **Customers** — walk-in / retail customers with address, bills, purchases and balance; picked or created in the sale bill
 - **Party Ledger** — for any chemist, customer or supplier: bills, dated payments and returns with a running balance, opening balance for a date range, a balances summary for all parties, A4 print and CSV export
 - **GST / ITC Match** — your purchase bills against the GSTR-2B months you imported: Not in 2B, Mismatch, Not in books, Matched; hold or release a supplier's payment
 - **Profile** (click the avatar, top right) — business name, tagline, logo (shown in the sidebar and on bills), your name and designation
-- **Agents & Approvals** — twenty-six assistants. Nothing is sent or ordered without you: they put items in an Approvals inbox.
+- **Agents & Approvals** — thirty-three assistants. Nothing is sent or ordered without you: they put items in an Approvals inbox.
   - *Order Desk* (AI): paste an order message; it matches items to your products and stock, then make a bill, save an enquiry or reply with availability
   - *Stock & Purchase*: draft purchase orders per supplier from sales, enquiries and chemist orders; near-expiry and slow-moving stock
   - *Collections*: overdue parties with a ready reminder (WhatsApp / SMS / email, UPI ID or Razorpay link); does not repeat within the set days
@@ -43,6 +44,16 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
   - *Cold Chain Watch*: products marked “Cold chain (2–8 °C)”, a fridge temperature log (morning and evening), alerts for missed or out-of-range readings, suggestions for products that may need cold storage, and a ❄ note on the dispatch list
   - *Supplier Performance*: A–D score per supplier (fill rate, days late, short shelf-life stock, costlier rates); items cheaper from another supplier; optionally draft purchase orders to the cheapest supplier
   - *Audit & Anomaly*: big discounts, sales below cost, sale bills deleted or changed later (every edit and delete is now recorded), stock below zero, repeated payments, duplicate records and wrong HSN / GST
+
+  - *Substitute Finder*: when an item in an enquiry or chemist order is short, finds products with the same salt and strength in the same form that are in stock (salt written in any order or spacing), with a ready message; also shown in Order Desk, chemist orders, a “Find substitute” tool and the chemist portal. For patients, a brand change needs the doctor's consent
+  - *Profit & Margin*: weekly profit and margin against the weeks before, low-margin chemists and products, dead stock at cost; monthly report by company, product and party
+  - *Refill Reminder*: walk-in customers on long-term medicines (diabetes, BP, thyroid, heart… — set per product or found from the name / salt) get a WhatsApp reminder a few days before the medicine runs out
+  - *Chemist Smart Reorder*: learns each chemist's usual items, quantities and how often they order; when due, the list can be sent on WhatsApp or turned into a bill. Chemists see “Your usual order” in the portal
+  - *Seasonal Forecast*: one month ahead — last year's sales of that month, or the season (monsoon, winter, summer) for related medicines — against stock and open purchase orders; drafts purchase orders
+  - *Sales Team & Targets*: a Sales Team page with salesmen / MRs, their areas or chemists, monthly target, collections and commission; each morning a plan for each of them (dues, usual orders due, chemists not ordering) to send on WhatsApp
+  - *WhatsApp Order Inbox*: messages to your WhatsApp Business number arrive in an inbox (server webhook `/api/hooks/whatsapp`, checked with your verify token and app secret); “Read order” opens Order Desk with the message — read with AI, or without AI by matching product names and quantities. Needs the server reachable over HTTPS and the WhatsApp Business API
+
+  Order Desk can now also read a message without AI (“Read without AI”), matching names like “Dolo 650 - 10 strip”.
 
   Daily agents run the first time the dashboard is open after their set time each day.
 - **Recalls & NSQ** — the drug alert lists you added, how many entries match your stock or sales, and the blocked batches (unblock from here or from Stock Details → Blocked)

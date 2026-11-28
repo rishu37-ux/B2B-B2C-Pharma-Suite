@@ -459,7 +459,7 @@
   // ---------- Navigation ----------
   const NAV = [
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
-    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['returns', 'Sales Returns', 'undo'], ['inquiries', 'Enquiries', 'chat'], ['chemorders', 'Chemist Orders', 'cart'], ['customers', 'Customers', 'user'], ['chemists', 'Onboard Chemists', 'store']] },
+    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['returns', 'Sales Returns', 'undo'], ['inquiries', 'Enquiries', 'chat'], ['chemorders', 'Chemist Orders', 'cart'], ['customers', 'Customers', 'user'], ['chemists', 'Onboard Chemists', 'store'], ['team', 'Sales Team', 'user']] },
     { group: 'Accounts', items: [['ledger', 'Party Ledger', 'book'], ['itc', 'GST / ITC Match', 'file']] },
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill'], ['recalls', 'Recalls & NSQ', 'alert']] },
     { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
@@ -481,6 +481,7 @@
     recalls: 'CDSCO NSQ / spurious drug alerts, banned FDCs and recalls — checked against your stock and sales',
     schemes: 'Company schemes, free goods and claims on your sales',
     itc: 'Your purchase bills matched with GSTR-2B — input tax credit at risk',
+    team: 'Salesmen and MRs — areas, targets, collections and commission',
     stock: 'Batch-wise stock in bill format',
     products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
@@ -2274,7 +2275,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     }
     if (!Array.isArray(d.inquiries)) d.inquiries = [];
     if (!Array.isArray(d.returns)) d.returns = [];
-    ['approvals', 'agentLog', 'reminders', 'purchaseReturns', 'recalls', 'schemes', 'schemeClaims', 'visits', 'gstr2b', 'tempLog', 'auditLog'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
+    ['approvals', 'agentLog', 'reminders', 'purchaseReturns', 'recalls', 'schemes', 'schemeClaims', 'visits', 'gstr2b', 'tempLog', 'auditLog', 'staff'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
     // Delivery tracking (added later): bills made before it count as delivered
     if (!d.deliveryRev) { (d.sales || []).forEach(s => { if (!s.delivered) s.delivered = s.date; }); d.deliveryRev = 1; }
     if (d.settings && !d.settings.profile) d.settings.profile = {};
@@ -2757,13 +2758,14 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ${field('NPPA ceiling price per pack, before GST (₹)', 'ceiling', { type: 'number', value: p.ceiling || '', attrs: numAttrs() + ' placeholder="Only for scheduled (DPCO) medicines"' })}
       <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="dpco" ${p.dpco ? 'checked' : ''}> Scheduled formulation under DPCO (NLEM)</label></div>
       <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="cold" ${isCold(p) ? 'checked' : ''}> Cold chain — store at 2–8 °C</label></div>
+      ${field('Long-term medicine (refill reminders)', 'chronic', { value: p.chronic === true ? '1' : p.chronic === false ? '0' : p.chronic || '', options: [['', 'Auto (from name / salt)'], ['1', 'Yes'], ['0', 'No']] })}
     </div>`;
   }
   function readProduct(d, p) {
     Object.assign(p, {
       name: norm(d.name), companyId: findOrCreateCompany(d.company), mfg: d.mfg.trim(), categoryId: d.categoryId, form: d.form, pack: d.pack.trim(), hsn: d.hsn.trim(), salt: (d.salt || '').trim(),
       gst: num(d.gst), mrp: round2(num(d.mrp)), ptr: round2(num(d.ptr)), pts: round2(num(d.pts)), reorder: Math.floor(num(d.reorder)),
-      schedule: d.schedule || '', ceiling: round2(num(d.ceiling)) || 0, dpco: !!d.dpco || num(d.ceiling) > 0, cold: !!d.cold,
+      schedule: d.schedule || '', ceiling: round2(num(d.ceiling)) || 0, dpco: !!d.dpco || num(d.ceiling) > 0, cold: !!d.cold, chronic: d.chronic || '',
     });
   }
   const productCheck = (d, self) => {
@@ -3508,7 +3510,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     { id: 'ai', name: 'AI providers', icon: 'spark', desc: 'Claude reads purchase bills and licences, and understands free-text orders for the Order Desk agent.', works: 'Works now — the browser key stays in this browser; the Chemist Assistant uses a separate key stored on the server.', test: 'ai',
       fields: [{ k: 'key', label: 'Anthropic API key', type: 'browserkey', required: true }, { k: 'billModel', label: 'Model for reading bills and licences', type: 'select', options: MODEL_OPTS, def: 'claude-opus-5-5' }, { k: 'agentModel', label: 'Model for agents (Order Desk, Chemist Assistant)', type: 'select', options: MODEL_OPTS, def: 'claude-haiku-5-5' }, { k: 'serverKey', label: 'Anthropic API key for the server (Chemist Assistant)', type: 'secret' }, { k: 'budget', label: 'Monthly AI budget (₹, for your reference)', type: 'number' }] },
     { id: 'whatsapp', name: 'WhatsApp', icon: 'chat', desc: 'Payment reminders, order replies and the daily briefing.', works: 'Works now: opens WhatsApp with the message typed. Direct sending needs the Business API and the server.', test: 'server',
-      fields: [{ k: 'mode', label: 'How to send', type: 'select', options: [['click', 'Open WhatsApp with the message ready (no setup)'], ['cloud', 'WhatsApp Business API — sends directly (server)']], def: 'click' }, { k: 'businessNumber', label: 'Your WhatsApp business number' }, { k: 'phoneId', label: 'Phone number ID', when: 'cloud', required: true }, { k: 'token', label: 'Permanent access token', type: 'secret', when: 'cloud', required: true }, { k: 'template', label: 'Approved reminder template name (outside 24-hour chats)', when: 'cloud' }, { k: 'lang', label: 'Template language code', def: 'en', when: 'cloud' }, { k: 'apiVersion', label: 'Graph API version', def: 'v23.0', when: 'cloud' }] },
+      fields: [{ k: 'mode', label: 'How to send', type: 'select', options: [['click', 'Open WhatsApp with the message ready (no setup)'], ['cloud', 'WhatsApp Business API — sends directly (server)']], def: 'click' }, { k: 'businessNumber', label: 'Your WhatsApp business number' }, { k: 'phoneId', label: 'Phone number ID', when: 'cloud', required: true }, { k: 'token', label: 'Permanent access token', type: 'secret', when: 'cloud', required: true }, { k: 'template', label: 'Approved reminder template name (outside 24-hour chats)', when: 'cloud' }, { k: 'lang', label: 'Template language code', def: 'en', when: 'cloud' }, { k: 'apiVersion', label: 'Graph API version', def: 'v23.0', when: 'cloud' }, { k: 'verifyToken', label: 'Webhook verify token (any secret word you choose — also typed in Meta)', type: 'secret', when: 'cloud' }, { k: 'appSecret', label: 'App secret (Meta app → Settings → Basic) — checks incoming messages', type: 'secret', when: 'cloud' }] },
     { id: 'voice', name: 'Voice calls', icon: 'chat', desc: 'Missed-call orders, click-to-call and call recordings.', works: 'Saves settings — calling is not connected yet.',
       fields: [{ k: 'provider', label: 'Provider', type: 'select', options: [['exotel', 'Exotel'], ['knowlarity', 'Knowlarity'], ['twilio', 'Twilio'], ['other', 'Other']], def: 'exotel' }, { k: 'accountSid', label: 'Account SID / ID' }, { k: 'apiKey', label: 'API key / token', type: 'secret' }, { k: 'callerId', label: 'Caller ID / virtual number' }] },
     { id: 'sms', name: 'SMS backup', icon: 'chat', desc: 'Reminders by SMS when WhatsApp is not possible.', works: 'Works now: opens the SMS app with the message. Bulk SMS through a provider needs DLT registration (saved for later).',
@@ -3690,7 +3692,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   ACTIONS['hook-del'] = hid => { const c = intCfg('custom'); const h = (c.hooks || []).find(x => x.id === hid); if (!h) return; confirmModal(`Delete ${h.name}?`, 'This cannot be undone.', 'Delete', () => { c.hooks = c.hooks.filter(x => x !== h); if (SERVER) api('PUT', `api/secrets/${encodeURIComponent('custom:' + h.id)}`, { fields: { key: null } }).then(loadSecretMask).catch(() => {}); return `${h.name} deleted.`; }); };
   ACTIONS['hook-test'] = async hid => { save(); try { const r = await api('POST', `api/int/test/${encodeURIComponent('custom:' + hid)}`, {}); toast(r.msg || (r.ok ? 'OK' : 'Failed')); } catch (err) { toast(err.message); } };
   ACTIONS['empty-data'] = () => confirmModal('Start with empty data?', 'All products, stock, chemists, customers, suppliers, bills, orders, returns, enquiries and doctors are removed. Your business details, profile, settings, integrations and the hospital directory are kept. Download a backup first if you may need the sample data. This cannot be undone.', 'Start empty', () => {
-    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [], purchaseReturns: [], recalls: [], schemes: [], schemeClaims: [], visits: [], gstr2b: [], tempLog: [], auditLog: [] });
+    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [], purchaseReturns: [], recalls: [], schemes: [], schemeClaims: [], visits: [], gstr2b: [], tempLog: [], auditLog: [], staff: [] });
     db.settings.demo = false; entry = null; Object.keys(listState).forEach(k => delete listState[k]);
     return 'Data cleared — you are starting fresh.';
   });
@@ -3949,7 +3951,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     odState = null;
     const partyOpts = `<option value="">Let AI find out from the message</option><optgroup label="Chemists">${db.chemists.map(c => [c.id, c.name]).sort(byName).map(([v, l]) => `<option value="chemist|${esc(v)}">${esc(l)}</option>`).join('')}</optgroup><optgroup label="Customers">${(db.customers || []).map(c => [c.id, c.name]).sort(byName).map(([v, l]) => `<option value="customer|${esc(v)}">${esc(l)}</option>`).join('')}</optgroup>`;
     openModal({
-      title: 'Order Desk — read an order message', size: 'xl', submitLabel: 'Read with AI',
+      title: 'Order Desk — read an order message', size: 'xl', submitLabel: getApiKey() ? 'Read with AI' : 'Read (no AI)',
+      extraFoot: getApiKey() ? '<div class="foot-left"><button type="button" class="btn" data-p6="od-free">Read without AI</button></div>' : '',
       body: `<div class="form-grid">
           <div class="field full"><label for="odText">Paste the order message *</label><textarea id="odText" name="odText" rows="6" placeholder="e.g. Sharma Medicos: Dolo 650 - 10 strip, Pan 40 5 box, Moisturex lotion 2"></textarea></div>
           <div class="field"><label for="odParty">From</label><select id="odParty" name="odParty">${partyOpts}</select></div>
@@ -3959,7 +3962,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       onSubmit: v => {
         const text = String(v.odText || '').trim();
         if (!text) { toast('Paste the order message first.'); return false; }
-        if (!getApiKey()) { toast('Add the Anthropic API key in Settings → Integrations → AI providers.'); return false; }
+        if (!getApiKey()) { readOrderFree(); return false; }
         readOrderMessage(text, v.odParty || ''); return false;
       },
     });
@@ -4004,7 +4007,7 @@ Message:
     box.innerHTML = `<div class="od-result">
       <div class="small">${odState.sender ? `Message says it is from <b>${esc(odState.sender)}</b>. ` : ''}${odState.party ? '' : '<span class="bad-text">Choose who it is from above before making a bill.</span>'}${odState.notes ? ` Notes: ${esc(odState.notes)}` : ''}</div>
       <div class="lines"><div class="table-wrap"><table><thead><tr><th>Written as</th><th>Product</th><th>Qty</th><th>Free</th><th class="r">In stock</th></tr></thead>
-        <tbody>${odState.lines.map((l, i) => { const have = l.productId ? sellableQty(l.productId) : 0; return `<tr data-odl="${i}"><td>${esc(l.text)}</td><td><select data-od="productId">${opts(l.productId)}</select></td><td><input data-od="qty" type="number" min="1" value="${l.qty}" style="width:70px"></td><td><input data-od="free" type="number" min="0" value="${l.free || 0}" style="width:60px"></td><td class="r">${l.productId ? (have >= l.qty ? pill('In stock') : have > 0 ? pill(`Short ${l.qty - have}`) : pill('Not in stock')) : '—'}</td></tr>`; }).join('') || '<tr><td colspan="5" class="muted">No items found in the message.</td></tr>'}</tbody></table></div></div>
+        <tbody>${odState.lines.map((l, i) => { const have = l.productId ? sellableQty(l.productId) : 0; return `<tr data-odl="${i}"><td>${esc(l.text)}</td><td><select data-od="productId">${opts(l.productId)}</select></td><td><input data-od="qty" type="number" min="1" value="${l.qty}" style="width:70px"></td><td><input data-od="free" type="number" min="0" value="${l.free || 0}" style="width:60px"></td><td class="r">${l.productId ? (have >= l.qty ? pill('In stock') : have > 0 ? pill(`Short ${l.qty - have}`) : pill('Not in stock')) : '—'}${subsNote(l.productId, l.qty)}</td></tr>`; }).join('') || '<tr><td colspan="5" class="muted">No items found in the message.</td></tr>'}</tbody></table></div></div>
       <div class="toolbar"><button type="button" class="btn primary" data-od-act="bill">Make sale bill</button><button type="button" class="btn" data-od-act="enquiry">Save as enquiry</button><button type="button" class="btn" data-od-act="reply">Reply with availability</button></div>
     </div>`;
   }
@@ -4523,6 +4526,11 @@ Message:
       coldchain: actBtn('temp-log', '', 'Temperature log', 'ghost'),
       supplier: actBtn('supplier-report', '', 'Supplier scores', 'ghost'),
       audit: actBtn('audit-log', '', 'Bill changes', 'ghost'),
+      substitute: actBtn('subs-find', '', 'Find substitute', 'ghost'),
+      margin: actBtn('margin-report', '', 'Margin report', 'ghost'),
+      reorder: actBtn('reorder-open', '', 'Usual orders', 'ghost'),
+      salesteam: '<button type="button" class="btn sm ghost" data-nav="team">Sales team</button>',
+      wainbox: actBtn('wa-inbox', '', 'Open inbox', 'ghost'),
     })[id] || '';
   }
   const APPR_LABEL = { po: 'Review PO', reminder: 'Send reminder', briefing: 'Share', price: 'Apply new rate', returnadvice: 'Approve return', claim: 'Review claim', followup: 'Send message', lost: 'Mark lost', statement: 'Send statement', bankmatch: 'Record payment', info: 'Open' };
@@ -6057,6 +6065,432 @@ Only include confident matches. A brand name alone is not enough: the ingredient
     ({ 'ewb-json': () => gstDocsDownload('ewb'), 'einv-json': () => gstDocsDownload('einv'), 'clr-wa': () => clearanceWa(id) })[b.dataset.p5]?.();
   });
 
+  // =====================================================================
+  // Phase 6 agents: Substitute Finder, Profit & Margin, Refill Reminder, Chemist Smart Reorder,
+  // Seasonal Demand Forecast, Sales Team & Targets, WhatsApp Order Inbox
+  // =====================================================================
+  // Same ingredients and strengths, in any order and spacing: "Paracetamol 325mg + Aceclofenac 100mg"
+  const saltKey = s => String(s || '').toUpperCase().replace(/\s+/g, ' ').split(/\s*\+\s*/).map(x => x.replace(/[^A-Z0-9.]/g, '')).filter(Boolean).sort().join('+');
+  function substitutes(pid) {
+    const p = prod(pid), k = saltKey(p?.salt); if (!k) return [];
+    return db.products.filter(x => x.id !== pid && saltKey(x.salt) === k && (x.form || '') === (p.form || '') && sellableQty(x.id) > 0).sort((a, b) => sellableQty(b.id) - sellableQty(a.id));
+  }
+  const subsText = (pid, n = 2) => substitutes(pid).slice(0, n).map(x => `${x.name} (${qty(sellableQty(x.id))} in stock, ₹${dec(x.ptr)})`).join(', ');
+  const subsNote = (pid, want) => pid && sellableQty(pid) < want && substitutes(pid).length ? `<div class="small">Same salt in stock: ${esc(subsText(pid))}</div>` : '';
+
+  // ----- Substitute Finder -----
+  const DEFAULT_SUBS = 'Namaste {party} ji,\n{item} abhi stock mein kam hai. Isi salt ({salt}) ka {alt} available hai — rate ₹{rate}.\nBhej dein? Reply karein.\n— {firm}';
+  function runSubsAgent() {
+    const c = agentCfg('substitute'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('substitute', keep, it, days); };
+    const asks = [];
+    db.inquiries.filter(inqOpen).forEach(q => q.items.forEach(i => { if (i.productId && sellableQty(i.productId) < i.qty) asks.push({ src: 'Enquiry', ref: q.no, party: inqPartyName(q), phone: inqPartyPhone(q), pid: i.productId, qty: i.qty, isChem: q.party.type === 'chemist', cid: q.party.chemistId || '', uid: q.party.customerId || '' }); }));
+    chemOrders.filter(o => ['New', 'Accepted', 'Arranging'].includes(o.status)).forEach(o => o.lines.forEach(l => { if (l.productId && sellableQty(l.productId) < l.qty) { const ch = chem(o.chemistId); asks.push({ src: 'Chemist order', ref: o.id, party: ch?.name || o.chemistId, phone: ch?.phone, pid: l.productId, qty: l.qty, isChem: true, cid: o.chemistId }); } }));
+    asks.forEach(x => { const subs = substitutes(x.pid); if (!subs.length) return; add({ key: `subs:${x.ref}:${x.pid}`, kind: 'subs', title: `${prod(x.pid).name} is short for ${x.party} — offer ${subs[0].name}`, detail: [`${x.src} ${x.ref} · asked ${qty(x.qty)} · ${qty(sellableQty(x.pid))} in stock`, `Same salt in stock: ${subsText(x.pid, 3)}`, ...(x.isChem ? [] : ['For a patient, change the brand only with the doctor’s consent.'])], payload: { ...x, alt: subs[0].id } }, 14); });
+    if (c.remindSalt) { const no = db.products.filter(p => !String(p.salt || '').trim() && !/cosmetic|derma|surgical|device|fmcg/i.test(category(p.categoryId)?.name || '')); if (no.length) add({ key: 'subs:nosalt', kind: 'info', title: `${no.length} product(s) have no salt / composition`, detail: [no.slice(0, 6).map(p => p.name).join(', ') + (no.length > 6 ? '…' : ''), 'Substitutes are found by salt and strength in the same form — fill it in Products & Masters, e.g. “Paracetamol 650mg”.'], payload: { go: 'products' } }, 30); }
+    closeStale('substitute', keep);
+    return { made, summary: `${asks.length} short item(s) asked for · ${keep.size} suggestion(s)` };
+  }
+  ACTIONS['subs-find'] = () => openModal({
+    title: 'Find a substitute (same salt)', size: 'lg',
+    body: `<div class="form-grid">${field('Product', 'pid', { options: [['', 'Choose…'], ...[...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => [p.id, `${p.name}${p.salt ? ' · ' + p.salt : ''}`])], full: true })}</div><div id="subsOut" class="small muted">Products with the same salt and strength in the same form, in stock.</div>`,
+  });
+
+  // ----- Profit & Margin -----
+  const lineCost = l => { const b = batchById(l.batchId); const unit = b ? netRate(b) : num(prod(l.productId)?.pts); return round2(unit * (l.qty + (l.free || 0))); };
+  function marginRows(from, to) {
+    const rows = [];
+    db.sales.filter(s => s.date >= from && s.date <= to).forEach(s => s.lines.forEach(l => { const rev = calcLine(l).taxable, cost = lineCost(l); rows.push({ s, l, rev, cost, gp: rev - cost }); }));
+    return rows;
+  }
+  function groupRows(rows, key, label) {
+    const m = {};
+    rows.forEach(r => { const k = key(r); if (!k) return; const g = m[k] || (m[k] = { k, label: label(r), rev: 0, cost: 0, gp: 0, n: 0 }); g.rev += r.rev; g.cost += r.cost; g.gp += r.gp; g.n++; });
+    return Object.values(m).map(g => ({ ...g, pct: g.rev ? g.gp / g.rev * 100 : 0 }));
+  }
+  const pctTxt = v => `${v.toFixed(1)}%`;
+  const sumRows = rows => { const rev = rows.reduce((a, r) => a + r.rev, 0), gp = rows.reduce((a, r) => a + r.gp, 0); return { rev, gp, cost: rev - gp, pct: rev ? gp / rev * 100 : 0 }; };
+  function deadStock(days) {
+    const since = addDays(todayIso, -days), sold = new Set(); db.sales.filter(s => s.date >= since).forEach(s => s.lines.forEach(l => sold.add(l.productId)));
+    return db.products.filter(p => sellableQty(p.id) > 0 && !sold.has(p.id)).map(p => ({ p, value: round2(sellableBatches(p.id).reduce((a, b) => a + netRate(b) * avail(b), 0)) })).sort((a, b) => b.value - a.value);
+  }
+  let mgMonth = todayIso.slice(0, 7);
+  ACTIONS['margin-report'] = m => {
+    if (m && /^\d{4}-\d{2}$/.test(m)) mgMonth = m;
+    const c = agentCfg('margin'), from = mgMonth + '-01', to = iso(new Date(+mgMonth.slice(0, 4), +mgMonth.slice(5, 7), 0));
+    const rows = marginRows(from, to), t = sumRows(rows);
+    const byCo = groupRows(rows, r => prod(r.l.productId)?.companyId, r => company(prod(r.l.productId)?.companyId)?.name || '—').sort((a, b) => b.gp - a.gp);
+    const byProd = groupRows(rows, r => r.l.productId, r => prod(r.l.productId)?.name || '—').filter(g => g.rev >= 200).sort((a, b) => a.pct - b.pct);
+    const byParty = groupRows(rows, r => r.s.party.type === 'chemist' ? 'c:' + r.s.party.chemistId : 'u:' + (r.s.party.customerId || ''), r => partyName(r.s)).sort((a, b) => a.pct - b.pct);
+    const dead = deadStock(c.deadDays);
+    const gcols = (h) => [{ h, c: g => `<span class="strong">${esc(g.label)}</span>` }, { h: 'Sales (taxable)', r: 1, c: g => money(g.rev) }, { h: 'Profit', r: 1, c: g => `<span class="${g.gp < 0 ? 'bad-text' : ''}">${money(g.gp)}</span>` }, { h: 'Margin', r: 1, c: g => `<span class="${g.pct < c.minPct ? 'bad-text strong' : ''}">${pctTxt(g.pct)}</span>` }];
+    openModal({
+      title: 'Profit & margin', size: 'xl',
+      body: `<div class="toolbar"><label class="bf"><span>Month</span><input type="month" id="mgMonth" value="${mgMonth}"></label><span class="small muted">Profit = sale value before GST − purchase cost of the batches sold (rate after the supplier’s CD/TD; free goods given are counted as cost). Sales returns are not taken off.</span></div>
+        <div class="grid g-4">${kpi('Sales (taxable)', compact(t.rev), `${rows.length} bill lines`)}${kpi('Purchase cost', compact(t.cost), 'Of the goods sold')}${kpi('Gross profit', compact(t.gp), monthName(mgMonth))}${kpi('Margin', pctTxt(t.pct), `Target ${c.minPct}%+`)}</div>
+        <div class="card-title" style="font-size:15px">By company</div>${miniTable(gcols('Company'), byCo.slice(0, 15))}
+        <div class="card-title" style="font-size:15px">Lowest-margin products</div>${miniTable(gcols('Product'), byProd.slice(0, 12))}
+        <div class="card-title" style="font-size:15px">Margin by party (lowest first)</div>${miniTable(gcols('Party'), byParty.slice(0, 12))}
+        <div class="card-title" style="font-size:15px">Dead stock — not sold in ${c.deadDays} days (${money(dead.reduce((a, x) => a + x.value, 0))} at cost)</div>${miniTable([{ h: 'Product', c: x => esc(x.p.name) }, { h: 'In stock', r: 1, c: x => qty(sellableQty(x.p.id)) }, { h: 'Value at cost', r: 1, c: x => money(x.value) }], dead.slice(0, 12))}`,
+    });
+  };
+  function runMarginAgent(auto) {
+    const c = agentCfg('margin');
+    if (auto && TODAY.getDay() !== +c.weekday) return { made: 0, summary: `Runs on ${DAYS_EN[+c.weekday] || 'the set day'}s` };
+    const keep = new Set(); let made = 0;
+    const w = sumRows(marginRows(addDays(todayIso, -7), todayIso)), prev = sumRows(marginRows(addDays(todayIso, -35), addDays(todayIso, -8)));
+    const rows30 = marginRows(addDays(todayIso, -30), todayIso);
+    const lowParty = groupRows(rows30.filter(r => r.s.party.type === 'chemist'), r => r.s.party.chemistId, r => partyName(r.s)).filter(g => g.rev >= c.minSales && g.pct < c.minPct).sort((a, b) => a.pct - b.pct);
+    const lowProd = groupRows(rows30, r => r.l.productId, r => prod(r.l.productId)?.name || '').filter(g => g.rev >= c.minSales / 2 && g.pct < c.minPct).sort((a, b) => a.pct - b.pct);
+    const dead = deadStock(c.deadDays), deadVal = dead.reduce((a, x) => a + x.value, 0);
+    made += p4Add('margin', keep, { key: 'margin:' + weekKey(), kind: 'info', title: `Last 7 days: profit ${money(w.gp)} on sales ${money(w.rev)} (${pctTxt(w.pct)})`, detail: [`The 4 weeks before: ${pctTxt(prev.pct)} margin`, lowParty.length ? `Low margin (30 days): ${lowParty.slice(0, 3).map(g => `${g.label} ${pctTxt(g.pct)}`).join(', ')}` : `No chemist below ${c.minPct}% in 30 days`, lowProd.length ? `Products below ${c.minPct}%: ${lowProd.slice(0, 3).map(g => `${g.label} ${pctTxt(g.pct)}`).join(', ')}` : '', `Dead stock (not sold in ${c.deadDays} days): ${money(deadVal)} at cost in ${dead.length} product(s)`].filter(Boolean), payload: { act: ['margin-report', ''] } });
+    closeStale('margin', keep);
+    return { made, summary: `7-day margin ${pctTxt(w.pct)} · dead stock ${money(deadVal)}` };
+  }
+
+  // ----- Refill Reminder (regular patients) -----
+  const DEFAULT_REFILL = 'Namaste {party} ji,\n{firm} se yaad dilana tha: aapki dawai {lines} lagbhag {date} tak khatam ho jayegi.\nKya hum taiyar rakhein? Reply karein.\nDhanyavaad';
+  const CHRONIC_RE = /DIAB|INSULIN|METFORMIN|GLIMEPIRIDE|GLICLAZIDE|GLIPTIN|GLIFLOZIN|VOGLIBOSE|TELMISARTAN|AMLODIPINE|LOSARTAN|OLMESARTAN|METOPROLOL|ATENOLOL|BISOPROLOL|RAMIPRIL|ATORVASTATIN|ROSUVASTATIN|CLOPIDOGREL|THYRO|THYROXINE|NICORANDIL|ISOSORBIDE|TORSEMIDE|FUROSEMIDE|SPIRONOLACTONE|ECOSPRIN|PREGABALIN|LEVETIRACETAM|VALPROATE|CARBAMAZEPINE|ESCITALOPRAM|SERTRALINE|CILNIDIPINE|NEBIVOLOL/;
+  const isChronic = p => !!p && (p.chronic === '1' || p.chronic === true || (p.chronic !== '0' && p.chronic !== false && !/CREAM|LOTION|SYRUP|DROPS|POWDER|GEL/i.test(p.form || '') && CHRONIC_RE.test(norm([p.name, p.salt, category(p.categoryId)?.name].join(' ')))));
+  function refillDue(c) {
+    const by = {}, out = [];
+    db.sales.filter(s => s.party.type !== 'chemist' && s.party.customerId).forEach(s => s.lines.forEach(l => { const p = prod(l.productId); if (!isChronic(p)) return; (by[s.party.customerId + '|' + p.id] = by[s.party.customerId + '|' + p.id] || []).push({ date: s.date, qty: l.qty + (l.free || 0) }); }));
+    Object.entries(by).forEach(([k, buys]) => {
+      const [cid, pid] = k.split('|'), cu = custById(cid); if (!cu?.phone) return;
+      const dates = [...new Set(buys.map(b => b.date))].sort(), last = dates[dates.length - 1];
+      const lastQty = buys.filter(b => b.date === last).reduce((a, b) => a + b.qty, 0);
+      let gap = dates.length >= 2 ? Math.round(dates.slice(1).reduce((a, d, i) => a + dayDiff(d, dates[i]), 0) / (dates.length - 1)) : Math.round(lastQty * c.daysPerPack);
+      gap = Math.min(Math.max(gap, 7), 120);
+      const next = addDays(last, gap), until = daysFrom(next);
+      if (until > c.leadDays || until < -c.graceDays) return;
+      if (db.reminders.some(r => r.key === `refill:${cid}:${pid}` && r.date >= last)) return;
+      out.push({ cid, pid, cu, last, next, gap });
+    });
+    return out;
+  }
+  function runRefillAgent() {
+    const c = agentCfg('refill'); const keep = new Set(); let made = 0;
+    const due = refillDue(c), byCust = {};
+    due.forEach(x => (byCust[x.cid] = byCust[x.cid] || []).push(x));
+    Object.entries(byCust).forEach(([cid, xs]) => { const cu = custById(cid); made += p4Add('refill', keep, { key: 'refill:' + cid + ':' + xs.map(x => x.pid).sort().join(','), kind: 'refill', title: `Refill reminder — ${cu.name}: ${xs.length} medicine(s) due ${fmtD(xs.map(x => x.next).sort()[0])}`, detail: xs.slice(0, 4).map(x => `${prod(x.pid)?.name} · last bought ${fmtD(x.last)} · about every ${x.gap} days`), payload: { cid, pids: xs.map(x => x.pid), date: xs.map(x => x.next).sort()[0] } }); });
+    closeStale('refill', keep);
+    return { made, summary: `${Object.keys(byCust).length} customer(s) due for a refill` };
+  }
+
+  // ----- Chemist Smart Reorder -----
+  const DEFAULT_REORDER = 'Namaste {party} ji,\n{firm} — aapka regular order taiyar hai:\n{lines}\nBhej dein? Reply karein ya portal par order karein.';
+  function usualFor(cid, c) {
+    const since = addDays(todayIso, -c.days), m = {};
+    db.sales.filter(s => s.party.chemistId === cid && s.date >= since).forEach(s => s.lines.forEach(l => { const o = m[l.productId] || (m[l.productId] = { dates: new Set(), qty: 0 }); o.dates.add(s.date); o.qty += l.qty; }));
+    return Object.entries(m).filter(([pid, o]) => prod(pid) && o.dates.size >= c.minBuys).map(([pid, o]) => {
+      const ds = [...o.dates].sort(), gap = Math.max(5, Math.round(ds.slice(1).reduce((a, d, i) => a + dayDiff(d, ds[i]), 0) / (ds.length - 1))), last = ds[ds.length - 1], next = addDays(last, gap);
+      return { pid, gap, last, next, avgQty: Math.max(1, Math.round(o.qty / ds.length)), due: daysFrom(next) <= c.leadDays && daysFrom(next) >= -gap };
+    }).sort((a, b) => a.next.localeCompare(b.next));
+  }
+  function runReorderAgent() {
+    const c = agentCfg('reorder'); const keep = new Set(); let made = 0, n = 0;
+    db.chemists.filter(ch => ch.status === 'Active').forEach(ch => {
+      if (chemOrders.some(o => o.chemistId === ch.id && o.created >= addDays(todayIso, -3))) return;
+      const due = usualFor(ch.id, c).filter(x => x.due); if (!due.length) return; n++;
+      made += p4Add('reorder', keep, { key: 'reorder:' + ch.id, kind: 'reorder', title: `${ch.name}: usual order due (${due.length} item${due.length === 1 ? '' : 's'})`, detail: due.slice(0, 4).map(x => `${prod(x.pid).name} · usually ${qty(x.avgQty)} every ${x.gap} days · last ${fmtD(x.last)} · ${sellableQty(x.pid) >= x.avgQty ? 'in stock' : 'short'}`), payload: { cid: ch.id } }, c.repeatDays);
+    });
+    closeStale('reorder', keep);
+    return { made, summary: `${n} chemist(s) with a usual order due` };
+  }
+  let roState = null;
+  function reorderModal(cid, approvalId) {
+    const ch = chem(cid), c = agentCfg('reorder'); if (!ch) return;
+    const items = usualFor(cid, c); roState = { ch, items, approvalId };
+    openModal({
+      title: `Usual order — ${ch.name}`, size: 'xl', submitLabel: 'Done',
+      extraFoot: `<div class="foot-left">${ch.phone ? `<button type="button" class="btn" data-p6="ro-wa">${icon('chat')}Send list on WhatsApp</button>` : ''}<button type="button" class="btn primary" data-p6="ro-bill">Make sale bill</button></div>`,
+      body: `<div class="small muted">Items ${esc(ch.name)} bought at least ${c.minBuys} times in the last ${c.days} days, with how often and how much. Ticked items go into the message and the bill.</div>
+        ${miniTable([
+          { h: '', c: (x, i) => `<input type="checkbox" class="cb" name="ro_${i}" ${x.due ? 'checked' : ''} aria-label="Include">` },
+          { h: 'Item', c: x => `<span class="strong">${esc(prod(x.pid).name)}</span>${x.due ? ' ' + pill('Due') : ''}` },
+          { h: 'Usual qty', r: 1, c: (x, i) => `<input type="number" min="1" name="roq_${i}" value="${x.avgQty}" style="width:70px">` },
+          { h: 'Every', r: 1, c: x => `${x.gap} d` },
+          { h: 'Last', c: x => fmtD(x.last) },
+          { h: 'Next', c: x => fmtD(x.next) },
+          { h: 'In stock', r: 1, c: x => `${qty(sellableQty(x.pid))}${subsNote(x.pid, x.avgQty)}` },
+        ], items)}`,
+      onSubmit: () => { if (approvalId) doneApproval(approvalId, 'Handled'); return 'Done.'; },
+    });
+  }
+  const roPicked = () => roState.items.map((x, i) => ({ ...x, on: $(`#mform [name="ro_${i}"]`)?.checked, q: Math.max(1, Math.floor(num($(`#mform [name="roq_${i}"]`)?.value))) })).filter(x => x.on);
+  function reorderAction(kind) {
+    const st = roState; if (!st) return; const pick = roPicked();
+    if (!pick.length) { toast('Tick at least one item.'); return; }
+    if (kind === 'wa') {
+      openWa(st.ch.phone, fillTpl(agentCfg('reorder').template, { party: st.ch.owner || st.ch.name, firm: db.settings.firm.name, lines: pick.map(x => `• ${prod(x.pid).name} × ${x.q}${sellableQty(x.pid) < x.q ? ' (thoda kam stock)' : ''}`).join('\n') }));
+      logAgent('reorder', `Usual order list → ${st.ch.name} (WhatsApp)`);
+      if (st.approvalId) { doneApproval(st.approvalId, 'List sent'); save(); }
+      return;
+    }
+    if (st.ch.status !== 'Active') { toast(`${st.ch.name} is ${st.ch.status}.`); return; }
+    const lines = pick.filter(x => sellableQty(x.pid) > 0).map(x => { const p = prod(x.pid), b = sellableBatches(p.id)[0]; return { productId: p.id, batchId: b.id, qty: Math.min(x.q, avail(b)), free: 0, rate: p.ptr, cd: st.ch.cd || 0, td: st.ch.td || 0 }; });
+    if (!lines.length) { toast('None of the ticked items are in stock.'); return; }
+    if (st.approvalId) doneApproval(st.approvalId, 'Bill made');
+    closeModal(false); saleModal(null, { chemistId: st.ch.id, lines });
+  }
+  ACTIONS['reorder-open'] = cid => cid ? reorderModal(cid, '') : openModal({ title: 'Usual orders', size: 'lg', body: miniTable([{ h: 'Chemist', c: ch => esc(ch.name) }, { h: 'Due items', r: 1, c: ch => qty(usualFor(ch.id, agentCfg('reorder')).filter(x => x.due).length) }, { h: '', c: ch => actBtn('reorder-open', ch.id, 'Open', 'ghost') }], db.chemists.filter(ch => ch.status === 'Active')) });
+
+  // ----- Seasonal Demand Forecast -----
+  const SEASONS = [
+    { months: [6, 7, 8, 9], re: /\bORS\b|ORAL REHYD|ELECTROL|ANTIFUNG|CLOTRIMAZ|LULICONAZ|TERBINAF|FLUCONAZ|ITRACONAZ|DIARRH|RACECADOTRIL|OFLOXACIN|ORNIDAZ|METRONID|LOPERAM|PROBIOT|ARTEMETHER|CHLOROQ|MOSQUITO|ANTISEPT|POVIDONE|PARACETAMOL/, why: 'monsoon — stomach and fungal infections, fever' },
+    { months: [11, 12, 1, 2], re: /COUGH|COLD|CETIRIZ|LEVOCETIRIZ|MONTELUK|AMBROX|DEXTROMETH|PHENYLEPH|CHLORPHEN|PARACETAMOL|VITAMIN D|CHOLECALCIF|\bD3\b|MOISTUR|EMOLLIENT|SALBUTAM|BUDESON|INHAL|THROAT|LOZENGE|NASAL/, why: 'winter — cough, cold, allergy, dry skin' },
+    { months: [3, 4, 5, 6], re: /\bORS\b|ELECTROL|GLUCOSE|SUNSCREEN|PRICKLY|DUSTING|CALAMINE|ANTACID|DIGEST|CLOTRIMAZ/, why: 'summer — dehydration, heat rash, sun' },
+  ];
+  function forecastPlan(c) {
+    const m0 = TODAY.getMonth() + 1, m1 = m0 % 12 + 1, ly = TODAY.getFullYear() - 1, monthKeyOf = (y, m) => `${y}-${String(m).padStart(2, '0')}`;
+    const lyNow = monthKeyOf(ly, m0), lyNext = monthKeyOf(m1 === 1 ? ly + 1 : ly, m1);
+    const sold = {}, add = (k, pid, q) => { sold[k] = sold[k] || {}; sold[k][pid] = (sold[k][pid] || 0) + q; };
+    db.sales.forEach(s => { const mk = s.date.slice(0, 7); const k = mk === lyNow ? 'lyNow' : mk === lyNext ? 'lyNext' : s.date >= addDays(todayIso, -90) ? 'recent' : ''; if (k) s.lines.forEach(l => add(k, l.productId, l.qty + (l.free || 0))); });
+    const onOrder = {}; db.pos.filter(p => p.status === 'Open' || p.status === 'Partially received').forEach(p => p.lines.forEach(l => { onOrder[l.productId] = (onOrder[l.productId] || 0) + Math.max(0, l.qty - receivedQty(p.no, l.productId)); }));
+    const season = SEASONS.find(s => s.months.includes(m1));
+    const out = [];
+    db.products.forEach(p => {
+      const base = (sold.recent?.[p.id] || 0) / 3, a = sold.lyNow?.[p.id] || 0, b = sold.lyNext?.[p.id] || 0;
+      let ratio = 1, why = '';
+      if (a > 0 && b > 0) { ratio = Math.min(3, Math.max(0.5, b / a)); why = `last year ${monthName(lyNext)} sold ${qty(b)} vs ${qty(a)} the month before`; }
+      else if (season && season.re.test(norm([p.name, p.salt, category(p.categoryId)?.name].join(' ')))) { ratio = c.seasonBoost / 100; why = season.why; }
+      if (ratio < 1.1) return;
+      const forecast = Math.ceil(Math.max(base, b) * ratio), have = sellableQty(p.id) + (onOrder[p.id] || 0), need = forecast - have;
+      if (forecast < c.minQty || need <= 0) return;
+      out.push({ p, forecast, have, need, why, ratio });
+    });
+    return { month: monthKeyOf(m1 === 1 ? TODAY.getFullYear() + 1 : TODAY.getFullYear(), m1), items: out.sort((x, y) => y.need * num(y.p.pts) - x.need * num(x.p.pts)) };
+  }
+  function runForecastAgent() {
+    const c = agentCfg('forecast'); const keep = new Set(); let made = 0;
+    const { month, items } = forecastPlan(c);
+    if (items.length) {
+      const sc = agentCfg('supplier'), best = sc.enabled ? bestSupplierMap() : {}, pl = purchaseLines(), groups = {};
+      items.forEach(x => { const sid = best[x.p.id] || pl.find(l => l.productId === x.p.id)?.supplierId || [...db.batches].reverse().find(b => b.productId === x.p.id && b.supplierId)?.supplierId || ''; (groups[sid] = groups[sid] || []).push(x); });
+      Object.entries(groups).forEach(([sid, xs]) => { made += p4Add('forecast', keep, { key: `fc:${month}:${sid || 'none'}`, kind: 'po', title: `Season ahead (${monthName(month)}): order ${xs.length} item(s)${sid ? ' from ' + (sup(sid)?.name || sid) : ''}`, detail: xs.slice(0, 4).map(x => `${x.p.name}: expect ~${qty(x.forecast)}, have ${qty(x.have)} → order ${qty(x.need)} (${x.why})`), payload: { supplierId: sid, lines: xs.map(x => ({ productId: x.p.id, qty: x.need, rate: x.p.pts })) } }, 20); });
+    }
+    closeStale('forecast', keep);
+    return { made, summary: `${items.length} item(s) to stock up for ${monthName(month)}` };
+  }
+
+  // ----- Sales Team & Targets -----
+  const staffById = id => (db.staff || []).find(s => s.id === id);
+  const staffAreas = s => String(s.areas || '').split(/[,\n]/).map(x => x.trim()).filter(Boolean);
+  const staffOf = ch => ch && ((db.staff || []).find(s => s.active !== false && (s.chemistIds || []).includes(ch.id)) || (db.staff || []).find(s => s.active !== false && !(s.chemistIds || []).length && inArea(ch, staffAreas(s))));
+  const staffChemists = s => db.chemists.filter(ch => staffOf(ch)?.id === s.id);
+  function staffMonth(s, month) {
+    const ids = new Set(staffChemists(s).map(c => c.id));
+    const mine = db.sales.filter(x => x.party.chemistId && ids.has(x.party.chemistId));
+    const sold = round2(mine.filter(x => x.date.slice(0, 7) === month).reduce((a, x) => a + x.total, 0));
+    const coll = round2(mine.flatMap(x => payList(x)).filter(p => p.date.slice(0, 7) === month).reduce((a, p) => a + p.amount, 0));
+    const overdue = round2(mine.filter(x => saleStatus(x) === 'Overdue').reduce((a, x) => a + balance(x), 0));
+    const basis = s.commissionOn === 'collections' ? coll : sold;
+    return { n: ids.size, sold, coll, overdue, pct: s.target ? sold / s.target * 100 : null, commission: round2(basis * num(s.commissionPct) / 100) };
+  }
+  function staffModal(s) {
+    const isNew = !s; s = s || { role: 'Salesman', active: true, chemistIds: [], commissionOn: 'sales' };
+    const sel = new Set(s.chemistIds || []);
+    openModal({
+      title: isNew ? 'Add team member' : `Edit ${s.name}`, size: 'lg', submitLabel: isNew ? 'Add' : 'Save',
+      body: `<div class="form-grid">
+          ${field('Name', 'name', { value: s.name || '', required: true })}
+          ${field('Mobile', 'phone', { type: 'tel', value: s.phone || '', attrs: 'inputmode="numeric" maxlength="10"' })}
+          ${field('Role', 'role', { value: s.role, options: ['Salesman', 'Medical representative', 'Delivery', 'Collection', 'Other'] })}
+          ${field('Monthly sales target (₹)', 'target', { type: 'number', value: s.target || '', attrs: numAttrs('1') })}
+          ${field('Commission %', 'commissionPct', { type: 'number', value: s.commissionPct || '', attrs: numAttrs() })}
+          ${field('Commission on', 'commissionOn', { value: s.commissionOn || 'sales', options: [['sales', 'Sales billed'], ['collections', 'Payments collected']] })}
+          <div class="field full"><label for="f-areas">Areas — tehsils, villages or districts, comma separated</label><textarea id="f-areas" name="areas" rows="2" placeholder="Ghumarwin, Jhandutta">${esc(s.areas || '')}</textarea></div>
+          <div class="field full"><label for="f-tchem">Or pick chemists (overrides the areas)</label><select id="f-tchem" multiple size="6">${db.chemists.map(ch => `<option value="${esc(ch.id)}" ${sel.has(ch.id) ? 'selected' : ''}>${esc(ch.name)} · ${esc([ch.tehsil, ch.district].filter(Boolean).join(', '))}</option>`).join('')}</select></div>
+          <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="active" ${s.active !== false ? 'checked' : ''}> Active</label></div>
+        </div>`,
+      onSubmit: (d, form) => {
+        if (d.phone && !/^[6-9]\d{9}$/.test(d.phone.trim())) { toast('Mobile must be a 10-digit number.'); return false; }
+        const rec = { name: d.name.trim(), phone: (d.phone || '').trim(), role: d.role, target: Math.round(num(d.target)), commissionPct: num(d.commissionPct), commissionOn: d.commissionOn, areas: (d.areas || '').trim(), chemistIds: [...form.querySelector('#f-tchem').selectedOptions].map(o => o.value), active: !!d.active };
+        if (isNew) db.staff.push({ id: uid(), ...rec }); else Object.assign(s, rec);
+        return `${rec.name} ${isNew ? 'added' : 'saved'}.`;
+      },
+    });
+  }
+  ACTIONS['staff-new'] = () => staffModal(null);
+  ACTIONS['staff-edit'] = id => { const s = staffById(id); if (s) staffModal(s); };
+  ACTIONS['staff-del'] = id => { const s = staffById(id); if (!s) return; confirmModal(`Remove ${esc(s.name)}?`, 'Their chemists become unassigned. Bills are not changed.', 'Remove', () => { db.staff = db.staff.filter(x => x !== s); return `${s.name} removed.`; }); };
+  function staffPlanText(s) {
+    const c = agentCfg('salesteam'), rc = agentCfg('reorder'), chs = staffChemists(s);
+    const od = chs.map(ch => ({ ch, amt: round2(db.sales.filter(x => x.party.chemistId === ch.id && saleStatus(x) === 'Overdue').reduce((a, x) => a + balance(x), 0)) })).filter(x => x.amt >= 1).sort((a, b) => b.amt - a.amt).slice(0, c.maxLines);
+    const ro = chs.map(ch => ({ ch, n: usualFor(ch.id, rc).filter(x => x.due).length })).filter(x => x.n).slice(0, c.maxLines);
+    const quiet = chs.filter(ch => ch.status === 'Active' && !db.sales.some(x => x.party.chemistId === ch.id && x.date >= addDays(todayIso, -c.quietDays))).slice(0, c.maxLines);
+    const L = [];
+    if (od.length) L.push('Collect:', ...od.map(x => `• ${x.ch.name} (${x.ch.locality || x.ch.tehsil || ''}) ₹${dec(x.amt)}`));
+    if (ro.length) L.push('Take order (usual items due):', ...ro.map(x => `• ${x.ch.name} — ${x.n} item(s)`));
+    if (quiet.length) L.push(`Visit (no order in ${c.quietDays} days):`, ...quiet.map(ch => `• ${ch.name}`));
+    return { L, n: od.length + ro.length + quiet.length };
+  }
+  VIEWS.team = () => {
+    const month = todayIso.slice(0, 7), st = (db.staff || []).map(s => ({ s, m: staffMonth(s, month) }));
+    const un = db.chemists.filter(ch => ch.status === 'Active' && !staffOf(ch));
+    return `
+      <div class="grid g-4">
+        ${kpi('Team members', qty((db.staff || []).filter(s => s.active !== false).length), `${(db.staff || []).length} in all`)}
+        ${kpi('Sales this month (team areas)', compact(st.reduce((a, x) => a + x.m.sold, 0)), monthName(month))}
+        ${kpi('Collected this month', compact(st.reduce((a, x) => a + x.m.coll, 0)), 'Payments on their chemists’ bills')}
+        ${kpi('Chemists without a salesman', qty(un.length), un.length ? un.slice(0, 2).map(c => c.name).join(', ') + (un.length > 2 ? '…' : '') : 'All covered')}
+      </div>
+      ${useList({
+        key: 'team', title: 'Sales team',
+        actions: actBtn('staff-new', '', icon('plus') + 'Add team member', 'primary'),
+        rows: () => st, text: x => [x.s.name, x.s.role, x.s.areas, x.s.phone].join(' '),
+        empty: 'No team members yet. Add your salesmen / MRs with their areas and monthly targets.',
+        columns: [
+          { h: 'Name', c: x => `<span class="strong">${esc(x.s.name)}</span>${x.s.active === false ? ' ' + pill('Off') : ''}<div class="small muted">${esc(x.s.role || '')}${x.s.phone ? ' · ' + esc(x.s.phone) : ''}</div>` },
+          { h: 'Area', c: x => `<span class="small">${esc((x.s.chemistIds || []).length ? `${x.s.chemistIds.length} chosen chemist(s)` : x.s.areas || '—')}</span><div class="small muted">${x.m.n} chemist(s)</div>` },
+          { h: 'Sales / target', r: 1, c: x => `${money(x.m.sold)}<div class="small muted">${x.s.target ? `of ${money(x.s.target)} · ${Math.round(x.m.pct)}%` : 'no target'}</div>` },
+          { h: 'Collected', r: 1, c: x => money(x.m.coll) },
+          { h: 'Overdue in area', r: 1, c: x => `<span class="${x.m.overdue > 0 ? 'bad-text' : ''}">${money(x.m.overdue)}</span>` },
+          { h: 'Commission', r: 1, c: x => money(x.m.commission) },
+          { h: '', c: x => rowActs(x.s.phone ? actBtn('staff-plan', x.s.id, 'Today’s plan', 'ghost') : '', actBtn('staff-edit', x.s.id, 'Edit', 'ghost'), actBtn('staff-del', x.s.id, 'Remove', 'ghost danger')) },
+        ],
+      })}`;
+  };
+  const DEFAULT_TEAMPLAN = 'Namaste {name},\nAaj ka plan — {date}:\n{lines}\n— {firm}';
+  function sendStaffPlan(s, approvalId) {
+    const { L } = staffPlanText(s);
+    openSendDialog({ agent: 'salesteam', approvalId, title: `Today’s plan — ${s.name}`, name: s.name, phone: s.phone, subject: `Plan ${fmtDate(todayIso)}`, text: fillTpl(agentCfg('salesteam').template, { name: s.name, date: fmtDate(todayIso), lines: L.join('\n') || 'Koi pending kaam nahi.', firm: db.settings.firm.name }) });
+  }
+  ACTIONS['staff-plan'] = id => { const s = staffById(id); if (s) sendStaffPlan(s, ''); };
+  function runTeamAgent() {
+    const c = agentCfg('salesteam'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('salesteam', keep, it, days); };
+    (db.staff || []).filter(s => s.active !== false && s.phone).forEach(s => { const p = staffPlanText(s); if (p.n) add({ key: `team:${s.id}:${todayIso}`, kind: 'teamplan', title: `Today’s plan for ${s.name} — ${p.n} stop(s)`, detail: p.L.slice(0, 5), payload: { sid: s.id } }); });
+    if (TODAY.getDate() >= c.reviewDay && (db.staff || []).length) { const pm = prevMonth(); const rows = (db.staff || []).map(s => ({ s, m: staffMonth(s, pm) })); add({ key: 'team:review:' + pm, kind: 'info', title: `Team results for ${monthName(pm)}`, detail: rows.map(x => `${x.s.name}: ${money(x.m.sold)}${x.s.target ? ` of ${money(x.s.target)} (${Math.round(x.m.pct)}%)` : ''} · collected ${money(x.m.coll)} · commission ${money(x.m.commission)}`).slice(0, 6), payload: { go: 'team' } }, 40); }
+    const un = db.chemists.filter(ch => ch.status === 'Active' && !staffOf(ch));
+    if ((db.staff || []).length && un.length) add({ key: 'team:unassigned', kind: 'info', title: `${un.length} active chemist(s) have no salesman`, detail: [un.slice(0, 6).map(ch => `${ch.name} (${ch.tehsil || ch.district || '—'})`).join(', '), 'Add their area to a team member, or pick them for one.'], payload: { go: 'team' } }, 14);
+    closeStale('salesteam', keep);
+    return { made, summary: `${(db.staff || []).filter(s => s.active !== false).length} team member(s) · ${keep.size} item(s)` };
+  }
+
+  // ----- WhatsApp Order Inbox (server + WhatsApp Business API) -----
+  let waInbox = [];
+  async function loadInbox() { if (!SERVER) return; try { waInbox = await api('GET', 'api/inbox'); } catch { /* retry on the next poll */ } }
+  const partyByPhone = ph => { const p = phone10(ph); if (!p) return null; const ch = db.chemists.find(x => phone10(x.phone) === p); if (ch) return { type: 'chemist', id: ch.id, name: ch.name }; const cu = (db.customers || []).find(x => phone10(x.phone) === p); return cu ? { type: 'customer', id: cu.id, name: cu.name } : null; };
+  // Order lines from a message without AI: “Dolo 650 - 10 strip, Pan 40 5 box”
+  function matchProduct(name) {
+    const toks = norm(name).replace(/[^A-Z0-9 ]/g, ' ').split(' ').filter(t => t.length >= 2); if (!toks.length) return null;
+    let best = null, bs = 0;
+    db.products.forEach(p => {
+      const pt = norm(p.name).replace(/[^A-Z0-9 ]/g, ' ').split(' ').filter(Boolean); let s = 0;
+      toks.forEach(t => { if (pt.includes(t)) s += /\d/.test(t) ? 2 : 1.5; else if (t.length >= 3 && pt.some(x => x.startsWith(t) || t.startsWith(x) && x.length >= 3)) s += 1; });
+      if (!(pt[0] && (pt[0].startsWith(toks[0]) || toks[0].startsWith(pt[0])))) s -= 1.5;
+      const nums = toks.filter(t => /^\d+$/.test(t)); if (nums.length && !nums.every(n => pt.some(x => x.includes(n)))) s -= 2;
+      const score = s / toks.length; if (score > bs) { bs = score; best = p; }
+    });
+    return bs >= 0.9 ? best : null;
+  }
+  function freeOrderParse(text) {
+    const lines = [];
+    String(text || '').split(/\n|,|;|\s+-\s+(?=[A-Za-z])/).map(s => s.trim()).filter(Boolean).forEach(ch => {
+      if (/^(hi|hello|namaste|namaskar|thanks|thank you|regards|ok|sir|bhai|ji)\b/i.test(ch) && ch.split(/\s+/).length < 4) return;
+      let qty = 1, name = ch;
+      const unit = /(\d+)\s*(strips?|strp|stp|box(?:es)?|bx|pcs?|pieces?|nos?|bottles?|btls?|packs?|pkts?|tubes?|vials?|x)\.?\s*$/i.exec(ch) || /^(\d+)\s*(?:x|\*|nos?|pcs?|strips?|box)?\s+(?=[A-Za-z])/i.exec(ch);
+      const bare = !unit && /(\d+)\s*$/.exec(ch);
+      const m = unit || bare;
+      if (m) {
+        const rest = (ch.slice(0, m.index) + ch.slice(m.index + m[0].length)).replace(/[-:=*x]+\s*$/i, '').trim();
+        const full = bare ? matchProduct(ch) : null;
+        if (bare && full && norm(full.name).includes(m[1]) && !(matchProduct(rest) && !norm(matchProduct(rest).name).includes(m[1]))) { qty = 1; name = ch; }
+        else { qty = +m[1]; name = rest; }
+      }
+      name = name.replace(/[-:=*]+$/, '').trim(); if (!/[A-Za-z]{2}/.test(name)) return;
+      lines.push({ text: ch, productId: matchProduct(name)?.id || '', qty: Math.max(1, Math.min(qty, 100000)), free: 0 });
+    });
+    return lines;
+  }
+  function readOrderFree() {
+    const text = String($('#odText')?.value || '').trim(); if (!text) { toast('Paste the order message first.'); return; }
+    const pv = $('#odParty')?.value || ''; let party = null; if (pv) { const [type, id] = pv.split('|'); party = { type, id }; }
+    odState = { text, sender: '', notes: 'Read without AI — check each match.', party, lines: freeOrderParse(text) };
+    logAgent('orderdesk', `Read an order without AI: ${odState.lines.length} item(s), ${odState.lines.filter(l => l.productId).length} matched`);
+    renderOdResult();
+  }
+  ACTIONS['wa-inbox'] = async () => {
+    if (!SERVER) { toast('The WhatsApp inbox needs the server (node server.js) and the WhatsApp Business API.'); return; }
+    await loadInbox();
+    const w = intCfg('whatsapp'), list = waInbox.filter(m => m.status !== 'Done').slice(0, 100);
+    openModal({
+      title: 'WhatsApp order inbox', size: 'xl',
+      body: `<div class="small muted">Messages sent to your WhatsApp Business number arrive here. Webhook URL for Meta: <b>${esc(location.origin)}/api/hooks/whatsapp</b> — it must be reachable on the internet over HTTPS. ${secretSet('whatsapp', 'verifyToken') && secretSet('whatsapp', 'appSecret') ? `Verify token and app secret are saved.${w.mode === 'cloud' ? '' : ' (Replies still open in WhatsApp — choose the Business API in WhatsApp settings to send directly.)'}` : '<span class="bad-text">Save the webhook verify token and the app secret in Settings → Integrations → WhatsApp first.</span>'}</div>
+        ${miniTable([
+          { h: 'From', c: m => { const p = partyByPhone(m.from); return `<span class="strong">${esc(p?.name || m.name || m.from)}</span><div class="small muted">${esc(m.from)}${p ? ` · ${p.type}` : ' · not in your list'}</div>`; } },
+          { h: 'Message', c: m => `<span class="small" style="white-space:pre-wrap">${esc(m.text)}</span>` },
+          { h: 'When', c: m => `<span class="small">${new Date(m.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>` },
+          { h: '', c: m => rowActs(`<button type="button" class="btn sm primary" data-p6="wa-read" data-id="${esc(m.id)}">Read order</button>`, `<button type="button" class="btn sm ghost" data-p6="wa-done" data-id="${esc(m.id)}">Done</button>`) },
+        ], list)}`,
+    });
+  };
+  async function waSetStatus(id, status) { try { await api('POST', `api/inbox/${encodeURIComponent(id)}`, { status }); await loadInbox(); } catch (err) { toast(err.message); } }
+  async function waRead(id) {
+    const m = waInbox.find(x => x.id === id); if (!m) return;
+    const p = partyByPhone(m.from);
+    ACTIONS['orderdesk']();
+    $('#odText').value = m.text;
+    if (p) $('#odParty').value = `${p.type}|${p.id}`;
+    if (getApiKey()) readOrderMessage(m.text, p ? `${p.type}|${p.id}` : ''); else readOrderFree();
+    waSetStatus(id, 'Done');
+  }
+  function runInboxAgent() {
+    const keep = new Set(); let made = 0;
+    if (!SERVER) return { made, summary: 'Needs the server and the WhatsApp Business API' };
+    const fresh = waInbox.filter(m => m.status === 'New');
+    if (fresh.length) made += p4Add('wainbox', keep, { key: 'wa:new', kind: 'info', title: `${fresh.length} WhatsApp message(s) waiting`, detail: fresh.slice(0, 4).map(m => `${partyByPhone(m.from)?.name || m.name || m.from}: ${String(m.text).slice(0, 80)}`), payload: { act: ['wa-inbox', ''] } });
+    closeStale('wainbox', keep);
+    return { made, summary: `${fresh.length} new message(s)` };
+  }
+
+  // ----- Register the Phase 6 agents -----
+  Object.assign(AGENT_DEFS, {
+    substitute: { name: 'Substitute Finder', icon: 'pill', auto: true, desc: 'When an item asked for in an enquiry or chemist order is short, finds the same salt and strength in the same form that is in stock, with a ready message. Also shown in Order Desk, chemist orders and the chemist portal.', defaults: { enabled: true, auto: true, time: '09:50', remindSalt: true, template: DEFAULT_SUBS } },
+    margin: { name: 'Profit & Margin', icon: 'trend', auto: true, desc: 'Each week: profit and margin of the last 7 days against the weeks before, chemists and products with a low margin, and money stuck in dead stock. Full report by month, company, product and party.', defaults: { enabled: true, auto: true, time: '11:40', weekday: 1, minPct: 8, minSales: 2000, deadDays: 90 } },
+    refill: { name: 'Refill Reminder', icon: 'clock', auto: true, desc: 'For walk-in customers on long-term medicines (diabetes, BP, thyroid, heart…): a WhatsApp reminder a few days before their medicine runs out, from how often they buy.', defaults: { enabled: true, auto: true, time: '10:10', leadDays: 3, graceDays: 10, daysPerPack: 30, template: DEFAULT_REFILL } },
+    reorder: { name: 'Chemist Smart Reorder', icon: 'cart', auto: true, desc: 'Learns each chemist’s usual items, quantities and how often they order; when an order is due, prepares the list to send or bill. Chemists also see “Your usual order” in the portal.', defaults: { enabled: true, auto: true, time: '10:25', days: 180, minBuys: 2, leadDays: 3, repeatDays: 7, template: DEFAULT_REORDER } },
+    forecast: { name: 'Seasonal Forecast', icon: 'trend', auto: true, desc: 'Looks one month ahead: last year’s sales of that month, or the season (monsoon, winter, summer) for related medicines, against stock and open purchase orders — and drafts purchase orders.', defaults: { enabled: true, auto: true, time: '09:55', seasonBoost: 150, minQty: 5 } },
+    salesteam: { name: 'Sales Team & Targets', icon: 'user', auto: true, desc: 'Salesmen / MRs with their areas, monthly targets and commission. Each morning a plan for each of them: dues to collect, usual orders due and chemists not ordering — ready to send on WhatsApp.', defaults: { enabled: true, auto: true, time: '08:45', maxLines: 6, quietDays: 30, reviewDay: 1, template: DEFAULT_TEAMPLAN } },
+    wainbox: { name: 'WhatsApp Order Inbox', icon: 'chat', auto: true, desc: 'Messages sent to your WhatsApp Business number arrive in an inbox; “Read order” turns one into an order in Order Desk (with AI, or without AI by matching names). Needs the server online over HTTPS and the WhatsApp Business API.', defaults: { enabled: true, auto: true, time: '09:00' } },
+  });
+  { const b = AGENT_DEFS.briefing; delete AGENT_DEFS.briefing; AGENT_DEFS.briefing = b; }
+  Object.assign(AGENT_FIELDS, {
+    substitute: [{ k: 'remindSalt', label: 'Remind me about products with no salt / composition', type: 'check' }, { k: 'template', label: 'Message — {party} {item} {alt} {salt} {rate} {firm}', type: 'textarea' }],
+    margin: [{ k: 'weekday', label: 'Day of the week (0 = Sunday … 6 = Saturday)', type: 'number' }, { k: 'minPct', label: 'Flag margins below (%)', type: 'number' }, { k: 'minSales', label: '…only for parties with sales of at least (₹ in 30 days)', type: 'number' }, { k: 'deadDays', label: 'Dead stock: not sold for (days)', type: 'number' }],
+    refill: [{ k: 'leadDays', label: 'Remind this many days before the medicine runs out', type: 'number' }, { k: 'graceDays', label: 'Still remind up to (days) after', type: 'number' }, { k: 'daysPerPack', label: 'One pack lasts about (days) — used after the first purchase', type: 'number' }, { k: 'template', label: 'Message — {party} {lines} {date} {firm}', type: 'textarea' }],
+    reorder: [{ k: 'days', label: 'Learn from the last (days)', type: 'number' }, { k: 'minBuys', label: 'A usual item is bought at least (times)', type: 'number' }, { k: 'leadDays', label: 'Suggest this many days before it is due', type: 'number' }, { k: 'repeatDays', label: 'Do not suggest the same chemist again within (days)', type: 'number' }, { k: 'template', label: 'Message — {party} {lines} {firm}', type: 'textarea' }],
+    forecast: [{ k: 'seasonBoost', label: 'Season items: expect this % of normal sales (no last-year data)', type: 'number' }, { k: 'minQty', label: 'Only items expected to sell at least (units next month)', type: 'number' }],
+    salesteam: [{ k: 'maxLines', label: 'Most stops per section in the daily plan', type: 'number' }, { k: 'quietDays', label: 'Visit chemists with no order for (days)', type: 'number' }, { k: 'reviewDay', label: 'Month review from day (1–28)', type: 'number' }, { k: 'template', label: 'Plan message — {name} {date} {lines} {firm}', type: 'textarea' }],
+    wainbox: [],
+  });
+  Object.assign(AGENT_RUN, { substitute: runSubsAgent, margin: runMarginAgent, refill: runRefillAgent, reorder: runReorderAgent, forecast: runForecastAgent, salesteam: runTeamAgent, wainbox: runInboxAgent });
+  Object.assign(APPR_LABEL, { subs: 'Offer substitute', refill: 'Send reminder', reorder: 'Open list', teamplan: 'Send plan' });
+  Object.assign(APPR_HANDLERS, {
+    subs: a => {
+      const x = a.payload, alt = prod(x.alt) || substitutes(x.pid)[0], p = prod(x.pid); if (!alt || !p) { doneApproval(a.id, 'No longer possible'); refresh(); return; }
+      const pc = x.cid ? chem(x.cid) : x.uid ? custById(x.uid) : null;
+      openSendDialog({ agent: 'substitute', approvalId: a.id, title: `Offer ${alt.name}`, name: x.party, phone: x.phone, email: pc?.email, text: fillTpl(agentCfg('substitute').template, { party: pc?.owner || x.party, item: p.name, alt: alt.name, salt: p.salt || '', rate: dec(x.isChem ? alt.ptr : alt.mrp), firm: db.settings.firm.name }) });
+    },
+    refill: a => {
+      const cu = custById(a.payload.cid); if (!cu) return;
+      const ps = a.payload.pids.map(prod).filter(Boolean);
+      openSendDialog({ agent: 'refill', approvalId: a.id, title: `Refill reminder — ${cu.name}`, name: cu.name, phone: cu.phone, text: fillTpl(agentCfg('refill').template, { party: cu.name, lines: ps.map(p => p.name).join(', '), date: fmtD(a.payload.date), firm: db.settings.firm.name }), onSent: ch => ps.forEach(p => db.reminders.push({ date: todayIso, key: `refill:${cu.id}:${p.id}`, channel: ch })) });
+    },
+    reorder: a => reorderModal(a.payload.cid, a.id),
+    teamplan: a => { const s = staffById(a.payload.sid); if (!s) { doneApproval(a.id, 'Removed'); refresh(); return; } sendStaffPlan(s, a.id); },
+  });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-p6]'); if (!b) return;
+    const id = b.dataset.id;
+    ({ 'ro-wa': () => reorderAction('wa'), 'ro-bill': () => reorderAction('bill'), 'od-free': readOrderFree, 'wa-read': () => waRead(id), 'wa-done': async () => { await waSetStatus(id, 'Done'); ACTIONS['wa-inbox'](); } })[b.dataset.p6]?.();
+  });
+  document.addEventListener('change', e => {
+    if (e.target.id === 'mgMonth' && /^\d{4}-\d{2}$/.test(e.target.value)) ACTIONS['margin-report'](e.target.value);
+    if (e.target.matches('#mform #f-pid') && $('#subsOut')) { const pid = e.target.value, p = prod(pid), s = substitutes(pid); $('#subsOut').innerHTML = !p ? '' : !p.salt ? '<span class="bad-text">This product has no salt / composition saved — add it in Products & Masters.</span>' : s.length ? miniTable([{ h: 'Substitute', c: x => `<span class="strong">${esc(x.name)}</span><div class="small muted">${esc(company(x.companyId)?.name || '')} · ${esc(x.pack || '')}</div>` }, { h: 'In stock', r: 1, c: x => qty(sellableQty(x.id)) }, { h: 'Rate', r: 1, c: x => money2(x.ptr) }, { h: 'MRP', r: 1, c: x => money2(x.mrp) }], s) : `No other product with “${esc(p.salt)}” (${esc(p.form || '')}) is in stock.`; }
+  });
+
   // Chemist orders
   const orderById = id => chemOrders.find(o => o.id === id);
   async function setOrder(id, body, msg) {
@@ -6098,7 +6532,7 @@ Only include confident matches. A brand name alone is not enough: the ingredient
         ${miniTable([
           { h: 'Item', c: l => `<span class="strong">${esc(l.name)}</span><div class="small muted">${esc([l.pack, l.company].filter(Boolean).join(' · '))}${l.productId ? '' : ' · not in your product list'}</div>${l.note ? `<div class="small">${esc(l.note)}</div>` : ''}` },
           { h: 'Ordered', r: 1, c: l => qty(l.qty) },
-          { h: 'In stock now', r: 1, c: l => l.productId ? qty(sellableQty(l.productId)) : '—' },
+          { h: 'In stock now', r: 1, c: l => l.productId ? qty(sellableQty(l.productId)) + subsNote(l.productId, l.qty) : '—' },
           { h: '', c: l => orderShort(l) > 0 ? pill(l.productId ? `Short ${qty(orderShort(l))}` : 'Not stocked') : pill('In stock') },
         ], o.lines)}
         ${o.reply ? `<div class="small"><b>Your reply:</b> ${esc(o.reply)}</div>` : ''}
@@ -7148,8 +7582,8 @@ Only include confident matches. A brand name alone is not enough: the ingredient
       }
       $('#storageNote').textContent = `Signed in as ${me.username}. Data is saved on the server.`;
       $('#accountBtns').hidden = false;
-      await Promise.all([loadOrders(), loadLogins(), loadSecretMask()]);
-      setInterval(loadOrders, 30000);
+      await Promise.all([loadOrders(), loadLogins(), loadSecretMask(), loadInbox()]);
+      setInterval(() => { loadOrders(); loadInbox(); }, 30000);
     } else {
       db = migrate(load() || seed());
       save();
