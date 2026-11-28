@@ -132,9 +132,36 @@
         <td class="r num">${left(b) > 0.5 ? `<b>${money(left(b))}</b>` : pill('Paid')}${b.returned ? `<div class="small muted">${money(b.returned)} returned</div>` : ''}</td><td><button type="button" class="btn sm ghost" data-bill="${esc(b.no)}">Items</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">No bills yet.</div>'}</div></section>`;
   }
 
+  // ----- Chat with the distributor's assistant -----
+  let chat = { enabled: false, greeting: '', history: [], busy: false };
+  const chatBubble = m => `<div class="chat-msg ${m.role === 'user' ? 'me' : 'them'}"><div class="chat-text">${esc(m.text).replace(/\n/g, '<br>')}</div>${m.order ? `<div class="small">Order ${esc(m.order)} sent ${pill('New')}</div>` : ''}${m.at ? `<div class="chat-time">${new Date(m.at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</div>` : ''}</div>`;
+  function viewAsk() {
+    return `<section class="card chat-card">
+      <div class="card-head"><h2 class="card-title">Ask ${esc(cat.firm?.name || 'us')}</h2><span class="hint">Stock, rates, your orders and balance — and you can order here</span></div>
+      <div class="chat-msgs" id="chatMsgs">${[{ role: 'assistant', text: chat.greeting || 'Namaste! How can I help?' }, ...chat.history].map(chatBubble).join('')}${chat.busy ? '<div class="chat-msg them"><div class="chat-text typing">Typing…</div></div>' : ''}</div>
+      <form class="chat-form" id="chatForm"><input id="chatInput" autocomplete="off" maxlength="1000" placeholder="e.g. Dolo 650 hai? / Mera balance kitna hai? / 10 strip Pan 40 order karna hai" ${chat.busy ? 'disabled' : ''}><button type="submit" class="btn primary" ${chat.busy ? 'disabled' : ''}>Send</button></form>
+      <div class="small muted chat-note">Answers come from an AI assistant using the distributor’s stock and your account. Orders are checked by the distributor before billing.</div>
+    </section>`;
+  }
+  async function loadChat() {
+    try { const r = await api('GET', 'api/portal/assistant'); chat = { ...chat, enabled: r.enabled, greeting: r.greeting, history: r.history || [] }; $('#askTab').hidden = !chat.enabled; if (tab === 'ask') render(); }
+    catch { $('#askTab').hidden = true; }
+  }
+  async function sendChat(text) {
+    if (!text || chat.busy) return;
+    chat.history.push({ role: 'user', text, at: new Date().toISOString() }); chat.busy = true; render();
+    try {
+      const r = await api('POST', 'api/portal/assistant', { message: text });
+      chat.history.push({ role: 'assistant', text: r.reply, at: new Date().toISOString(), order: r.order });
+      if (r.order) loadMine();
+    } catch (err) { chat.history.push({ role: 'assistant', text: err.message || 'Sorry, something went wrong.', at: new Date().toISOString() }); }
+    finally { chat.busy = false; render(); $('#chatInput')?.focus(); }
+  }
+
   function render() {
     $$('#tabs [data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-    $('#content').innerHTML = tab === 'stock' ? viewStock() : tab === 'cart' ? viewCart() : tab === 'orders' ? viewOrders() : viewBills();
+    $('#content').innerHTML = tab === 'stock' ? viewStock() : tab === 'cart' ? viewCart() : tab === 'orders' ? viewOrders() : tab === 'ask' ? viewAsk() : viewBills();
+    if (tab === 'ask') { const box = $('#chatMsgs'); if (box) box.scrollTop = box.scrollHeight; }
   }
   const refreshList = () => { const el = $('#catList'); if (!el) return render(); const pos = $('#fq') === document.activeElement; render(); if (pos) { const q = $('#fq'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); } };
 
@@ -228,6 +255,7 @@
     }
   });
   document.addEventListener('submit', e => {
+    if (e.target.id === 'chatForm') { e.preventDefault(); const i = $('#chatInput'); const t = i.value.trim(); i.value = ''; sendChat(t); return; }
     if (e.target.id !== 'reqForm') return;
     e.preventDefault();
     const name = $('#rName').value.trim(); const q = Math.floor(Number($('#rQty').value));
@@ -267,7 +295,7 @@
     loadCart();
     // Drop cart lines for items that were removed from the list
     cart = cart.filter(l => !l.productId || itemById(l.productId)); saveCart();
-    render(); loadMine();
+    render(); loadMine(); loadChat();
     setInterval(async () => { try { cat = await api('GET', 'api/portal/catalogue'); if (tab === 'stock' && document.activeElement?.tagName !== 'INPUT') render(); } catch { /* retry later */ } }, 60000);
   })();
 })();

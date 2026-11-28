@@ -3469,8 +3469,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   const MODEL_OPTS = [['claude-opus-5-5', 'Claude Opus 5.5 — most accurate'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 — balanced'], ['claude-haiku-5-5', 'Claude Haiku 5.5 — fastest, cheapest']];
   // Field types: text, secret (kept on the server), browserkey (Anthropic key, kept in this browser), select, check, textarea, number
   const INT_DEFS = [
-    { id: 'ai', name: 'AI providers', icon: 'spark', desc: 'Claude reads purchase bills and licences, and understands free-text orders for the Order Desk agent.', works: 'Works now — the key stays in this browser.', test: 'ai',
-      fields: [{ k: 'key', label: 'Anthropic API key', type: 'browserkey', required: true }, { k: 'billModel', label: 'Model for reading bills and licences', type: 'select', options: MODEL_OPTS, def: 'claude-opus-5-5' }, { k: 'agentModel', label: 'Model for agents (Order Desk)', type: 'select', options: MODEL_OPTS, def: 'claude-haiku-5-5' }, { k: 'budget', label: 'Monthly AI budget (₹, for your reference)', type: 'number' }] },
+    { id: 'ai', name: 'AI providers', icon: 'spark', desc: 'Claude reads purchase bills and licences, and understands free-text orders for the Order Desk agent.', works: 'Works now — the browser key stays in this browser; the Chemist Assistant uses a separate key stored on the server.', test: 'ai',
+      fields: [{ k: 'key', label: 'Anthropic API key', type: 'browserkey', required: true }, { k: 'billModel', label: 'Model for reading bills and licences', type: 'select', options: MODEL_OPTS, def: 'claude-opus-5-5' }, { k: 'agentModel', label: 'Model for agents (Order Desk, Chemist Assistant)', type: 'select', options: MODEL_OPTS, def: 'claude-haiku-5-5' }, { k: 'serverKey', label: 'Anthropic API key for the server (Chemist Assistant)', type: 'secret' }, { k: 'budget', label: 'Monthly AI budget (₹, for your reference)', type: 'number' }] },
     { id: 'whatsapp', name: 'WhatsApp', icon: 'chat', desc: 'Payment reminders, order replies and the daily briefing.', works: 'Works now: opens WhatsApp with the message typed. Direct sending needs the Business API and the server.', test: 'server',
       fields: [{ k: 'mode', label: 'How to send', type: 'select', options: [['click', 'Open WhatsApp with the message ready (no setup)'], ['cloud', 'WhatsApp Business API — sends directly (server)']], def: 'click' }, { k: 'businessNumber', label: 'Your WhatsApp business number' }, { k: 'phoneId', label: 'Phone number ID', when: 'cloud', required: true }, { k: 'token', label: 'Permanent access token', type: 'secret', when: 'cloud', required: true }, { k: 'template', label: 'Approved reminder template name (outside 24-hour chats)', when: 'cloud' }, { k: 'lang', label: 'Template language code', def: 'en', when: 'cloud' }, { k: 'apiVersion', label: 'Graph API version', def: 'v23.0', when: 'cloud' }] },
     { id: 'voice', name: 'Voice calls', icon: 'chat', desc: 'Missed-call orders, click-to-call and call recordings.', works: 'Saves settings — calling is not connected yet.',
@@ -3883,7 +3883,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   }
   const AGENT_RUN = { stock: runStockAgent, collections: runCollectionsAgent, compliance: runComplianceAgent, briefing: runBriefingAgent };
   function runAgent(id, auto) {
-    const c = agentCfg(id); const r = AGENT_RUN[id]();
+    const c = agentCfg(id); const r = AGENT_RUN[id](auto);
     Object.assign(c, { lastRun: todayIso, lastRunAt: new Date().toISOString(), lastResult: r.summary });
     logAgent(id, `${auto ? 'Daily run' : 'Run now'}: ${r.summary}${r.made ? ` · ${r.made} new item${r.made === 1 ? '' : 's'}` : ''}`);
     return r.made;
@@ -4010,8 +4010,8 @@ Message:
       <div class="int-head"><span class="sdot sdot-${st[0]}"></span><span class="int-ic">${icon(d.icon)}</span><div class="int-title">${esc(d.name)}</div><span class="small muted">${st[1]}</span><span class="spacer"></span>
         <label class="switch" title="On / off"><input type="checkbox" data-agent-toggle="${id}" ${c.enabled ? 'checked' : ''}><span></span></label></div>
       <div class="small">${esc(d.desc)}</div>
-      <div class="small muted int-works">${c.lastRunAt ? `Last run ${new Date(c.lastRunAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} — ${esc(c.lastResult || '')}` : id === 'orderdesk' ? (getApiKey() ? 'Ready.' : 'Needs the Anthropic API key (Integrations → AI providers).') : 'Not run yet.'}${pend ? ` · <b>${pend} waiting</b>` : ''}</div>
-      <div class="int-acts">${id === 'orderdesk' ? actBtn('orderdesk', '', icon('chat') + 'Read an order', 'primary') : actBtn('agent-run', id, 'Run now', inSettings ? '' : 'primary')}${actBtn('agent-config', id, 'Settings', 'ghost')}${agentExtraBtns(id)}</div>
+      <div class="small muted int-works">${c.lastRunAt ? `Last run ${new Date(c.lastRunAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} — ${esc(c.lastResult || '')}` : id === 'orderdesk' ? (getApiKey() ? 'Ready.' : 'Needs the Anthropic API key (Integrations → AI providers).') : id === 'assistant' ? (assistantStatus() || (c.enabled ? 'Answering chemists in the portal.' : 'Switch it on to show the chat in the chemist portal.')) : 'Not run yet.'}${pend ? ` · <b>${pend} waiting</b>` : ''}</div>
+      <div class="int-acts">${id === 'orderdesk' ? actBtn('orderdesk', '', icon('chat') + 'Read an order', 'primary') : id === 'assistant' ? actBtn('assistant-log', '', icon('chat') + 'Conversations', inSettings ? '' : 'primary') : actBtn('agent-run', id, 'Run now', inSettings ? '' : 'primary')}${actBtn('agent-config', id, 'Settings', 'ghost')}${agentExtraBtns(id)}</div>
     </div>`;
   }
   VIEWS.agents = () => {
@@ -4500,6 +4500,151 @@ Message:
       doneApproval(a.id, `Recorded ₹${dec(done)}`); logAgent('accounts', `Bank credit recorded: ₹${dec(done)} (${a.title})`);
       refresh(); toast(done ? `₹${dec(done)} recorded against ${alloc.map(x => x.no).join(', ')}.` : 'Those bills are already paid — nothing recorded.');
     },
+  };
+
+  // =====================================================================
+  // Phase 3 agents: Marketing, Reviews & Reputation, Chemist Assistant
+  // =====================================================================
+  const PUBLIC_CAT_RE = /cosmetic|derma|nutra|ayur|surgical|otc|fmcg|wellness|personal|baby|device/i;
+  const DEFAULT_B2B_PROMO = 'Namaste {party} ji,\n{firm} mein is hafte naya stock aaya hai:\n{lines}\n{offer}\nOrder ke liye reply karein ya portal par order karein.';
+  const DEFAULT_SOCIAL = 'New at {firm} ✨\n{lines}\n{offer}\nVisit us at {address} · {phone}';
+  const DEFAULT_REVIEW = 'Namaste {party} ji,\n{firm} se kharidari ke liye dhanyavaad! Agar aapko hamari seva achhi lagi ho, to 1 minute nikal kar Google par review dein:\n{link}';
+  const marketingItems = days => {
+    const since = addDays(todayIso, -days); const seen = new Set(); const out = [];
+    purchaseLines().filter(l => l.date >= since).forEach(l => { if (seen.has(l.productId) || sellableQty(l.productId) <= 0) return; seen.add(l.productId); const p = prod(l.productId); if (p) out.push(p); });
+    return out;
+  };
+  const isPublicSafe = p => PUBLIC_CAT_RE.test(category(p.categoryId)?.name || '') || PUBLIC_CAT_RE.test(p.form || '') && !/tablet|capsule|injection|syrup|pen/i.test(p.form || '');
+  function runMarketingAgent(auto) {
+    const c = agentCfg('marketing');
+    if (auto && new Date().getDay() !== +c.weekday) return { made: 0, summary: `Runs on ${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][+c.weekday]}s` };
+    const items = marketingItems(c.days);
+    const week = `${todayIso.slice(0, 4)}-W${Math.ceil(((parse(todayIso) - new Date(TODAY.getFullYear(), 0, 1)) / DAY + 1) / 7)}`;
+    if (!items.length && !c.offer) { closeStale('marketing', new Set()); return { made: 0, summary: `No new stock in the last ${c.days} days` }; }
+    const pub = items.filter(isPublicSafe);
+    const f = db.settings.firm;
+    const made = upsertApproval({ agent: 'marketing', kind: 'promo', key: 'promo:' + week, title: `This week’s update — ${items.length} new item${items.length === 1 ? '' : 's'}${pub.length ? `, ${pub.length} for public posts` : ''}`, detail: [items.slice(0, 6).map(p => p.name).join(', ') + (items.length > 6 ? '…' : ''), pub.length ? `Public post: ${pub.slice(0, 4).map(p => p.name).join(', ')}` : 'No public post this week — new items are prescription medicines (trade update to chemists only).'], payload: { items: items.map(p => p.id), pub: pub.map(p => p.id), firm: f.name } });
+    closeStale('marketing', new Set(['promo:' + week]));
+    return { made, summary: `${items.length} new item(s), ${pub.length} suitable for public posts` };
+  }
+  function runReviewsAgent() {
+    const c = agentCfg('reviews'); const link = intCfg('bizprofile').reviewLink;
+    const keep = new Set(); let made = 0;
+    if (!link) { keep.add('review:nolink'); made += upsertApproval({ agent: 'reviews', kind: 'info', key: 'review:nolink', title: 'Add your Google review link to start asking for reviews', detail: ['Settings → Integrations → Business Profiles → Review link. In Google Business Profile, use “Ask for reviews” to get the link.'], payload: { act: ['int-config', 'bizprofile'] } }); closeStale('reviews', keep); return { made, summary: 'Needs your Google review link' }; }
+    const since = addDays(todayIso, -c.days), asked = addDays(todayIso, -c.repeatDays);
+    const cands = [];
+    const add = (type, id, name, phone, bills) => { if (!phone || bills.reduce((a, x) => a + x.total, 0) < c.minAmount) return; const key = `review:${type}:${id}`; if (db.reminders.some(r => r.key === key && r.date >= asked)) return; cands.push({ type, id, name, phone, key, last: bills.map(x => x.date).sort().pop() }); };
+    (db.customers || []).forEach(cu => add('customer', cu.id, cu.name, cu.phone, db.sales.filter(x => x.party.customerId === cu.id && x.date >= since)));
+    if (c.includeChemists) db.chemists.forEach(ch => add('chemist', ch.id, ch.name, ch.phone, db.sales.filter(x => x.party.chemistId === ch.id && x.date >= since)));
+    cands.sort((a, b) => b.last.localeCompare(a.last)).slice(0, c.maxPerRun).forEach(x => { keep.add('appr:' + x.key); made += upsertApproval({ agent: 'reviews', kind: 'review', key: 'appr:' + x.key, title: `Ask ${x.name} for a Google review`, detail: [`Last bought ${fmtDate(x.last)}`], payload: { type: x.type, id: x.id } }); });
+    closeStale('reviews', keep);
+    return { made, summary: `${keep.size} review request(s) ready` };
+  }
+  const assistantStatus = () => SERVER ? (secretSet('ai', 'serverKey') ? '' : 'Needs the server key (Integrations → AI providers)') : 'Needs the server (node server.js)';
+  Object.assign(AGENT_DEFS, {
+    marketing: { name: 'Marketing', icon: 'spark', auto: true, desc: 'Each week: a WhatsApp update for chemists about new stock and offers, a public post (only non-prescription items) and an image card to share.', defaults: { enabled: true, auto: true, time: '11:00', weekday: 1, days: 7, offer: '', b2b: DEFAULT_B2B_PROMO, social: DEFAULT_SOCIAL } },
+    reviews: { name: 'Reviews & Reputation', icon: 'user', auto: true, desc: 'Asks recent customers for a Google review with your review link — the same person at most once in the set days.', defaults: { enabled: true, auto: true, time: '18:00', days: 7, repeatDays: 90, minAmount: 200, maxPerRun: 10, includeChemists: false, template: DEFAULT_REVIEW } },
+    assistant: { name: 'Chemist Assistant', icon: 'chat', auto: false, desc: '24×7 chat in the chemist portal: answers about stock, rates, their orders and balance, and places orders after the chemist confirms. Runs on the server with Claude.', defaults: { enabled: false, perChemistPerDay: 40, dailyTotal: 400, greeting: 'Namaste! Stock, rate, order ya balance ke baare mein poochiye.' } },
+  });
+  { const b = AGENT_DEFS.briefing; delete AGENT_DEFS.briefing; AGENT_DEFS.briefing = b; }
+  Object.assign(AGENT_FIELDS, {
+    marketing: [{ k: 'weekday', label: 'Day of the week (0 = Sunday … 6 = Saturday)', type: 'number' }, { k: 'days', label: 'New stock from the last (days)', type: 'number' }, { k: 'offer', label: 'Offer / scheme line (optional), e.g. “Buy 10 get 1 free on ADDI-D3”', type: 'textarea' }, { k: 'b2b', label: 'Chemist update — {party} {lines} {offer} {firm}', type: 'textarea' }, { k: 'social', label: 'Public post — {lines} {offer} {firm} {address} {phone}', type: 'textarea' }],
+    reviews: [{ k: 'days', label: 'Customers who bought in the last (days)', type: 'number' }, { k: 'repeatDays', label: 'Do not ask the same person again within (days)', type: 'number' }, { k: 'minAmount', label: 'Only if they bought at least (₹)', type: 'number' }, { k: 'maxPerRun', label: 'At most this many requests a day', type: 'number' }, { k: 'includeChemists', label: 'Also ask chemists', type: 'check' }, { k: 'template', label: 'Message — {party} {firm} {link}', type: 'textarea' }],
+    assistant: [{ k: 'perChemistPerDay', label: 'Questions per chemist per day', type: 'number' }, { k: 'dailyTotal', label: 'Questions per day for all chemists (cost limit)', type: 'number' }, { k: 'greeting', label: 'Greeting shown in the portal', type: 'textarea' }],
+  });
+  Object.assign(AGENT_RUN, { marketing: runMarketingAgent, reviews: runReviewsAgent });
+  Object.assign(APPR_LABEL, { promo: 'Share', review: 'Send request' });
+
+  // Image card (1080×1080 PNG) for WhatsApp status / Instagram / Facebook
+  async function promoImage(products, title, offer) {
+    const f = db.settings.firm; const cv = document.createElement('canvas'); cv.width = 1080; cv.height = 1080; const x = cv.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 1080, 1080); g.addColorStop(0, '#0d4a42'); g.addColorStop(1, '#135e54'); x.fillStyle = g; x.fillRect(0, 0, 1080, 1080);
+    x.fillStyle = '#b48a4f'; x.fillRect(0, 0, 1080, 14);
+    let y = 110;
+    if (f.logo) { try { const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = f.logo; }); x.fillStyle = '#fff'; x.beginPath(); x.roundRect(80, 70, 120, 120, 24); x.fill(); x.drawImage(img, 90, 80, 100, 100); } catch { /* no logo */ } }
+    x.fillStyle = '#fff'; x.font = '600 54px Fraunces, Georgia, serif'; x.fillText(f.name || '', f.logo ? 230 : 80, y + 10);
+    x.fillStyle = '#d6b47e'; x.font = '500 28px Inter, Arial, sans-serif'; x.fillText((f.tagline || 'Pharma Suite').toUpperCase(), f.logo ? 230 : 80, y + 56);
+    y = 280; x.fillStyle = '#fff'; x.font = '600 64px Fraunces, Georgia, serif'; x.fillText(title, 80, y);
+    y += 40; x.fillStyle = 'rgba(255,255,255,.15)'; x.fillRect(80, y, 920, 2);
+    x.font = '500 38px Inter, Arial, sans-serif';
+    products.slice(0, 8).forEach((p, i) => { y += 72; x.fillStyle = '#d6b47e'; x.beginPath(); x.arc(98, y - 12, 9, 0, Math.PI * 2); x.fill(); x.fillStyle = '#fff'; let t = `${p.name}${p.pack ? ' · ' + p.pack : ''}`; while (x.measureText(t).width > 880 && t.length > 4) t = t.slice(0, -2); x.fillText(t, 130, y); });
+    if (products.length > 8) { y += 60; x.fillStyle = '#d6b47e'; x.font = '500 32px Inter, Arial, sans-serif'; x.fillText(`+ ${products.length - 8} more`, 130, y); }
+    if (offer) { x.fillStyle = '#b48a4f'; x.beginPath(); x.roundRect(80, 850, 920, 80, 18); x.fill(); x.fillStyle = '#fff'; x.font = '600 34px Inter, Arial, sans-serif'; let t = offer.split('\n')[0]; while (x.measureText(t).width > 860 && t.length > 4) t = t.slice(0, -2); x.fillText(t, 110, 902); }
+    x.fillStyle = 'rgba(255,255,255,.8)'; x.font = '400 28px Inter, Arial, sans-serif'; let addr = [addrText(f), f.phone].filter(Boolean).join(' · '); while (x.measureText(addr).width > 920 && addr.length > 4) addr = addr.slice(0, -2); x.fillText(addr, 80, 1010);
+    return new Promise(res => cv.toBlob(res, 'image/png'));
+  }
+  let promoState = null;
+  function openPromo(a) {
+    const c = agentCfg('marketing'), f = db.settings.firm;
+    const items = (a.payload.items || []).map(prod).filter(Boolean), pub = (a.payload.pub || []).map(prod).filter(Boolean);
+    const list = ps => ps.map(p => `• ${p.name}${p.pack ? ` (${p.pack})` : ''}`).join('\n');
+    const b2b = fillTpl(c.b2b, { party: '{party}', lines: list(items), offer: c.offer || '', firm: f.name });
+    const social = pub.length ? fillTpl(c.social, { lines: list(pub), offer: c.offer || '', firm: f.name, address: addrText(f), phone: f.phone || '' }) : '';
+    promoState = { a, items, pub };
+    const chems = db.chemists.filter(x => x.status === 'Active' && x.phone);
+    openModal({
+      title: 'Share this week’s update', size: 'xl', submitLabel: 'Mark as shared',
+      body: `<div class="grid g-2 promo-grid">
+        <section><div class="card-title" style="font-size:15px">For chemists (trade update)</div>
+          <div class="field"><textarea id="promoB2b" rows="10">${esc(b2b)}</textarea></div>
+          <div class="small muted">{party} is replaced with each chemist’s name. Open WhatsApp for each chemist below, or copy the text into a WhatsApp broadcast list.</div>
+          <div class="toolbar" style="margin-top:6px"><button type="button" class="btn sm" data-promo="copyb2b">Copy</button><button type="button" class="btn sm" data-promo="imgb2b">${icon('upload')}Image card</button></div>
+          <div class="promo-list">${chems.map(x => `<div class="hook-row"><div><span class="strong">${esc(x.name)}</span><div class="small muted">${esc(x.phone)}</div></div><button type="button" class="btn sm ghost" data-promo-wa="${esc(x.id)}">${icon('chat')}WhatsApp</button></div>`).join('') || '<div class="small muted">No active chemists with a mobile number.</div>'}</div></section>
+        <section><div class="card-title" style="font-size:15px">Public post (Instagram, Facebook, WhatsApp Status)</div>
+          ${pub.length ? `<div class="field"><textarea id="promoSocial" rows="10">${esc(social)}</textarea></div>
+          <div class="toolbar"><button type="button" class="btn sm" data-promo="copysocial">Copy</button><button type="button" class="btn sm primary" data-promo="imgsocial">${icon('upload')}Download image card</button>${getApiKey() ? '<button type="button" class="btn sm" data-promo="ai">' + icon('spark') + 'Improve wording with AI</button>' : ''}</div>
+          <div class="small muted">Only non-prescription items are included. Prescription (Schedule H/H1/X) medicines must not be advertised to the public. Posting directly to Instagram/Facebook is not connected yet — download the image and post it.</div>`
+          : '<div class="empty">No public post this week — all new items are prescription medicines. Share the trade update with chemists only.</div>'}</section>
+      </div>`,
+      onSubmit: () => { doneApproval(a.id, 'Shared'); logAgent('marketing', 'Weekly update shared'); return 'Marked as shared.'; },
+    });
+  }
+  async function promoAction(kind, chemId) {
+    const st = promoState; if (!st) return;
+    const b2b = $('#promoB2b')?.value || '', social = $('#promoSocial')?.value || '';
+    const copy = async t => { try { await navigator.clipboard.writeText(t); toast('Copied.'); } catch { toast('Select the text and copy it.'); } };
+    if (kind === 'copyb2b') return copy(b2b.replace(/\{party\}/g, '').replace(/ ji,/, ','));
+    if (kind === 'copysocial') return copy(social);
+    if (kind === 'imgb2b' || kind === 'imgsocial') {
+      const ps = kind === 'imgsocial' ? st.pub : st.items;
+      const blob = await promoImage(ps, kind === 'imgsocial' ? 'New this week' : 'New stock arrived', agentCfg('marketing').offer || '');
+      const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `${(db.settings.firm.name || 'update').replace(/[^\w]+/g, '-')}-${todayIso}.png`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+      return;
+    }
+    if (kind === 'wa') {
+      const ch = chem(chemId); if (!ch) return;
+      const text = b2b.replace(/\{party\}/g, ch.owner || ch.name);
+      const a = document.createElement('a'); a.href = `https://wa.me/91${phone10(ch.phone)}?text=${encodeURIComponent(text)}`; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
+      $(`[data-promo-wa="${chemId}"]`)?.closest('.hook-row')?.classList.add('done');
+      return;
+    }
+    if (kind === 'ai') {
+      const btn = $('[data-promo="ai"]'); btn.disabled = true; btn.textContent = 'Writing…';
+      try {
+        const x = await callClaudeJson([], `Rewrite this social media post for a pharmacy business in India so it is warm, short (under 60 words) and suitable for Instagram and WhatsApp Status. Keep every product name exactly as given, keep the offer and contact details, and add 3 to 5 relevant hashtags. Do not make medical or health claims, and do not promise cures. Write in English with simple Hindi words where natural.\n\nPost:\n"""${social}"""`, { type: 'object', additionalProperties: false, required: ['post'], properties: { post: { type: 'string' } } }, 800, aiModel('agent'));
+        if (x.post) $('#promoSocial').value = x.post;
+      } catch (err) { toast(err.message || 'Could not reach the AI.'); }
+      finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = icon('spark') + 'Improve wording with AI'; } }
+    }
+  }
+  Object.assign(APPR_HANDLERS, {
+    promo: a => openPromo(a),
+    review: a => {
+      const { type, id } = a.payload; const p = type === 'chemist' ? chem(id) : custById(id); if (!p) return;
+      openSendDialog({ agent: 'reviews', approvalId: a.id, reminderKey: `review:${type}:${id}`, title: `Ask ${p.name} for a review`, name: p.name, phone: p.phone, email: p.email, subject: `Thank you — ${db.settings.firm.name}`, text: fillTpl(agentCfg('reviews').template, { party: p.owner || p.name, firm: db.settings.firm.name, link: intCfg('bizprofile').reviewLink || '' }) });
+    },
+  });
+  // Chemist Assistant: conversations (server)
+  ACTIONS['assistant-log'] = async () => {
+    if (!SERVER) { toast('The Chemist Assistant runs on the server — start it with “node server.js”.'); return; }
+    let d; try { d = await api('GET', 'api/assistant/log'); } catch (err) { toast(err.message); return; }
+    const c = agentCfg('assistant');
+    openModal({
+      title: 'Chemist Assistant — conversations', size: 'xl',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="agent-config" data-id="assistant">Settings</button></div>`,
+      body: `${detailGrid([['Status', c.enabled ? pill('Active') : pill('Off')], ['Server package', d.sdk ? 'Installed' : '<span class="bad-text">Run “npm install”</span>'], ['Server key', d.key ? 'Saved' : '<span class="bad-text">Add it in Integrations → AI providers</span>'], ['Questions today', `${d.usage.total} / ${c.dailyTotal}`]])}
+        ${d.chats.length ? d.chats.map(ch => `<div class="chat-log"><div class="strong">${esc(ch.name)} <span class="small muted">${ch.last ? new Date(ch.last).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</span></div>${ch.messages.slice(-8).map(m => `<div class="chat-line ${m.role}"><b>${m.role === 'user' ? 'Chemist' : 'Assistant'}:</b> ${esc(m.text)}${m.order ? ` ${pill(m.order)}` : ''}</div>`).join('')}</div>`).join('') : '<div class="empty">No conversations yet.</div>'}`,
+    });
   };
 
   // Chemist orders
@@ -5059,6 +5204,10 @@ Message:
     if (stab) { settingsTab = stab.dataset.settingsTab; render(); return; }
     const snd = e.target.closest('[data-send]');
     if (snd) { handleSend(snd.dataset.send); return; }
+    const pm = e.target.closest('[data-promo]');
+    if (pm) { promoAction(pm.dataset.promo); return; }
+    const pw = e.target.closest('[data-promo-wa]');
+    if (pw) { promoAction('wa', pw.dataset.promoWa); return; }
     const oda = e.target.closest('[data-od-act]');
     if (oda) { odAction(oda.dataset.odAct); return; }
     if (e.target.closest('[data-add-iline]')) { $('#iBody').insertAdjacentHTML('beforeend', inqRow()); $('#iBody tr:last-child [data-i=name]').focus(); return; }

@@ -1,0 +1,16 @@
+{
+  "name": "b2b-b2c-pharma-suite",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Distributor dashboard and chemist portal",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0"
+  }
+}

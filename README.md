@@ -1,6 +1,6 @@
 # B2B-B2C-Pharma-Suite
 
-Dashboard for a medical supplies distributor, with a portal where chemists see your stock and place orders. Plain HTML, CSS and JavaScript plus a small Node.js server — no build step and no packages to install.
+Dashboard for a medical supplies distributor, with a portal where chemists see your stock and place orders. Plain HTML, CSS and JavaScript plus a small Node.js server — no build step. The only server package is Anthropic's official SDK, used by the Chemist Assistant.
 
 ## Sections
 
@@ -22,6 +22,10 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
   - *Returns & Expiry Claims*: advises approve / check on each sales return request against your policy; drafts expiry claims to suppliers, which become purchase returns (debit notes)
   - *Enquiry Follow-up*: follow-up messages with current availability and rates, “now in stock” messages, old enquiries to mark lost
   - *Accounts Sync*: monthly statements for parties with a balance, bank statement CSV matching to open bills (payments recorded only when you approve), Tally XML of sale vouchers
+
+  - *Marketing*: weekly WhatsApp update for chemists about new stock and your offer, a public post with only non-prescription items, a 1080×1080 image card to download, and optional AI wording
+  - *Reviews & Reputation*: asks recent customers for a Google review with your review link, at most once per person in the set days
+  - *Chemist Assistant*: a 24×7 “Ask us” chat in the chemist portal (server only). Claude answers about stock, rates, the chemist's own orders and balance, and places an order only after the chemist confirms — it arrives as New in Chemist Orders. It never sees purchase rates or other chemists. Daily limits per chemist and in total; conversations are visible to you under Agents
 
   Daily agents run the first time the dashboard is open after their set time each day.
 - **Purchase Returns** — debit notes for goods sent back to suppliers (expiry claims, damage, wrong item): stock goes out, the supplier's payable and ledger go down, print the debit note, mark it settled when the supplier's credit note arrives
@@ -52,11 +56,14 @@ Drug licences, FSSAI licences and GST certificates can be read with AI: in the c
 
 ## Run with the server (logins and chemist portal)
 
-Needs Node.js 18 or newer.
+Needs Node.js 18 or newer. The first time (and after updates), install the server package:
 
 ```
+npm install
 node server.js
 ```
+
+The Chemist Assistant also needs an Anthropic API key saved on the server (Settings → Integrations → AI providers → “Anthropic API key for the server”) and to be switched on under Agents.
 
 Open http://127.0.0.1:8080. The first time, you create the admin login. Then, when onboarding a chemist (or from **Onboard Chemists → View → Portal login**), give them a portal login: by default the **login ID is the chemist's email** and the **password is their mobile number**, filled in as you type (you can change both). Because a mobile number is easy for others to know, the chemist is asked to set their own password at first sign-in, and the portal shows nothing else until they do (you can untick this). Chemists sign in at the same address and land on their portal, where they can:
 

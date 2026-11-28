@@ -158,6 +158,142 @@ function catalogue() {
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// ---------- Chemist orders (portal and assistant) ----------
+function createOrder(cid, inLines, note, by) {
+  const bad = msg => Object.assign(new Error(msg), { status: 400 });
+  if (!Array.isArray(inLines) || !inLines.length || inLines.length > 200) throw bad('Add between 1 and 200 items.');
+  const prods = store.data?.products || [];
+  const cat = catalogue();
+  const lines = [];
+  for (const l of inLines) {
+    const qty = Math.floor(Number(l.qty));
+    if (!Number.isFinite(qty) || qty < 1 || qty > 100000) throw bad('Each quantity must be a whole number from 1 to 100000.');
+    if (l.productId) {
+      const p = prods.find(x => x.id === l.productId); if (!p) throw bad('An item in the order no longer exists. Refresh the list.');
+      lines.push({ productId: p.id, name: p.name, pack: p.pack || '', qty, availableAtOrder: cat.find(x => x.id === p.id)?.available || 0, note: str(l.note, 200) });
+    } else {
+      const name = str(l.name, 120); if (!name) throw bad('Enter the name of the item you need.');
+      lines.push({ productId: '', name, pack: str(l.pack, 40), company: str(l.company, 60), qty, availableAtOrder: 0, note: str(l.note, 200) });
+    }
+  }
+  const max = orders.reduce((a, o) => Math.max(a, +String(o.id).replace(/\D/g, '') || 0), 1000);
+  const order = { id: 'ORD-' + (max + 1), chemistId: cid, created: new Date().toISOString(), date: today(), lines, note: str(note, 500), status: 'New', via: by, history: [{ at: new Date().toISOString(), status: 'New', by: by === 'assistant' ? 'chemist (assistant)' : 'chemist' }] };
+  orders.push(order); saveOrders();
+  return order;
+}
+
+// ---------- Chemist Assistant (Claude, on the server) ----------
+// Needs: npm install (for @anthropic-ai/sdk) and the server key in Settings → Integrations → AI providers.
+let assistantLog = readJson('assistant.json', { chats: {}, usage: {} });
+const saveAssistant = () => writeJson('assistant.json', assistantLog);
+let sdkMod = null;
+async function loadServerSdk() {
+  if (sdkMod) return sdkMod;
+  try {
+    const [core, js] = await Promise.all([import('@anthropic-ai/sdk'), import('@anthropic-ai/sdk/helpers/beta/json-schema')]);
+    sdkMod = { Anthropic: core.default, betaTool: js.betaTool };
+    return sdkMod;
+  } catch { throw Object.assign(new Error('The assistant needs the Anthropic package on the server — run “npm install” in the app folder and restart.'), { status: 503 }); }
+}
+const assistantCfg = () => ({ enabled: false, perChemistPerDay: 40, dailyTotal: 400, ...(store.data?.settings?.agents?.assistant || {}) });
+function assistantTools(cid, betaTool, state) {
+  const d = store.data;
+  const chemist = (d.chemists || []).find(c => c.id === cid);
+  const due = () => {
+    const bills = (d.sales || []).filter(x => x.party?.chemistId === cid);
+    const bal = x => Math.max(0, x.total - (x.paid || 0) - (x.returned || 0));
+    const open = bills.filter(x => bal(x) > 0.5).sort((a, b) => a.date.localeCompare(b.date));
+    const pays = bills.flatMap(x => (x.payments?.length ? x.payments : x.paid > 0 ? [{ date: x.date, amount: x.paid }] : [])).sort((a, b) => b.date.localeCompare(a.date));
+    return { total_due: Math.round(bills.reduce((a, x) => a + x.total - (x.paid || 0) - (x.returned || 0), 0) * 100) / 100, open_bills: open.slice(0, 15).map(x => ({ bill: x.no, date: x.date, amount: x.total, balance: Math.round(bal(x) * 100) / 100 })), last_payment: pays[0] || null, credit_limit: chemist?.creditLimit || 0, payment_terms_days: chemist?.terms || 0 };
+  };
+  return [
+    betaTool({
+      name: 'search_products',
+      description: 'Search the distributor’s product list by name, salt, company or form. Returns availability, this chemist’s rate (PTR, before discount and GST), MRP and GST. Use it for every stock or rate question.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Words to search, e.g. "dolo 650" or "lupin insulin"' } }, required: ['query'], additionalProperties: false },
+      run: async ({ query }) => {
+        const words = String(query || '').toUpperCase().split(/\s+/).filter(Boolean);
+        const hits = catalogue().filter(p => { const t = `${p.name} ${p.company} ${p.category} ${p.form} ${p.pack}`.toUpperCase(); return words.every(w => t.includes(w)); }).slice(0, 12);
+        return JSON.stringify(hits.length ? hits.map(p => ({ product_id: p.id, name: p.name, company: p.company, pack: p.pack, form: p.form, status: p.status, available_units: p.available, rate: p.rate, mrp: p.mrp, gst_percent: p.gst, nearest_expiry: p.nearestExpiry })) : { result: 'No matching product. It can still be requested by name in an order.' });
+      },
+    }),
+    betaTool({
+      name: 'my_orders',
+      description: 'This chemist’s recent orders and their status.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => JSON.stringify(orders.filter(o => o.chemistId === cid).sort((a, b) => b.created.localeCompare(a.created)).slice(0, 8).map(o => ({ order: o.id, date: o.date, status: o.status, items: o.lines.map(l => `${l.name} × ${l.qty}`), reply: o.reply || '', bill: o.saleNo || '' }))),
+    }),
+    betaTool({
+      name: 'my_account',
+      description: 'This chemist’s balance with the distributor: total due, open bills, last payment, credit limit and payment terms.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => JSON.stringify(due()),
+    }),
+    betaTool({
+      name: 'place_order',
+      description: 'Send an order to the distributor. Only call this after you listed the items and quantities and the chemist clearly confirmed. Items not in stock can be ordered too; unknown items go by name.',
+      inputSchema: { type: 'object', properties: { lines: { type: 'array', items: { type: 'object', properties: { product_id: { type: 'string', description: 'product_id from search_products, or empty for an item not in the list' }, name: { type: 'string', description: 'Item name when product_id is empty' }, qty: { type: 'integer' } }, required: ['product_id', 'name', 'qty'], additionalProperties: false } }, note: { type: 'string' }, chemist_confirmed: { type: 'boolean', description: 'true only if the chemist confirmed this exact order in their last message' } }, required: ['lines', 'note', 'chemist_confirmed'], additionalProperties: false },
+      run: async ({ lines, note, chemist_confirmed }) => {
+        if (!chemist_confirmed) return 'Not placed: ask the chemist to confirm the items and quantities first.';
+        if (state.ordered) return `Already placed ${state.ordered} in this message.`;
+        try {
+          const o = createOrder(cid, (lines || []).map(l => (l.product_id ? { productId: l.product_id, qty: l.qty } : { name: l.name, qty: l.qty })), note, 'assistant');
+          state.ordered = o.id;
+          return `Placed order ${o.id} with ${o.lines.length} item(s). The distributor will check and confirm it.`;
+        } catch (e) { return `Could not place the order: ${e.message}`; }
+      },
+    }),
+  ];
+}
+async function assistantReply(cid, text) {
+  const cfg = assistantCfg();
+  if (!cfg.enabled) throw Object.assign(new Error('The assistant is switched off. Please call the distributor.'), { status: 403 });
+  const key = secrets.ai?.serverKey;
+  if (!key) throw Object.assign(new Error('The assistant is not set up yet. Please call the distributor.'), { status: 503 });
+  const day = today(); const u = assistantLog.usage[day] || (assistantLog.usage = { [day]: { total: 0, per: {} } })[day];
+  if ((u.per[cid] || 0) >= cfg.perChemistPerDay) throw Object.assign(new Error(`You have reached today’s limit of ${cfg.perChemistPerDay} questions. Please call the distributor.`), { status: 429 });
+  if (u.total >= cfg.dailyTotal) throw Object.assign(new Error('The assistant is busy today. Please call the distributor.'), { status: 429 });
+  const { Anthropic, betaTool } = await loadServerSdk();
+  const d = store.data; const f = d.settings?.firm || {}; const c = (d.chemists || []).find(x => x.id === cid);
+  const history = (assistantLog.chats[cid] || []).slice(-12).map(m => ({ role: m.role, content: m.text }));
+  const state = { ordered: '' };
+  const client = new Anthropic({ apiKey: key });
+  const system = `You are the ordering assistant of ${f.name || 'the distributor'}, a pharmaceutical distributor${f.city ? ` in ${f.city}` : ''}. You are chatting with ${c?.name || 'a chemist'}${c?.city ? ` (${c.city})` : ''} on their portal. Today is ${day}.
+Reply in the language the chemist writes in (Hindi, English or Hinglish), briefly and politely, like a helpful counter staff member.
+- Use the tools for every question about stock, rates, orders or their account. Never guess numbers, availability or dates.
+- Rates are this chemist's rates (PTR) before discount and GST. Their usual cash discount is ${c?.cd || 0}%.
+- Never discuss other chemists, the distributor's purchase prices or suppliers, or anything outside this business.
+- Do not give medical advice, dosage or substitutes; for that, suggest a doctor or pharmacist.
+- To order: find each item, then list the items with quantities and ask the chemist to confirm. Call place_order only after they clearly confirm. Items that are not in stock can still be ordered — the distributor arranges them.
+- If you cannot help, say the distributor will call back${f.phone ? ` or that they can call ${f.phone}` : ''}.`;
+  const runner = client.beta.messages.toolRunner({
+    model: d.settings?.integrations?.ai?.agentModel || 'claude-haiku-5-5',
+    max_tokens: 1500,
+    max_iterations: 6,
+    system,
+    tools: assistantTools(cid, betaTool, state),
+    messages: [...history, { role: 'user', content: text }],
+  });
+  let final;
+  try { final = await runner.runUntilDone(); }
+  catch (e) {
+    if (e instanceof Anthropic.AuthenticationError) throw Object.assign(new Error('The assistant is not set up correctly. Please call the distributor.'), { status: 503 });
+    if (e instanceof Anthropic.RateLimitError) throw Object.assign(new Error('The assistant is busy. Please try again in a minute.'), { status: 429 });
+    if (e instanceof Anthropic.APIError) { console.error('Assistant API error', e.status, e.message); throw Object.assign(new Error('The assistant could not answer right now. Please try again.'), { status: 502 }); }
+    throw e;
+  }
+  let reply = (final.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  if (final.stop_reason === 'refusal') reply = 'Sorry, I can’t help with that. Please call the distributor.';
+  if (!reply) reply = state.ordered ? `Your order ${state.ordered} has been sent.` : 'Sorry, please ask again in a different way.';
+  const log = assistantLog.chats[cid] || (assistantLog.chats[cid] = []);
+  const at = new Date().toISOString();
+  log.push({ role: 'user', text: String(text).slice(0, 2000), at }, { role: 'assistant', text: reply.slice(0, 4000), at, order: state.ordered || undefined });
+  if (log.length > 60) log.splice(0, log.length - 60);
+  u.total++; u.per[cid] = (u.per[cid] || 0) + 1;
+  saveAssistant();
+  return { reply, order: state.ordered || '' };
+}
+
 // ---------- API ----------
 async function api(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
@@ -234,6 +370,15 @@ async function api(req, res, url) {
       const c = chemistOf(cid);
       return send(res, 200, { items: catalogue(), cd: c?.cd || 0, td: c?.td || 0, firm: store.data?.settings?.firm || {} });
     }
+    if (route === 'GET /api/portal/assistant') {
+      const cfg = assistantCfg();
+      return send(res, 200, { enabled: !!cfg.enabled && !!secrets.ai?.serverKey, greeting: cfg.greeting || '', history: (assistantLog.chats[cid] || []).slice(-30).map(m => ({ role: m.role, text: m.text, at: m.at, order: m.order })) });
+    }
+    if (route === 'POST /api/portal/assistant') {
+      const b = await readBody(req, 10_000);
+      const text = str(b.message, 1000); if (!text) return fail400(res, 'Type a question.');
+      return send(res, 200, await assistantReply(cid, text));
+    }
     if (route === 'GET /api/portal/orders') return send(res, 200, orders.filter(o => o.chemistId === cid).sort((a, b) => b.created.localeCompare(a.created)));
     if (route === 'GET /api/portal/bills') {
       const bills = (store.data?.sales || []).filter(x => x.party?.chemistId === cid).sort((a, b) => b.date.localeCompare(a.date))
@@ -242,24 +387,7 @@ async function api(req, res, url) {
     }
     if (route === 'POST /api/portal/orders') {
       const b = await readBody(req, 100_000);
-      if (!Array.isArray(b.lines) || !b.lines.length || b.lines.length > 200) return fail400(res, 'Add between 1 and 200 items.');
-      const prods = store.data?.products || [];
-      const lines = [];
-      for (const l of b.lines) {
-        const qty = Math.floor(Number(l.qty));
-        if (!Number.isFinite(qty) || qty < 1 || qty > 100000) return fail400(res, 'Each quantity must be a whole number from 1 to 100000.');
-        if (l.productId) {
-          const p = prods.find(x => x.id === l.productId); if (!p) return fail400(res, 'An item in the order no longer exists. Refresh the list.');
-          const avail = catalogue().find(x => x.id === p.id)?.available || 0;
-          lines.push({ productId: p.id, name: p.name, pack: p.pack || '', qty, availableAtOrder: avail, note: str(l.note, 200) });
-        } else {
-          const name = str(l.name, 120); if (!name) return fail400(res, 'Enter the name of the item you need.');
-          lines.push({ productId: '', name, pack: str(l.pack, 40), company: str(l.company, 60), qty, availableAtOrder: 0, note: str(l.note, 200) });
-        }
-      }
-      const max = orders.reduce((a, o) => Math.max(a, +String(o.id).replace(/\D/g, '') || 0), 1000);
-      const order = { id: 'ORD-' + (max + 1), chemistId: cid, created: new Date().toISOString(), date: today(), lines, note: str(b.note, 500), status: 'New', history: [{ at: new Date().toISOString(), status: 'New', by: 'chemist' }] };
-      orders.push(order); saveOrders();
+      const order = createOrder(cid, b.lines, b.note, 'chemist');
       return send(res, 200, order);
     }
     const cancel = /^POST \/api\/portal\/orders\/(ORD-\d+)\/cancel$/.exec(route);
@@ -285,6 +413,10 @@ async function api(req, res, url) {
     return send(res, 200, { rev: store.rev });
   }
   if (route === 'GET /api/orders') return send(res, 200, orders);
+  if (route === 'GET /api/assistant/log') {
+    const chemName = id => (store.data?.chemists || []).find(c => c.id === id)?.name || id;
+    return send(res, 200, { usage: assistantLog.usage[today()] || { total: 0, per: {} }, sdk: await loadServerSdk().then(() => true, () => false), key: !!secrets.ai?.serverKey, chats: Object.entries(assistantLog.chats).map(([id, m]) => ({ chemistId: id, name: chemName(id), last: m.at(-1)?.at || '', messages: m.slice(-20) })).sort((a, b) => b.last.localeCompare(a.last)).slice(0, 30) });
+  }
   const upd = /^POST \/api\/orders\/(ORD-\d+)$/.exec(route);
   if (upd) {
     const o = orders.find(x => x.id === upd[1]); if (!o) return send(res, 404, { error: 'Order not found.' });
