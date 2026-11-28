@@ -99,7 +99,7 @@
     const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
     const letters = n => Array.from({ length: n }, () => pick(L)).join('');
     const digits = n => Array.from({ length: n }, () => ri(0, 9)).join('');
-    const gstin = () => `02${letters(5)}${digits(4)}${pick(L)}1Z${pick(L)}`;
+    const gstin = () => { const g = `02${letters(5)}${digits(4)}${pick(L)}1Z`, cs = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'; let sum = 0; for (let i = 0; i < 14; i++) { const v = cs.indexOf(g[i]) * (i % 2 + 1); sum += Math.floor(v / 36) + (v % 36); } return g + cs[(36 - (sum % 36)) % 36]; };
     const phone = () => `9${ri(6, 9)}${digits(8)}`;
 
     const companies = ['LUPIN', 'ADDI B', 'TORRENT', 'SUN PHARMA', 'IPCA LAB'].map((name, i) => ({ id: 'M' + String(i + 1).padStart(2, '0'), name }));
@@ -251,7 +251,7 @@
 
     const settings = {
       firm: { name: 'Shankar Medical Store', district: 'Bilaspur', tehsil: 'Ghumarwin', subTehsil: '', locality: 'Bajoha', address: '', pincode: '174021', hospital: '', city: 'Bajoha', phone: '01978-315172', gstin: '02AFNFS3835D1Z4', dl1: '20B 20160', dl2: '21B 20161' },
-      defaultCd: 2, individualTerms: 0,
+      defaultCd: 2, individualTerms: 0, demo: true,
     };
     // Hospital directory, with each sample chemist linked to a civil hospital or CHC in its tehsil where one is listed
     const hospitals = seedHospitals();
@@ -411,6 +411,7 @@
     Active: 'ok', 'Pending verification': 'warn', 'On hold': 'bad',
     Good: 'ok', 'Near expiry': 'warn', Expired: 'bad', 'Low stock': 'warn', 'Out of stock': 'bad', 'In stock': 'ok',
     PO: 'info', GRN: 'ok', Invoice: 'neutral', Chemist: 'info', Individual: 'neutral',
+    Waiting: 'warn', Done: 'ok', Dismissed: 'neutral', 'Sample data loaded': 'warn',
     Requested: 'warn', Approved: 'ok', Quoted: 'info', Converted: 'ok', Lost: 'neutral', 'Follow-up due': 'warn', Customer: 'neutral', 'New person': 'neutral',
     'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
     New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
@@ -459,6 +460,7 @@
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
     { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
   { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
+  { group: 'System', items: [['agents', 'Agents & Approvals', 'spark'], ['settings', 'Settings', 'settings']] },
   ];
   const SUBTITLES = {
     overview: 'Your business at a glance',
@@ -469,6 +471,8 @@
     inquiries: 'Who asked for what — follow up and turn enquiries into bills',
     returns: 'Goods returned against sale bills — request, approve, credit',
     ledger: 'Party-wise account: bills, payments and returns with running balance',
+    agents: 'Your assistants prepare purchase orders, reminders and alerts — you approve',
+    settings: 'Business details, integrations, agents and data',
     stock: 'Batch-wise stock in bill format',
     products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
@@ -491,6 +495,7 @@
       grn: db.grns.filter(g => !g.invoiced).length,
       billentry: entry && entry.lines.length ? '•' : 0,
       chemorders: chemOrders.filter(o => o.status === 'New').length,
+      agents: (db.approvals || []).filter(a => a.status === 'Pending' && a.kind !== 'briefing').length,
     };
     $('#nav').innerHTML = NAV.map(g => `
       <div class="nav-group-title">${g.group}</div>
@@ -1802,9 +1807,9 @@
 
 Copy text exactly as printed. Use an empty string for anything that is not printed. Do not guess.`;
 
-  const extractBill = files => callClaudeJson(files, EXTRACT_PROMPT, BILL_SCHEMA, 32000);
-  const extractLicence = files => callClaudeJson(files, LIC_PROMPT, LIC_SCHEMA, 4000);
-  async function callClaudeJson(files, prompt, schema, maxTokens) {
+  const extractBill = files => callClaudeJson(files, EXTRACT_PROMPT, BILL_SCHEMA, 32000, aiModel('bill'));
+  const extractLicence = files => callClaudeJson(files, LIC_PROMPT, LIC_SCHEMA, 4000, aiModel('bill'));
+  async function callClaudeJson(files, prompt, schema, maxTokens, model) {
     const Anthropic = await loadSdk();
     const client = new Anthropic({ apiKey: getApiKey(), dangerouslyAllowBrowser: true });
     const content = [];
@@ -1816,7 +1821,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     content.push({ type: 'text', text: prompt });
     try {
       const stream = client.beta.messages.stream({
-        model: 'claude-opus-5-5',
+        model: model || 'claude-opus-5-5',
         max_tokens: maxTokens,
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
@@ -1904,6 +1909,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     document.title = `${r === 'search' ? 'Search' : item[1]} · ${db.settings.firm.name || 'Pharma Suite'}`;
     Object.keys(lists).forEach(k => delete lists[k]);
     $('#content').innerHTML = VIEWS[r]();
+    if (db.settings.demo && intCfg('demo').banner !== false && r !== 'settings') $('#content').insertAdjacentHTML('afterbegin', `<div class="demo-note">${icon('spark')}<span>You are looking at <b>sample data</b>. When you are ready, start with your own data.</span><button type="button" class="btn sm" data-act="settings-data" data-id="">Settings → Data</button></div>`);
     Object.keys(lists).forEach(fillList);
   }
   const refresh = () => { save(); render(); };
@@ -2245,6 +2251,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     }
     if (!Array.isArray(d.inquiries)) d.inquiries = [];
     if (!Array.isArray(d.returns)) d.returns = [];
+    ['approvals', 'agentLog', 'reminders'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
     if (d.settings && !d.settings.profile) d.settings.profile = {};
     [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(x => {
       if (!x || x.hospitalId || !x.hospital) return;
@@ -2509,6 +2516,10 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         if (!lines.length) { toast('Add at least one item with a quantity.'); return false; }
         const type = d.ptype;
         if (type === 'chemist' && !d.chemistId) { toast('Choose a chemist, or switch to Individual.'); return false; }
+        if (type === 'chemist' && !existing) {
+          const ch = chem(d.chemistId), cc = agentCfg('compliance');
+          if (cc.enabled && cc.blockExpired && ch?.dlValid && daysFrom(ch.dlValid) < 0 && !confirm(`${ch.name}'s drug licence expired on ${fmtDate(ch.dlValid)}. Selling to a chemist with an expired licence is not allowed.\n\nCreate the bill anyway?`)) return false;
+        }
         if (type === 'individual' && !d.customerId && !String(d.cname || '').trim()) { toast('Choose the customer, or enter the new customer’s name.'); return false; }
         if (type === 'individual' && !d.customerId && d.cphone && !/^[6-9]\d{9}$/.test(d.cphone.trim())) { toast('Mobile must be a 10-digit number.'); return false; }
         const need = {};
@@ -2541,6 +2552,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         const no = nextNo('SMS-', db.sales);
         db.sales.push({ no, date: d.date, party, lines, ...t, paid, payments: paid > 0 ? [{ date: d.date, amount: paid, mode: d.mode === 'Credit' ? 'Cash' : d.mode }] : [], mode: d.mode, ...(preset.orderId ? { orderId: preset.orderId } : {}), ...(preset.inquiryNo ? { inquiryNo: preset.inquiryNo } : {}) });
         if (preset.orderId) setOrder(preset.orderId, { status: 'Billed', saleNo: no });
+        fireHook('sale.created', { no, date: d.date, party: type === 'chemist' ? chem(d.chemistId)?.name : party.name, total: t.total });
         if (preset.inquiryNo) { const q = db.inquiries.find(x => x.no === preset.inquiryNo); if (q) Object.assign(q, { status: 'Converted', saleNo: no, closedOn: todayIso }); }
         const c = type === 'chemist' ? chem(d.chemistId) : null;
         return c && chemOutstanding(c.id) > c.creditLimit ? `${no} created. Note: ${c.name} is now above their credit limit.` : `${no} created for ${money(t.total)} — stock deducted.`;
@@ -2680,7 +2692,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
           ${field('Mode', 'mode', { options: ['UPI', 'NEFT / RTGS', 'Cheque', 'Cash'] })}
           ${field('Reference (UTR / cheque no.)', 'ref', { value: '' })}
         </div>`,
-      onSubmit: d => { const a = Math.min(num(d.amount), balance(s)); addPayment(s, a, d.date || todayIso, [d.mode, d.ref].filter(Boolean).join(' · ')); return `Payment of ${money(a)} recorded on ${s.no}.`; },
+      onSubmit: d => { const a = Math.min(num(d.amount), balance(s)); addPayment(s, a, d.date || todayIso, [d.mode, d.ref].filter(Boolean).join(' · ')); fireHook('payment.received', { bill: s.no, party: partyName(s), amount: a, date: d.date, mode: d.mode }); return `Payment of ${money(a)} recorded on ${s.no}.`; },
     });
   };
   ACTIONS['del-sale'] = no => {
@@ -3325,6 +3337,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     r.lines.forEach(l => { credits[l.saleNo] = round2((credits[l.saleNo] || 0) + retLineValue(l)); });
     Object.entries(credits).forEach(([no, amt]) => { const sl = db.sales.find(x => x.no === no); if (sl) sl.returned = round2((sl.returned || 0) + amt); });
     Object.assign(r, { status: 'Approved', approvedOn: todayIso, credits, total: round2(Object.values(credits).reduce((a, v) => a + v, 0)) });
+    fireHook('return.approved', { no: r.no, party: retPartyName(r), total: r.total, bills: Object.keys(credits) });
   }
   function undoApprovedReturn(r) {
     const short = r.lines.filter(l => { const b = batchById(l.batchId) || db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch)); return !b || avail(b) < l.qty + (l.free || 0); });
@@ -3377,7 +3390,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   ACTIONS['ledger-clear-dates'] = () => { ledgerState.from = ''; ledgerState.to = ''; render(); };
   ACTIONS['ledger-csv'] = () => {
     const st = ledgerState; const L = ledgerCalc(st.type, st.id, st.from, st.to);
-    const rows = [['Date', 'Particulars', 'Note', 'Voucher', 'Debit', 'Credit', 'Balance'], ['', 'Opening balance', '', '', '', '', balTxt(L.open, st.type)], ...L.rows.map(e => [e.date, e.kind, e.note, e.ref, e.dr || '', e.cr || '', balTxt(e.bal, st.type)]), ['', 'Total', '', '', L.dr, L.cr, balTxt(L.close, st.type)]];
+    const rows = [['Date', 'Particulars', 'Note', 'Voucher', 'Debit', 'Credit', 'Balance'], ['', 'Opening balance', '', '', '', '', `${round2(Math.abs(L.open)).toFixed(2)} ${balSide(L.open, st.type)}`.trim()], ...L.rows.map(e => [e.date, e.kind, e.note, e.ref, e.dr ? round2(e.dr).toFixed(2) : '', e.cr ? round2(e.cr).toFixed(2) : '', `${round2(Math.abs(e.bal)).toFixed(2)} ${balSide(e.bal, st.type)}`.trim()]), ['', 'Total', '', '', round2(L.dr).toFixed(2), round2(L.cr).toFixed(2), `${round2(Math.abs(L.close)).toFixed(2)} ${balSide(L.close, st.type)}`.trim()]];
     downloadText(`ledger-${(ledgerPartyName(st.type, st.id) || 'party').replace(/[^\w-]+/g, '_')}-${todayIso}.csv`, rows.map(r => r.map(csvCell).join(',')).join('\r\n'));
   };
   ACTIONS['ledger-print'] = () => {
@@ -3442,6 +3455,665 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         if (pendingLogo !== undefined) f.logo = pendingLogo;
         db.settings.profile = { name: (d.pName || '').trim(), role: (d.pRole || '').trim(), phone: (d.pPhone || '').trim(), email: (d.pEmail || '').trim().toLowerCase() };
         return 'Profile saved.';
+      },
+    });
+  };
+
+  // =====================================================================
+  // Integrations, agents and approvals
+  // =====================================================================
+  const MODEL_OPTS = [['claude-opus-5-5', 'Claude Opus 5.5 — most accurate'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 — balanced'], ['claude-haiku-5-5', 'Claude Haiku 5.5 — fastest, cheapest']];
+  // Field types: text, secret (kept on the server), browserkey (Anthropic key, kept in this browser), select, check, textarea, number
+  const INT_DEFS = [
+    { id: 'ai', name: 'AI providers', icon: 'spark', desc: 'Claude reads purchase bills and licences, and understands free-text orders for the Order Desk agent.', works: 'Works now — the key stays in this browser.', test: 'ai',
+      fields: [{ k: 'key', label: 'Anthropic API key', type: 'browserkey', required: true }, { k: 'billModel', label: 'Model for reading bills and licences', type: 'select', options: MODEL_OPTS, def: 'claude-opus-5-5' }, { k: 'agentModel', label: 'Model for agents (Order Desk)', type: 'select', options: MODEL_OPTS, def: 'claude-haiku-5-5' }, { k: 'budget', label: 'Monthly AI budget (₹, for your reference)', type: 'number' }] },
+    { id: 'whatsapp', name: 'WhatsApp', icon: 'chat', desc: 'Payment reminders, order replies and the daily briefing.', works: 'Works now: opens WhatsApp with the message typed. Direct sending needs the Business API and the server.', test: 'server',
+      fields: [{ k: 'mode', label: 'How to send', type: 'select', options: [['click', 'Open WhatsApp with the message ready (no setup)'], ['cloud', 'WhatsApp Business API — sends directly (server)']], def: 'click' }, { k: 'businessNumber', label: 'Your WhatsApp business number' }, { k: 'phoneId', label: 'Phone number ID', when: 'cloud', required: true }, { k: 'token', label: 'Permanent access token', type: 'secret', when: 'cloud', required: true }, { k: 'template', label: 'Approved reminder template name (outside 24-hour chats)', when: 'cloud' }, { k: 'lang', label: 'Template language code', def: 'en', when: 'cloud' }, { k: 'apiVersion', label: 'Graph API version', def: 'v23.0', when: 'cloud' }] },
+    { id: 'voice', name: 'Voice calls', icon: 'chat', desc: 'Missed-call orders, click-to-call and call recordings.', works: 'Saves settings — calling is not connected yet.',
+      fields: [{ k: 'provider', label: 'Provider', type: 'select', options: [['exotel', 'Exotel'], ['knowlarity', 'Knowlarity'], ['twilio', 'Twilio'], ['other', 'Other']], def: 'exotel' }, { k: 'accountSid', label: 'Account SID / ID' }, { k: 'apiKey', label: 'API key / token', type: 'secret' }, { k: 'callerId', label: 'Caller ID / virtual number' }] },
+    { id: 'sms', name: 'SMS backup', icon: 'chat', desc: 'Reminders by SMS when WhatsApp is not possible.', works: 'Works now: opens the SMS app with the message. Bulk SMS through a provider needs DLT registration (saved for later).',
+      fields: [{ k: 'mode', label: 'How to send', type: 'select', options: [['device', 'Open the SMS app (no setup)'], ['api', 'SMS provider — saved for later']], def: 'device' }, { k: 'provider', label: 'Provider (MSG91, Fast2SMS…)', when: 'api' }, { k: 'apiKey', label: 'API key', type: 'secret', when: 'api' }, { k: 'senderId', label: 'DLT sender ID (6 letters)', when: 'api' }, { k: 'dltEntity', label: 'DLT entity ID', when: 'api' }, { k: 'dltTemplate', label: 'DLT template ID for reminders', when: 'api' }] },
+    { id: 'payments', name: 'Online payments', icon: 'rupee', desc: 'UPI ID or payment link added to payment reminders.', works: 'UPI ID works now. Razorpay payment links need the server.', test: 'server',
+      fields: [{ k: 'upiId', label: 'UPI ID (VPA) for payments', placeholder: 'e.g. shankarmedical@sbi' }, { k: 'payee', label: 'Name shown for UPI payments' }, { k: 'keyId', label: 'Razorpay key ID (optional)' }, { k: 'keySecret', label: 'Razorpay key secret', type: 'secret' }] },
+    { id: 'email', name: 'Email', icon: 'file', desc: 'Bills, ledger statements and reminders by email.', works: 'Works now: opens your email app with the message. Direct SMTP sending is saved for later.',
+      fields: [{ k: 'mode', label: 'How to send', type: 'select', options: [['app', 'Open my email app (no setup)'], ['smtp', 'SMTP — saved for later']], def: 'app' }, { k: 'fromName', label: 'From name' }, { k: 'fromEmail', label: 'From email' }, { k: 'smtpHost', label: 'SMTP host', when: 'smtp' }, { k: 'smtpPort', label: 'SMTP port', when: 'smtp', def: '587' }, { k: 'smtpUser', label: 'SMTP user', when: 'smtp' }, { k: 'smtpPass', label: 'SMTP password', type: 'secret', when: 'smtp' }] },
+    { id: 'social', name: 'Instagram & Facebook', icon: 'spark', desc: 'Posts for new stock and schemes. Prescription (Schedule H/H1/X) medicines must not be advertised to the public.', works: 'Saves settings — posting is not connected yet.',
+      fields: [{ k: 'pageId', label: 'Facebook page ID' }, { k: 'igId', label: 'Instagram business account ID' }, { k: 'pageToken', label: 'Page access token', type: 'secret' }] },
+    { id: 'bizprofile', name: 'Business Profiles', icon: 'store', desc: 'Your Google Business Profile — map listing and reviews.', works: 'The review link can be added to messages now. Managing posts and reviews is not connected yet.',
+      fields: [{ k: 'profileUrl', label: 'Google Maps / profile link' }, { k: 'reviewLink', label: 'Review link (“Write a review”)' }] },
+    { id: 'geodemand', name: 'Geo search demand', icon: 'trend', desc: 'Which items are in demand in which district — from your own sales and enquiries.', works: 'Works now — shown in the Daily Briefing.',
+      fields: [{ k: 'useSales', label: 'Use sales by district', type: 'check', def: true }, { k: 'useEnquiries', label: 'Use enquiries (items asked for)', type: 'check', def: true }, { k: 'days', label: 'Look back (days)', type: 'number', def: 30 }] },
+    { id: 'classes', name: 'Online classes', icon: 'user', desc: 'Training sessions for your staff or chemists.', works: 'Saves the meeting link and schedule.',
+      fields: [{ k: 'purpose', label: 'For whom / what' }, { k: 'meetLink', label: 'Zoom / Google Meet link' }, { k: 'schedule', label: 'Schedule (e.g. Every Saturday 4 pm)' }] },
+    { id: 'accounting', name: 'Sheets & accounting', icon: 'book', desc: 'Accounts in Tally Prime, Marg, Busy or Google Sheets.', works: 'Works now: GST summary CSV (Compliance agent) and ledger CSV. Direct Tally/Marg sync is not connected yet.',
+      fields: [{ k: 'target', label: 'Accounting software', type: 'select', options: [['tally', 'Tally Prime'], ['marg', 'Marg ERP'], ['busy', 'Busy'], ['sheets', 'Google Sheets'], ['none', 'None']], def: 'tally' }, { k: 'company', label: 'Company name in the software' }, { k: 'salesLedger', label: 'Sales ledger name', def: 'Sales GST' }, { k: 'purchaseLedger', label: 'Purchase ledger name', def: 'Purchase GST' }] },
+    { id: 'backups', name: 'Google & backups', icon: 'upload', desc: 'Keep a copy of your data safe.', works: 'Works now: backup reminders and download. Automatic Google Drive backup is not connected yet.',
+      fields: [{ k: 'remindDays', label: 'Remind me if no backup for (days)', type: 'number', def: 7 }, { k: 'driveFolder', label: 'Google Drive folder link (for later)' }] },
+    { id: 'demo', name: 'Data & demo mode', icon: 'grid', desc: 'Sample data, reset and starting fresh.', works: 'Works now — see the Data & backups tab.',
+      fields: [{ k: 'banner', label: 'Show a note while sample data is loaded', type: 'check', def: true }] },
+    { id: 'einvoice', name: 'GST e-invoice & e-way bill', icon: 'file', desc: 'Required once turnover is above ₹5 crore.', works: 'Saves settings — e-invoice generation is not connected yet.',
+      fields: [{ k: 'gsp', label: 'GSP / provider' }, { k: 'gstin', label: 'GSTIN' }, { k: 'username', label: 'API username' }, { k: 'password', label: 'API password', type: 'secret' }] },
+  ];
+  const intDef = id => INT_DEFS.find(d => d.id === id);
+  function intCfg(id) {
+    const all = db.settings.integrations || (db.settings.integrations = {});
+    const c = all[id] || (all[id] = { enabled: ['ai', 'geodemand', 'demo', 'backups', 'whatsapp', 'payments', 'email', 'sms'].includes(id) });
+    (intDef(id)?.fields || []).forEach(f => { if (c[f.k] === undefined && f.def !== undefined) c[f.k] = f.def; });
+    return c;
+  }
+  const aiModel = kind => intCfg('ai')[kind === 'bill' ? 'billModel' : 'agentModel'] || (kind === 'bill' ? 'claude-opus-5-5' : 'claude-haiku-5-5');
+  let secretMask = {};
+  async function loadSecretMask() { if (!SERVER) return; try { secretMask = await api('GET', 'api/secrets'); } catch { secretMask = {}; } }
+  const secretSet = (id, k) => (id === 'ai' && k === 'key') ? !!getApiKey() : !!secretMask[id]?.[k];
+  const fieldShown = (f, c) => !f.when || c.mode === f.when;
+  function intStatus(d) {
+    const c = intCfg(d.id);
+    if (!c.enabled) return ['off', 'Off'];
+    const missing = d.fields.filter(f => f.required && fieldShown(f, c) && !(f.type === 'secret' || f.type === 'browserkey' ? secretSet(d.id, f.k) : String(c[f.k] ?? '').trim()));
+    if (missing.length) return ['warn', 'Needs setup'];
+    if (c.lastTest && !c.lastTest.ok) return ['warn', 'Test failed'];
+    return ['ok', c.lastTest?.ok ? 'Connected' : 'On'];
+  }
+  const waCloudReady = () => SERVER && intCfg('whatsapp').enabled && intCfg('whatsapp').mode === 'cloud' && intStatus(intDef('whatsapp'))[0] === 'ok';
+  const rzpReady = () => SERVER && intCfg('payments').enabled && !!intCfg('payments').keyId && secretSet('payments', 'keySecret');
+  const fireHook = (event, data) => { if (!SERVER) return; const c = intCfg('custom'); if (!c.enabled || !(c.hooks || []).some(h => (h.events || []).includes(event))) return; api('POST', 'api/hooks/fire', { event, data }).catch(() => {}); };
+  const HOOK_EVENTS = [['sale.created', 'Sale bill created'], ['payment.received', 'Payment received'], ['return.approved', 'Sales return approved']];
+
+  // ----- Settings page -----
+  let settingsTab = 'business';
+  const SETTINGS_TABS = [['business', 'Business'], ['integrations', 'Integrations'], ['agents', 'Agents'], ['data', 'Data & backups']];
+  function intCard(d) {
+    const c = intCfg(d.id); const [cls, label] = intStatus(d);
+    const testable = d.test === 'ai' || (d.test === 'server' && SERVER && (d.id !== 'whatsapp' || c.mode === 'cloud') && (d.id !== 'payments' || c.keyId));
+    return `<div class="int-card">
+      <div class="int-head"><span class="sdot sdot-${cls}" title="${label}"></span><span class="int-ic">${icon(d.icon)}</span><div class="int-title">${esc(d.name)}</div><span class="small muted">${label}</span><span class="spacer"></span>
+        <label class="switch" title="On / off"><input type="checkbox" data-int-toggle="${d.id}" ${c.enabled ? 'checked' : ''}><span></span></label></div>
+      <div class="small">${esc(d.desc)}</div>
+      <div class="small muted int-works">${esc(d.works)}</div>
+      <div class="int-acts">${actBtn('int-config', d.id, 'Configure')}${testable ? actBtn('int-test', d.id, 'Test', 'ghost') : ''}${c.lastTest ? `<span class="small ${c.lastTest.ok ? 'ok-text' : 'bad-text'}">${esc(c.lastTest.msg)} · ${fmtDate(c.lastTest.at.slice(0, 10))}</span>` : ''}</div>
+    </div>`;
+  }
+  function customCard() {
+    const c = intCfg('custom'); c.hooks = c.hooks || [];
+    const st = !c.enabled ? ['off', 'Off'] : c.hooks.length ? ['ok', `${c.hooks.length} webhook${c.hooks.length === 1 ? '' : 's'}`] : ['warn', 'Add a webhook'];
+    return `<div class="int-card int-wide">
+      <div class="int-head"><span class="sdot sdot-${st[0]}"></span><span class="int-ic">${icon('plus')}</span><div class="int-title">Custom integrations</div><span class="small muted">${st[1]}</span><span class="spacer"></span>
+        <label class="switch"><input type="checkbox" data-int-toggle="custom" ${c.enabled ? 'checked' : ''}><span></span></label></div>
+      <div class="small">Connect any other service: when something happens here (a sale, a payment, an approved return), the server sends the details to the address you enter.</div>
+      <div class="small muted int-works">${SERVER ? 'Works now with the server.' : 'Needs the server (node server.js).'}</div>
+      ${c.hooks.length ? `<div class="hook-list">${c.hooks.map(h => `<div class="hook-row"><div><span class="strong">${esc(h.name)}</span><div class="small muted ellipsis">${esc(h.url)} · ${esc((h.events || []).map(e => HOOK_EVENTS.find(x => x[0] === e)?.[1] || e).join(', ') || 'no events')}</div></div>${actBtn('hook-edit', h.id, 'Edit', 'ghost')}${SERVER ? actBtn('hook-test', h.id, 'Test', 'ghost') : ''}${actBtn('hook-del', h.id, 'Delete', 'ghost danger')}</div>`).join('')}</div>` : ''}
+      <div class="int-acts">${actBtn('hook-edit', '', icon('plus') + 'Add webhook')}</div>
+    </div>`;
+  }
+  VIEWS.settings = () => {
+    const f = db.settings.firm, pr = db.settings.profile || {};
+    const tabs = `<div class="tabs settings-tabs">${SETTINGS_TABS.map(([k, l]) => `<button type="button" data-settings-tab="${k}" class="${settingsTab === k ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+    let body = '';
+    if (settingsTab === 'business') {
+      body = `<section class="card"><div class="card-head"><h2 class="card-title">Business</h2><div class="spacer"></div>${actBtn('open-profile', '', 'Profile & logo', 'ghost')}${actBtn('open-settings', '', 'Edit business details', 'primary')}</div>
+        <div class="card-body">${detailGrid([['Business name', esc(f.name || '—')], ['Tagline', esc(f.tagline ?? 'Pharma Suite')], ['Owner', esc([pr.name, pr.role].filter(Boolean).join(' · ') || '—')], ['Address', esc(addrText(f) || '—')], ['Phone', esc(f.phone || '—')], ['GSTIN', esc(f.gstin || '—')], ['Drug licences', esc(dlText(f) || '—')], ['FSSAI', esc(f.fssai || '—')], ['Bank details', esc(f.bank || '—')], ['Default CD %', dec(db.settings.defaultCd || 0)], ['Bill paper size', esc(PRINT_SIZES[printSize()].label)]])}</div></section>`;
+    } else if (settingsTab === 'integrations') {
+      const counts = { ok: 0, warn: 0, off: 0 }; INT_DEFS.forEach(d => counts[intStatus(d)[0]]++);
+      body = `<div class="small muted int-legend"><span class="sdot sdot-ok"></span> Working · <span class="sdot sdot-warn"></span> Needs attention · <span class="sdot sdot-off"></span> Off &nbsp;—&nbsp; ${counts.ok} working, ${counts.warn} need attention, ${counts.off} off${SERVER ? '' : ' · Keys for WhatsApp, Razorpay and other services can be saved only when the dashboard runs on the server (node server.js).'}</div>
+        <div class="int-grid">${INT_DEFS.map(intCard).join('')}${customCard()}</div>`;
+    } else if (settingsTab === 'agents') {
+      body = `<div class="int-grid">${Object.keys(AGENT_DEFS).map(id => agentCard(id, true)).join('')}</div>`;
+    } else {
+      const last = db.settings.lastBackup;
+      body = `<div class="grid g-2">
+        <section class="card"><div class="card-head"><h2 class="card-title">Backup</h2></div><div class="card-body">
+          <p class="small" style="margin-top:0">Last backup downloaded: <b>${last ? fmtDate(last) : 'never'}</b>${last && daysFrom(last) < -(intCfg('backups').remindDays || 7) ? ' <span class="pill warn">Due</span>' : ''}. ${SERVER ? 'Data is on the server — also copy the server’s data folder regularly.' : 'Data is only in this browser — download a backup regularly.'}</p>
+          <div class="toolbar">${actBtn('export-data', '', icon('upload') + 'Download backup (JSON)', 'primary')}<label class="btn sm">Restore backup<input type="file" id="restoreFile" accept="application/json,.json" hidden></label></div>
+          <div class="small muted" style="margin-top:8px">Bill copies and licence files are stored separately in this browser and are not in the backup.</div></div></section>
+        <section class="card"><div class="card-head"><h2 class="card-title">Sample data</h2>${db.settings.demo ? pill('Sample data loaded') : ''}</div><div class="card-body">
+          <p class="small" style="margin-top:0">The app starts with sample products, chemists and bills so you can try it. When you are ready, start with empty data — your business details, settings, integrations and the hospital directory are kept.</p>
+          <div class="toolbar">${actBtn('empty-data', '', 'Start with empty data', 'danger-solid')}${actBtn('reset-data', '', 'Reset to sample data', 'ghost danger')}</div></div></section>
+      </div>`;
+    }
+    return tabs + body;
+  };
+  ACTIONS['int-config'] = id => {
+    const d = intDef(id); if (!d) return; const c = intCfg(id);
+    const fieldHtml = f => {
+      const shown = fieldShown(f, c) ? '' : 'hidden';
+      const wrap = inner => `<div class="field ${f.type === 'textarea' ? 'full' : ''} ${shown}" ${f.when ? `data-when="${f.when}"` : ''}><label for="f-${f.k}">${esc(f.label)}${f.required ? ' *' : ''}</label>${inner}</div>`;
+      if (f.type === 'select') return wrap(`<select id="f-${f.k}" name="${f.k}" ${f.k === 'mode' ? 'data-int-mode' : ''}>${f.options.map(([v, l]) => `<option value="${esc(v)}" ${String(c[f.k]) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
+      if (f.type === 'check') return `<div class="field ${shown}" ${f.when ? `data-when="${f.when}"` : ''}><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="${f.k}" ${c[f.k] ? 'checked' : ''}> ${esc(f.label)}</label></div>`;
+      if (f.type === 'browserkey') return wrap(`<input id="f-${f.k}" name="${f.k}" type="password" autocomplete="off" placeholder="${getApiKey() ? 'Saved in this browser — type to replace' : 'sk-ant-…'}">${getApiKey() ? '<label class="check-line small"><input type="checkbox" name="clear_key"> Remove the saved key</label>' : ''}`);
+      if (f.type === 'secret') {
+        if (!SERVER) return wrap(`<input disabled placeholder="Start the server to save this safely"><div class="small muted">Keys are stored on the server only, never in the browser.</div>`);
+        const m = secretMask[id]?.[f.k];
+        return wrap(`<input id="f-${f.k}" name="${f.k}" type="password" autocomplete="new-password" placeholder="${m ? `Saved (…${esc(m.last4)}) — type to replace` : ''}">${m ? `<label class="check-line small"><input type="checkbox" name="clear_${f.k}"> Remove the saved value</label>` : ''}`);
+      }
+      return wrap(`<input id="f-${f.k}" name="${f.k}" type="${f.type === 'number' ? 'number' : 'text'}" value="${esc(c[f.k] ?? '')}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">`);
+    };
+    openModal({
+      title: d.name, size: 'lg', submitLabel: 'Save',
+      body: `<div class="small">${esc(d.desc)}</div><div class="small muted">${esc(d.works)}</div>
+        <label class="check-line"><input type="checkbox" name="enabled" ${c.enabled ? 'checked' : ''}> Turned on</label>
+        <div class="form-grid">${d.fields.map(fieldHtml).join('')}</div>`,
+      onSubmit: v => {
+        c.enabled = !!v.enabled;
+        const sec = {};
+        d.fields.forEach(f => {
+          if (f.type === 'browserkey') { if (v.clear_key) setApiKey(''); else if (String(v[f.k] || '').trim()) setApiKey(v[f.k].trim()); return; }
+          if (f.type === 'secret') { if (v['clear_' + f.k]) sec[f.k] = null; else if (String(v[f.k] || '').trim()) sec[f.k] = v[f.k].trim(); return; }
+          if (f.type === 'check') { c[f.k] = !!v[f.k]; return; }
+          if (v[f.k] !== undefined) c[f.k] = f.type === 'number' ? num(v[f.k]) : String(v[f.k]).trim();
+        });
+        delete c.lastTest;
+        const done = () => { closeModal(false); refresh(); toast(`${d.name} saved.`); };
+        if (SERVER && Object.keys(sec).length) { api('PUT', `api/secrets/${encodeURIComponent(id)}`, { fields: sec }).then(loadSecretMask).then(done).catch(err => toast(err.message)); return false; }
+        return `${d.name} saved.`;
+      },
+    });
+  };
+  ACTIONS['int-test'] = async id => {
+    const d = intDef(id); const c = intCfg(id);
+    toast(`Testing ${d.name}…`);
+    let res;
+    try {
+      if (id === 'ai') {
+        if (!getApiKey()) throw new Error('Enter the Anthropic API key first.');
+        const Anthropic = await loadSdk();
+        const client = new Anthropic({ apiKey: getApiKey(), dangerouslyAllowBrowser: true });
+        const m = await client.messages.create({ model: aiModel('agent'), max_tokens: 16, messages: [{ role: 'user', content: 'Reply with the word OK.' }] });
+        res = { ok: true, msg: `Key works (${m.model})` };
+      } else res = await api('POST', `api/int/test/${encodeURIComponent(id)}`, {});
+    } catch (err) { res = { ok: false, msg: err?.status === 401 ? 'The API key was not accepted.' : (err.message || 'Could not connect') }; }
+    c.lastTest = { ok: !!res.ok, msg: res.msg || (res.ok ? 'OK' : 'Failed'), at: new Date().toISOString() };
+    refresh(); toast(`${d.name}: ${c.lastTest.msg}`);
+  };
+  ACTIONS['hook-edit'] = hid => {
+    const c = intCfg('custom'); c.hooks = c.hooks || [];
+    const h = c.hooks.find(x => x.id === hid) || { name: '', url: '', header: 'Authorization', events: ['sale.created'] };
+    const m = secretMask['custom:' + h.id]?.key;
+    openModal({
+      title: hid ? `Edit ${h.name}` : 'Add webhook', size: 'lg', submitLabel: 'Save webhook',
+      body: `<div class="form-grid">
+          ${field('Name', 'name', { value: h.name, required: true, attrs: 'placeholder="e.g. My accounting sheet"' })}
+          ${field('Address (URL)', 'url', { type: 'url', value: h.url, required: true, attrs: 'placeholder="https://…"' })}
+          ${field('Header name for the key (optional)', 'header', { value: h.header || '' })}
+          ${SERVER ? field('Key / token (optional)', 'key', { type: 'password', value: '', attrs: `autocomplete="new-password" placeholder="${m ? `Saved (…${esc(m.last4)}) — type to replace` : ''}"` }) : '<div class="field"><label>Key / token</label><input disabled placeholder="Needs the server"></div>'}
+        </div>
+        <div class="field"><label>Send when</label>${HOOK_EVENTS.map(([k, l]) => `<label class="check-line"><input type="checkbox" name="ev_${k.replace('.', '_')}" ${(h.events || []).includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div>`,
+      onSubmit: v => {
+        if (!/^https:\/\//i.test(v.url.trim())) { toast('The address must start with https://'); return false; }
+        const rec = hid ? h : { id: uid() };
+        Object.assign(rec, { name: v.name.trim(), url: v.url.trim(), header: (v.header || '').trim(), events: HOOK_EVENTS.map(e => e[0]).filter(e => v['ev_' + e.replace('.', '_')]) });
+        if (!hid) c.hooks.push(rec);
+        if (SERVER && String(v.key || '').trim()) { api('PUT', `api/secrets/${encodeURIComponent('custom:' + rec.id)}`, { fields: { key: v.key.trim() } }).then(loadSecretMask).then(() => { closeModal(false); refresh(); toast('Webhook saved.'); }).catch(err => toast(err.message)); return false; }
+        return 'Webhook saved.';
+      },
+    });
+  };
+  ACTIONS['hook-del'] = hid => { const c = intCfg('custom'); const h = (c.hooks || []).find(x => x.id === hid); if (!h) return; confirmModal(`Delete ${h.name}?`, 'This cannot be undone.', 'Delete', () => { c.hooks = c.hooks.filter(x => x !== h); if (SERVER) api('PUT', `api/secrets/${encodeURIComponent('custom:' + h.id)}`, { fields: { key: null } }).then(loadSecretMask).catch(() => {}); return `${h.name} deleted.`; }); };
+  ACTIONS['hook-test'] = async hid => { save(); try { const r = await api('POST', `api/int/test/${encodeURIComponent('custom:' + hid)}`, {}); toast(r.msg || (r.ok ? 'OK' : 'Failed')); } catch (err) { toast(err.message); } };
+  ACTIONS['empty-data'] = () => confirmModal('Start with empty data?', 'All products, stock, chemists, customers, suppliers, bills, orders, returns, enquiries and doctors are removed. Your business details, profile, settings, integrations and the hospital directory are kept. Download a backup first if you may need the sample data. This cannot be undone.', 'Start empty', () => {
+    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [] });
+    db.settings.demo = false; entry = null; Object.keys(listState).forEach(k => delete listState[k]);
+    return 'Data cleared — you are starting fresh.';
+  });
+
+  // ----- Approvals inbox & sending -----
+  const approvalById = id => (db.approvals || []).find(a => a.id === id);
+  function upsertApproval(item) {
+    const ex = db.approvals.find(a => a.key === item.key && a.status === 'Pending');
+    if (ex) { Object.assign(ex, item, { id: ex.id, created: ex.created, status: 'Pending', updated: new Date().toISOString() }); return 0; }
+    db.approvals.unshift({ id: uid(), status: 'Pending', created: new Date().toISOString(), ...item });
+    return 1;
+  }
+  function closeStale(agent, keep) { db.approvals.forEach(a => { if (a.agent === agent && a.status === 'Pending' && !keep.has(a.key)) Object.assign(a, { status: 'Dismissed', done: new Date().toISOString(), note: 'No longer needed' }); }); }
+  function doneApproval(id, note) { const a = approvalById(id); if (a) Object.assign(a, { status: 'Done', done: new Date().toISOString(), note: note || '' }); }
+  function logAgent(agent, msg) { db.agentLog.unshift({ at: new Date().toISOString(), agent, msg }); if (db.agentLog.length > 300) db.agentLog.length = 300; }
+  const phone10 = v => String(v || '').replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '');
+  const fillTpl = (tpl, vars) => String(tpl || '').replace(/\{(\w+)\}/g, (m, k) => vars[k] ?? '').replace(/\n{3,}/g, '\n\n').trim();
+  const upiText = (amount, note) => { const p = intCfg('payments'); if (!p.enabled || !p.upiId) return ''; return `UPI: ${p.upiId}${amount ? ` · ₹${dec(amount)}` : ''}`; };
+  let sendState = null;
+  function openSendDialog(o) {
+    sendState = o;
+    const ph = phone10(o.phone);
+    openModal({
+      title: o.title || 'Send message', size: 'lg', submitLabel: 'Mark as sent',
+      body: `<div class="send-to"><div><div class="small muted">To</div><div class="strong">${esc(o.name || '')}</div><div class="small">${ph ? esc(ph) : '<span class="bad-text">No mobile number saved</span>'}${o.email ? ' · ' + esc(o.email) : ''}</div></div>
+          ${o.payAmount ? `<button type="button" class="btn sm" data-send="paylink">${icon('rupee')}${rzpReady() ? 'Add Razorpay payment link' : 'Add UPI details'}</button>` : ''}</div>
+        <div class="field"><label for="sendText">Message — you can edit it</label><textarea id="sendText" rows="9">${esc(o.text || '')}</textarea></div>
+        <div class="send-btns">
+          <button type="button" class="btn primary" data-send="wa" ${ph ? '' : 'disabled'}>${icon('chat')}${waCloudReady() ? 'Send on WhatsApp' : 'Open in WhatsApp'}</button>
+          <button type="button" class="btn" data-send="sms" ${ph ? '' : 'disabled'}>SMS</button>
+          <button type="button" class="btn" data-send="email" ${o.email ? '' : 'disabled'}>Email</button>
+          <button type="button" class="btn ghost" data-send="copy">Copy text</button>
+        </div>
+        <div class="small muted">${waCloudReady() ? 'WhatsApp sends directly through your Business API number.' : 'WhatsApp, SMS and email open with the message typed — you press send there.'} After sending, press “Mark as sent” so the agent does not remind again too soon.</div>`,
+      onSubmit: () => { markSent('manual'); return 'Marked as sent.'; },
+    });
+  }
+  function markSent(channel) {
+    const o = sendState; if (!o) return;
+    if (o.approvalId) doneApproval(o.approvalId, `Sent (${channel})`);
+    if (o.reminderKey) db.reminders.push({ date: todayIso, key: o.reminderKey, channel, amount: o.payAmount || 0 });
+    if (o.onSent) o.onSent(channel);
+    logAgent(o.agent || 'manual', `${o.title || 'Message'} → ${o.name || ''} (${channel})`);
+    save();
+  }
+  async function handleSend(kind) {
+    const o = sendState; if (!o) return;
+    const text = $('#sendText').value.trim(); const ph = phone10(o.phone);
+    const openLink = url => { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove(); };
+    if (kind === 'copy') { try { await navigator.clipboard.writeText(text); toast('Copied.'); } catch { toast('Could not copy — select the text and copy it.'); } return; }
+    if (kind === 'paylink') {
+      let add = '';
+      if (rzpReady()) { try { const r = await api('POST', 'api/int/razorpay/link', { amount: o.payAmount, description: o.payNote || 'Payment', name: o.name, phone: ph, ref: `${o.reminderKey || 'pay'}-${Date.now()}`.slice(0, 40) }); add = `Pay online: ${r.url}`; } catch (err) { toast(err.message); return; } }
+      else { add = upiText(o.payAmount); if (!add) { toast('Add your UPI ID in Settings → Integrations → Online payments.'); return; } }
+      $('#sendText').value = `${text}\n${add}`; return;
+    }
+    if (kind === 'wa') {
+      if (waCloudReady()) {
+        try { const w = intCfg('whatsapp'); await api('POST', 'api/int/whatsapp/send', o.template && w.template ? { to: ph, template: w.template, lang: w.lang, params: o.templateParams } : { to: ph, text }); markSent('WhatsApp API'); closeModal(false); refresh(); toast('Sent on WhatsApp.'); } catch (err) { toast(err.message); }
+        return;
+      }
+      openLink(`https://wa.me/91${ph}?text=${encodeURIComponent(text)}`); markSent('WhatsApp'); closeModal(false); refresh(); toast('WhatsApp opened with the message — press send there.'); return;
+    }
+    if (kind === 'sms') { openLink(`sms:+91${ph}?body=${encodeURIComponent(text)}`); markSent('SMS'); closeModal(false); refresh(); return; }
+    if (kind === 'email') { const e = intCfg('email'); openLink(`mailto:${encodeURIComponent(o.email)}?subject=${encodeURIComponent(o.subject || `${db.settings.firm.name}`)}&body=${encodeURIComponent(text + (e.fromName ? `\n\n${e.fromName}` : ''))}`); markSent('Email'); closeModal(false); refresh(); }
+  }
+
+  // ----- The five agents -----
+  const DEFAULT_REMINDER = 'Namaste {party} ji,\n{firm} ki taraf se yaad dilana tha: aapke {count} bill ({bills}) ka ₹{amount} baaki hai — sabse purana {days} din purana hai.\nKripya jaldi bhugtan kar dein.\n{pay}\nDhanyavaad';
+  const DEFAULT_ODREPLY = 'Namaste {party} ji, aapke order ke liye:\n{lines}\n— {firm}';
+  const AGENT_DEFS = {
+    orderdesk: { name: 'Order Desk', icon: 'chat', auto: false, desc: 'Paste an order message (WhatsApp, SMS, email or phone notes). AI matches the items to your products and stock, then you make a bill, save an enquiry or reply with availability.', defaults: { enabled: true, reply: DEFAULT_ODREPLY } },
+    stock: { name: 'Stock & Purchase', icon: 'box', auto: true, desc: 'Every morning: items running low (from sales and open enquiries/orders), near-expiry and slow-moving stock, and draft purchase orders grouped by supplier.', defaults: { enabled: true, auto: true, time: '09:00', coverDays: 30, lookbackDays: 60, nearExpiryDays: 90, slowDays: 90, useEnquiries: true } },
+    collections: { name: 'Collections', icon: 'rupee', auto: true, desc: 'Every day: overdue bills party by party, with a ready reminder (and UPI / payment link) for you to send.', defaults: { enabled: true, auto: true, time: '10:00', minAmount: 500, repeatDays: 7, includeCustomers: false, template: DEFAULT_REMINDER } },
+    compliance: { name: 'Compliance', icon: 'file', auto: true, desc: 'Every day: expired or expiring drug licences and FSSAI, missing licences, wrong GSTINs — for chemists, suppliers and your firm. Can block billing to a chemist with an expired licence. GST summary for returns.', defaults: { enabled: true, auto: true, time: '09:00', warnDays: 60, blockExpired: true, checkGstin: true } },
+    briefing: { name: 'Daily Briefing', icon: 'spark', auto: true, desc: 'Every morning: yesterday’s sales and collections, today’s follow-ups, approvals waiting, stock and licence alerts, and where demand is coming from.', defaults: { enabled: true, auto: true, time: '08:30' } },
+  };
+  function agentCfg(id) {
+    const all = db.settings.agents || (db.settings.agents = {});
+    const c = all[id] || (all[id] = {});
+    Object.entries(AGENT_DEFS[id].defaults).forEach(([k, v]) => { if (c[k] === undefined) c[k] = v; });
+    return c;
+  }
+  const AGENT_FIELDS = {
+    orderdesk: [{ k: 'reply', label: 'Availability reply — {party} {lines} {firm}', type: 'textarea' }],
+    stock: [{ k: 'coverDays', label: 'Keep stock for (days of sales)', type: 'number' }, { k: 'lookbackDays', label: 'Average sales over the last (days)', type: 'number' }, { k: 'nearExpiryDays', label: 'Near expiry within (days)', type: 'number' }, { k: 'slowDays', label: 'Slow-moving if not sold for (days)', type: 'number' }, { k: 'useEnquiries', label: 'Count open enquiries and chemist orders as demand', type: 'check' }],
+    collections: [{ k: 'minAmount', label: 'Remind only if overdue amount is at least (₹)', type: 'number' }, { k: 'repeatDays', label: 'Do not remind the same party again within (days)', type: 'number' }, { k: 'includeCustomers', label: 'Also remind walk-in customers', type: 'check' }, { k: 'template', label: 'Reminder message — {party} {amount} {count} {bills} {days} {firm} {pay}', type: 'textarea' }],
+    compliance: [{ k: 'warnDays', label: 'Warn this many days before a licence expires', type: 'number' }, { k: 'blockExpired', label: 'Stop billing a chemist whose drug licence has expired (you can override)', type: 'check' }, { k: 'checkGstin', label: 'Check GSTIN check digits', type: 'check' }],
+    briefing: [],
+  };
+  const agentName = id => AGENT_DEFS[id]?.name || (id === 'manual' ? 'You' : id);
+
+  // Stock & Purchase
+  function runStockAgent() {
+    const c = agentCfg('stock'); const since = addDays(todayIso, -c.lookbackDays);
+    const sold = {}; db.sales.filter(x => x.date >= since).forEach(x => x.lines.forEach(l => { sold[l.productId] = (sold[l.productId] || 0) + l.qty + (l.free || 0); }));
+    const asked = {};
+    if (c.useEnquiries) {
+      db.inquiries.filter(inqOpen).forEach(q => q.items.forEach(i => { if (i.productId) asked[i.productId] = (asked[i.productId] || 0) + i.qty; }));
+      chemOrders.filter(o => ['New', 'Accepted', 'Arranging'].includes(o.status)).forEach(o => o.lines.forEach(l => { if (l.productId) asked[l.productId] = (asked[l.productId] || 0) + l.qty; }));
+    }
+    const plines = purchaseLines();
+    const lastSup = pid => plines.find(x => x.productId === pid)?.supplierId || [...db.batches].reverse().find(b => b.productId === pid && b.supplierId)?.supplierId || '';
+    const groups = {};
+    db.products.forEach(p => {
+      const daily = (sold[p.id] || 0) / c.lookbackDays, have = sellableQty(p.id), want = asked[p.id] || 0;
+      const target = Math.ceil(daily * c.coverDays) + want;
+      const low = have < (p.reorder || 0);
+      if (have >= target && !low) return;
+      if (!daily && !want && !low) return;
+      const q = Math.max(target - have, low ? (p.reorder || 0) * 2 - have : 0, 1);
+      const sid = lastSup(p.id);
+      (groups[sid] = groups[sid] || []).push({ productId: p.id, qty: q, rate: p.pts, why: `${qty(have)} in stock · ~${qty(Math.round(daily * 30))}/month${want ? ` · ${qty(want)} asked` : ''}` });
+    });
+    const keep = new Set(); let made = 0;
+    Object.entries(groups).forEach(([sid, lines]) => {
+      const key = 'po:' + (sid || 'none'); keep.add(key);
+      made += upsertApproval({ agent: 'stock', kind: 'po', key, title: sid ? `Draft purchase order — ${sup(sid)?.name || sid} (${lines.length} item${lines.length === 1 ? '' : 's'})` : `Items to order — no supplier on record (${lines.length})`, detail: lines.slice(0, 5).map(l => `${prod(l.productId)?.name}: order ${qty(l.qty)} (${l.why})`).concat(lines.length > 5 ? [`…and ${lines.length - 5} more`] : []), payload: { supplierId: sid, lines: lines.map(({ productId, qty: q, rate }) => ({ productId, qty: q, rate })) } });
+    });
+    const near = db.batches.filter(b => avail(b) > 0 && expDays(b.expiry) <= c.nearExpiryDays);
+    if (near.length) {
+      keep.add('stock:expiry');
+      const exp = near.filter(b => expDays(b.expiry) < 0);
+      made += upsertApproval({ agent: 'stock', kind: 'info', key: 'stock:expiry', title: `${near.length} batch${near.length === 1 ? '' : 'es'} expired or expiring within ${c.nearExpiryDays} days`, detail: [`${exp.length} already expired · stock value ${money(near.reduce((a, b) => a + batchAmount(b), 0))}`, ...near.sort((a, b) => a.expiry.localeCompare(b.expiry)).slice(0, 4).map(b => `${prod(b.productId)?.name} · ${b.batch} · exp ${isoToExp(b.expiry)} · ${qty(avail(b))}`), 'Sell these first, or return them to the supplier for expiry credit.'], payload: { go: 'stock', tab: 'near' } });
+    }
+    const slowSince = addDays(todayIso, -c.slowDays);
+    const soldRecently = new Set(); db.sales.filter(x => x.date >= slowSince).forEach(x => x.lines.forEach(l => soldRecently.add(l.productId)));
+    const slow = db.products.filter(p => sellableQty(p.id) > 0 && !soldRecently.has(p.id));
+    if (slow.length) {
+      keep.add('stock:slow');
+      made += upsertApproval({ agent: 'stock', kind: 'info', key: 'stock:slow', title: `${slow.length} item${slow.length === 1 ? '' : 's'} not sold in ${c.slowDays} days`, detail: slow.slice(0, 5).map(p => `${p.name} · ${qty(sellableQty(p.id))} in stock`), payload: { go: 'stock' } });
+    }
+    closeStale('stock', keep);
+    return { made, summary: `${Object.keys(groups).length} purchase order draft(s), ${near.length} near-expiry batch(es), ${slow.length} slow item(s)` };
+  }
+  // Collections
+  function runCollectionsAgent() {
+    const c = agentCfg('collections'); const parties = {};
+    db.sales.forEach(x => {
+      if (balance(x) <= 0.5 || saleStatus(x) !== 'Overdue') return;
+      const isChem = x.party.type === 'chemist'; if (!isChem && !c.includeCustomers) return;
+      const key = isChem ? 'chemist:' + x.party.chemistId : 'customer:' + x.party.customerId;
+      (parties[key] = parties[key] || []).push(x);
+    });
+    const keep = new Set(); let made = 0, skipped = 0;
+    Object.entries(parties).forEach(([key, bills]) => {
+      const [type, id] = key.split(':');
+      const amount = round2(bills.reduce((a, x) => a + balance(x), 0));
+      const net = partyDue(db.sales.filter(x => type === 'chemist' ? x.party.chemistId === id : x.party.customerId === id));
+      const due = Math.min(amount, net);
+      if (due < c.minAmount) return;
+      const recent = db.reminders.some(r => r.key === key && r.date >= addDays(todayIso, -c.repeatDays));
+      if (recent) { skipped++; return; }
+      const name = type === 'chemist' ? chem(id)?.name : custById(id)?.name;
+      const days = Math.max(...bills.map(x => -daysFrom(x.date)));
+      keep.add('rem:' + key);
+      made += upsertApproval({ agent: 'collections', kind: 'reminder', key: 'rem:' + key, title: `Payment reminder — ${name}: ${money(due)} overdue`, detail: [`${bills.length} bill${bills.length === 1 ? '' : 's'}: ${bills.map(x => x.no).join(', ')}`, `Oldest ${days} days · total balance with returns ${money(net)}`], payload: { type, id, amount: due, bills: bills.map(x => x.no), days } });
+    });
+    closeStale('collections', keep);
+    return { made, summary: `${keep.size} part${keep.size === 1 ? 'y' : 'ies'} to remind${skipped ? `, ${skipped} reminded recently` : ''}` };
+  }
+  // GSTIN check digit (mod-36 checksum)
+  function gstinOk(g) {
+    g = String(g || '').toUpperCase().trim();
+    if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g)) return false;
+    const cs = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'; let sum = 0;
+    for (let i = 0; i < 14; i++) { const v = cs.indexOf(g[i]) * (i % 2 + 1); sum += Math.floor(v / 36) + (v % 36); }
+    return cs[(36 - (sum % 36)) % 36] === g[14];
+  }
+  // Compliance
+  function runComplianceAgent() {
+    const c = agentCfg('compliance'); const keep = new Set(); let made = 0, issues = 0;
+    const check = (kind, x, label, act) => {
+      if (!x) return;
+      const out = [];
+      const lic = (v, what) => { if (!v) return; const d = daysFrom(v); if (d < 0) out.push(`${what} expired on ${fmtDate(v)}`); else if (d <= c.warnDays) out.push(`${what} expires on ${fmtDate(v)} (${d} days)`); };
+      lic(x.dlValid, 'Drug licence'); lic(x.fssaiValid, 'FSSAI licence');
+      if (kind === 'chemist' && x.status === 'Active' && !x.dl1) out.push('No drug licence number saved');
+      if (kind !== 'customer' && !x.gstin && kind !== 'firm') out.push('No GSTIN saved (billed as unregistered)');
+      if (c.checkGstin && x.gstin && !gstinOk(x.gstin)) out.push(`GSTIN ${x.gstin} looks wrong (format or check digit)`);
+      if (!out.length) return;
+      issues += out.length;
+      const key = `lic:${kind}:${x.id || 'firm'}`; keep.add(key);
+      made += upsertApproval({ agent: 'compliance', kind: 'info', key, title: `${label} — ${out.length} issue${out.length === 1 ? '' : 's'}`, detail: out, payload: { act } });
+    };
+    check('firm', { ...db.settings.firm, id: 'firm' }, `${db.settings.firm.name || 'Your firm'} (your firm)`, ['open-settings', '']);
+    db.chemists.filter(x => x.status !== 'On hold').forEach(x => check('chemist', x, `Chemist ${x.name}`, ['view-chemist', x.id]));
+    db.suppliers.forEach(x => check('supplier', x, `Supplier ${x.name}`, ['edit-supplier', x.id]));
+    closeStale('compliance', keep);
+    return { made, summary: `${keep.size} part${keep.size === 1 ? 'y' : 'ies'} with ${issues} licence/GSTIN issue${issues === 1 ? '' : 's'}` };
+  }
+  // Daily briefing
+  function briefingLines() {
+    const yday = addDays(todayIso, -1);
+    const sY = db.sales.filter(x => x.date === yday);
+    const payY = db.sales.flatMap(x => payList(x).filter(p => p.date === yday)).reduce((a, p) => a + p.amount, 0);
+    const recv = db.chemists.reduce((a, c) => a + Math.max(0, chemOutstanding(c.id)), 0);
+    const overdue = db.sales.filter(x => saleStatus(x) === 'Overdue');
+    const pend = db.approvals.filter(a => a.status === 'Pending' && a.kind !== 'briefing');
+    const g = intCfg('geodemand'); const since = addDays(todayIso, -(g.days || 30));
+    const byDist = {};
+    if (g.enabled && g.useSales !== false) db.sales.filter(x => x.date >= since).forEach(x => { const p = x.party.type === 'chemist' ? chem(x.party.chemistId) : custById(x.party.customerId); const d = p?.district || 'Unknown'; byDist[d] = (byDist[d] || 0) + x.total; });
+    const askedOut = {};
+    if (g.enabled && g.useEnquiries !== false) db.inquiries.filter(q => q.date >= since).forEach(q => q.items.forEach(i => { if (!i.productId || sellableQty(i.productId) <= 0) askedOut[i.name] = (askedOut[i.name] || 0) + i.qty; }));
+    const lastBk = db.settings.lastBackup, bkDays = intCfg('backups').remindDays || 7;
+    const L = [
+      `Good morning! ${db.settings.firm.name} — ${fmtDate(todayIso)}`,
+      `Yesterday: ${sY.length} bill${sY.length === 1 ? '' : 's'} for ${money(sY.reduce((a, x) => a + x.total, 0))}, ${money(payY)} collected.`,
+      `To collect: ${money(recv)} from chemists — ${overdue.length} overdue bill${overdue.length === 1 ? '' : 's'} worth ${money(overdue.reduce((a, x) => a + balance(x), 0))}.`,
+      `Waiting for you: ${pend.length} approval${pend.length === 1 ? '' : 's'}${pend.length ? ` (${Object.entries(pend.reduce((m, a) => (m[agentName(a.agent)] = (m[agentName(a.agent)] || 0) + 1, m), {})).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}.`,
+      `Follow-ups due: ${db.inquiries.filter(inqDue).length} enquir${db.inquiries.filter(inqDue).length === 1 ? 'y' : 'ies'} · return requests: ${db.returns.filter(r => r.status === 'Requested').length} · chemist orders new: ${chemOrders.filter(o => o.status === 'New').length}.`,
+      `Stock: ${lowStock().length} below reorder level, ${db.batches.filter(b => avail(b) > 0 && expDays(b.expiry) <= 90).length} batches expiring within 90 days.`,
+    ];
+    const top = Object.entries(byDist).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    if (top.length) L.push(`Demand by district (last ${g.days || 30} days): ${top.map(([d, v]) => `${d} ${money(v)}`).join(', ')}.`);
+    const miss = Object.entries(askedOut).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    if (miss.length) L.push(`Asked for but not in stock: ${miss.map(([n, q]) => `${n} (${q})`).join(', ')}.`);
+    if (!lastBk || daysFrom(lastBk) < -bkDays) L.push(`Backup: ${lastBk ? `last one ${-daysFrom(lastBk)} days ago` : 'never downloaded'} — please download a backup (Settings → Data & backups).`);
+    return L;
+  }
+  function runBriefingAgent() {
+    const L = briefingLines();
+    db.approvals.forEach(a => { if (a.kind === 'briefing' && a.status === 'Pending' && a.key !== 'brief:' + todayIso) Object.assign(a, { status: 'Done', done: new Date().toISOString(), note: 'Older briefing' }); });
+    const made = upsertApproval({ agent: 'briefing', kind: 'briefing', key: 'brief:' + todayIso, title: `Daily briefing — ${fmtDate(todayIso)}`, detail: L.slice(1), payload: { lines: L } });
+    return { made, summary: 'Briefing ready' };
+  }
+  const AGENT_RUN = { stock: runStockAgent, collections: runCollectionsAgent, compliance: runComplianceAgent, briefing: runBriefingAgent };
+  function runAgent(id, auto) {
+    const c = agentCfg(id); const r = AGENT_RUN[id]();
+    Object.assign(c, { lastRun: todayIso, lastRunAt: new Date().toISOString(), lastResult: r.summary });
+    logAgent(id, `${auto ? 'Daily run' : 'Run now'}: ${r.summary}${r.made ? ` · ${r.made} new item${r.made === 1 ? '' : 's'}` : ''}`);
+    return r.made;
+  }
+  function agentsTick() {
+    if (!db) return;
+    const hhmm = new Date().toTimeString().slice(0, 5); let made = 0, ran = 0;
+    ['compliance', 'stock', 'collections', 'briefing'].forEach(id => { const c = agentCfg(id); if (!c.enabled || !c.auto || c.lastRun === todayIso || hhmm < (c.time || '09:00')) return; made += runAgent(id, true); ran++; });
+    if (!ran) return;
+    save();
+    if (!$('#modalBack').classList.contains('open') && !document.activeElement?.matches('input, select, textarea')) render(); else renderNav(route);
+    if (made) toast(`Agents added ${made} item${made === 1 ? '' : 's'} to Approvals.`);
+  }
+
+  // Order Desk (AI)
+  const OD_SCHEMA = {
+    type: 'object', additionalProperties: false, required: ['sender', 'lines', 'notes'],
+    properties: {
+      sender: { type: 'string', description: 'Shop or person name if the message says who it is from, else empty' },
+      lines: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['text', 'product_id', 'qty', 'free'], properties: { text: { type: 'string' }, product_id: { type: 'string' }, qty: { type: 'number' }, free: { type: 'number' } } } },
+      notes: { type: 'string' },
+    },
+  };
+  let odState = null;
+  ACTIONS['orderdesk'] = () => {
+    odState = null;
+    const partyOpts = `<option value="">Let AI find out from the message</option><optgroup label="Chemists">${db.chemists.map(c => [c.id, c.name]).sort(byName).map(([v, l]) => `<option value="chemist|${esc(v)}">${esc(l)}</option>`).join('')}</optgroup><optgroup label="Customers">${(db.customers || []).map(c => [c.id, c.name]).sort(byName).map(([v, l]) => `<option value="customer|${esc(v)}">${esc(l)}</option>`).join('')}</optgroup>`;
+    openModal({
+      title: 'Order Desk — read an order message', size: 'xl', submitLabel: 'Read with AI',
+      body: `<div class="form-grid">
+          <div class="field full"><label for="odText">Paste the order message *</label><textarea id="odText" name="odText" rows="6" placeholder="e.g. Sharma Medicos: Dolo 650 - 10 strip, Pan 40 5 box, Moisturex lotion 2"></textarea></div>
+          <div class="field"><label for="odParty">From</label><select id="odParty" name="odParty">${partyOpts}</select></div>
+        </div>
+        <div id="odResult"></div>
+        <div class="small muted">${getApiKey() ? `Uses ${esc(MODEL_OPTS.find(m => m[0] === aiModel('agent'))?.[1] || aiModel('agent'))}. The message and your product list are sent to Anthropic to be read.` : 'Needs the Anthropic API key — Settings → Integrations → AI providers.'}</div>`,
+      onSubmit: v => {
+        const text = String(v.odText || '').trim();
+        if (!text) { toast('Paste the order message first.'); return false; }
+        if (!getApiKey()) { toast('Add the Anthropic API key in Settings → Integrations → AI providers.'); return false; }
+        readOrderMessage(text, v.odParty || ''); return false;
+      },
+    });
+  };
+  async function readOrderMessage(text, partyPick) {
+    const btn = $('#modalFoot [data-submit]'); if (btn) { btn.disabled = true; btn.textContent = 'Reading…'; }
+    const list = db.products.map(p => `${p.id} | ${p.name} | ${p.pack || ''} | ${company(p.companyId)?.name || ''}`).join('\n');
+    const prompt = `You read an order message sent to a pharmaceutical distributor in India by a chemist or a customer. Messages are short and may be in Hindi, English or Hinglish, with abbreviations such as tab, cap, syp, inj, strip, box, pcs.
+
+Product list (ID | name | pack | company):
+${list}
+
+For each item ordered, return:
+- text: the item exactly as written
+- product_id: the ID of the matching product from the list, only when you are confident. Strength and form must match (for example 500 mg and 650 mg are different products). Use an empty string when there is no confident match.
+- qty: the quantity ordered (use 1 if none is written); free: free quantity if the message asks for it, else 0.
+Ignore greetings and signatures. Put anything else useful (delivery time, urgency, scheme or rate asked) in notes, briefly.
+
+Message:
+"""${text}"""`;
+    try {
+      const x = await callClaudeJson([], prompt, OD_SCHEMA, 2000, aiModel('agent'));
+      let party = null;
+      if (partyPick) { const [type, id] = partyPick.split('|'); party = { type, id }; }
+      else if (x.sender) {
+        const s = norm(x.sender);
+        const c = db.chemists.find(c => norm(c.name) === s || norm(c.name).includes(s) || s.includes(norm(c.name)));
+        const cu = !c && (db.customers || []).find(c => norm(c.name) === s);
+        if (c) party = { type: 'chemist', id: c.id }; else if (cu) party = { type: 'customer', id: cu.id };
+      }
+      odState = { text, sender: x.sender || '', notes: x.notes || '', party, lines: (x.lines || []).map(l => ({ text: l.text, productId: prod(l.product_id) ? l.product_id : '', qty: Math.max(1, Math.round(num(l.qty)) || 1), free: Math.max(0, Math.round(num(l.free))) })) };
+      logAgent('orderdesk', `Read an order${x.sender ? ` from ${x.sender}` : ''}: ${odState.lines.length} item(s), ${odState.lines.filter(l => l.productId).length} matched`);
+      save(); renderOdResult();
+    } catch (err) { toast(err.message || 'Could not read the message.'); }
+    finally { if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = 'Read again'; } }
+  }
+  function renderOdResult() {
+    const box = $('#odResult'); if (!box || !odState) return;
+    const opts = sel => `<option value="">— not matched —</option>${[...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} · ${esc(p.pack || '')}</option>`).join('')}`;
+    const pv = odState.party ? `${odState.party.type}|${odState.party.id}` : '';
+    if (pv) $('#odParty').value = pv;
+    box.innerHTML = `<div class="od-result">
+      <div class="small">${odState.sender ? `Message says it is from <b>${esc(odState.sender)}</b>. ` : ''}${odState.party ? '' : '<span class="bad-text">Choose who it is from above before making a bill.</span>'}${odState.notes ? ` Notes: ${esc(odState.notes)}` : ''}</div>
+      <div class="lines"><div class="table-wrap"><table><thead><tr><th>Written as</th><th>Product</th><th>Qty</th><th>Free</th><th class="r">In stock</th></tr></thead>
+        <tbody>${odState.lines.map((l, i) => { const have = l.productId ? sellableQty(l.productId) : 0; return `<tr data-odl="${i}"><td>${esc(l.text)}</td><td><select data-od="productId">${opts(l.productId)}</select></td><td><input data-od="qty" type="number" min="1" value="${l.qty}" style="width:70px"></td><td><input data-od="free" type="number" min="0" value="${l.free || 0}" style="width:60px"></td><td class="r">${l.productId ? (have >= l.qty ? pill('In stock') : have > 0 ? pill(`Short ${l.qty - have}`) : pill('Not in stock')) : '—'}</td></tr>`; }).join('') || '<tr><td colspan="5" class="muted">No items found in the message.</td></tr>'}</tbody></table></div></div>
+      <div class="toolbar"><button type="button" class="btn primary" data-od-act="bill">Make sale bill</button><button type="button" class="btn" data-od-act="enquiry">Save as enquiry</button><button type="button" class="btn" data-od-act="reply">Reply with availability</button></div>
+    </div>`;
+  }
+  function odParty() { const v = $('#odParty')?.value || ''; if (!v) return null; const [type, id] = v.split('|'); return { type, id }; }
+  function odAction(kind) {
+    if (!odState) return;
+    const party = odParty();
+    if (!party) { toast('Choose who the order is from.'); return; }
+    const c = party.type === 'chemist' ? chem(party.id) : null, cu = party.type === 'customer' ? custById(party.id) : null;
+    if (kind === 'bill') {
+      if (c && c.status !== 'Active') { toast(`${c.name} is ${c.status}. Activate them before billing.`); return; }
+      const lines = odState.lines.filter(l => l.productId && sellableQty(l.productId) > 0).map(l => { const p = prod(l.productId), b = sellableBatches(p.id)[0]; return { productId: p.id, batchId: b.id, qty: Math.min(l.qty, avail(b)), free: Math.min(l.free || 0, Math.max(0, avail(b) - l.qty)), rate: c ? p.ptr : round2(p.mrp / (1 + p.gst / 100)), cd: c ? c.cd || 0 : 0, td: c ? c.td || 0 : 0 }; });
+      if (!lines.length) { toast('None of the matched items are in stock. Save it as an enquiry instead.'); return; }
+      const left = odState.lines.length - lines.length;
+      closeModal(false);
+      saleModal(null, c ? { chemistId: c.id, lines } : { customerId: cu.id, lines });
+      logAgent('orderdesk', `Bill drafted for ${c?.name || cu?.name}`);
+      if (left) toast(`${left} item(s) not matched or not in stock were left out.`);
+      return;
+    }
+    if (kind === 'enquiry') {
+      const no = nextNum('ENQ-', db.inquiries, 1001);
+      db.inquiries.push({ no, created: todayIso, party: c ? { type: 'chemist', chemistId: c.id } : { type: 'customer', customerId: cu.id }, date: todayIso, source: 'WhatsApp', followUp: addDays(todayIso, 1), status: 'Open', items: odState.lines.map(l => ({ productId: l.productId, name: l.productId ? prod(l.productId).name : l.text, qty: l.qty, note: l.productId ? '' : 'Not matched' })), notes: [odState.notes, `Message: ${odState.text}`].filter(Boolean).join('\n').slice(0, 1000) });
+      logAgent('orderdesk', `Enquiry ${no} saved for ${c?.name || cu?.name}`);
+      closeModal(false); refresh(); toast(`${no} saved.`); return;
+    }
+    if (kind === 'reply') {
+      const lines = odState.lines.map(l => { if (!l.productId) return `• ${l.text}: we will check and confirm`; const p = prod(l.productId), have = sellableQty(p.id); return `• ${p.name}: ${have >= l.qty ? 'available' : have > 0 ? `${have} available now, rest in a few days` : 'not in stock — we will arrange'}`; }).join('\n');
+      closeModal(false);
+      openSendDialog({ agent: 'orderdesk', title: 'Reply with availability', name: c?.name || cu?.name, phone: c?.phone || cu?.phone, email: c?.email || cu?.email, text: fillTpl(agentCfg('orderdesk').reply, { party: c?.owner || c?.name || cu?.name, lines, firm: db.settings.firm.name }) });
+    }
+  }
+
+  // Agents page
+  function agentCard(id, inSettings) {
+    const d = AGENT_DEFS[id], c = agentCfg(id);
+    const pend = (db.approvals || []).filter(a => a.agent === id && a.status === 'Pending').length;
+    const st = !c.enabled ? ['off', 'Off'] : ['ok', d.auto ? (c.auto ? `Daily at ${c.time}` : 'Manual only') : 'On demand'];
+    return `<div class="int-card agent-card">
+      <div class="int-head"><span class="sdot sdot-${st[0]}"></span><span class="int-ic">${icon(d.icon)}</span><div class="int-title">${esc(d.name)}</div><span class="small muted">${st[1]}</span><span class="spacer"></span>
+        <label class="switch" title="On / off"><input type="checkbox" data-agent-toggle="${id}" ${c.enabled ? 'checked' : ''}><span></span></label></div>
+      <div class="small">${esc(d.desc)}</div>
+      <div class="small muted int-works">${c.lastRunAt ? `Last run ${new Date(c.lastRunAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} — ${esc(c.lastResult || '')}` : id === 'orderdesk' ? (getApiKey() ? 'Ready.' : 'Needs the Anthropic API key (Integrations → AI providers).') : 'Not run yet.'}${pend ? ` · <b>${pend} waiting</b>` : ''}</div>
+      <div class="int-acts">${id === 'orderdesk' ? actBtn('orderdesk', '', icon('chat') + 'Read an order', 'primary') : actBtn('agent-run', id, 'Run now', inSettings ? '' : 'primary')}${actBtn('agent-config', id, 'Settings', 'ghost')}${id === 'compliance' ? actBtn('gst-export', '', 'GST summary CSV', 'ghost') : ''}</div>
+    </div>`;
+  }
+  VIEWS.agents = () => {
+    const ap = db.approvals || [];
+    const pend = ap.filter(a => a.status === 'Pending');
+    const brief = pend.find(a => a.kind === 'briefing');
+    return `
+      <div class="grid g-4">
+        ${kpi('Waiting for you', qty(pend.filter(a => a.kind !== 'briefing').length), 'Approvals and alerts')}
+        ${kpi('Agents on', `${Object.keys(AGENT_DEFS).filter(id => agentCfg(id).enabled).length} / ${Object.keys(AGENT_DEFS).length}`, 'Daily agents run when the dashboard is open')}
+        ${kpi('Reminders sent (7 days)', qty((db.reminders || []).filter(r => r.date >= addDays(todayIso, -7)).length), 'By WhatsApp, SMS or email')}
+        ${kpi('Done this week', qty(ap.filter(a => a.status === 'Done' && (a.done || '') >= addDays(todayIso, -7)).length), 'Approved and acted on')}
+      </div>
+      ${brief ? `<section class="card brief-card"><div class="card-head"><h2 class="card-title">${esc(brief.title)}</h2><div class="spacer"></div>${actBtn('appr-open', brief.id, 'Share', 'ghost')}${actBtn('appr-done', brief.id, 'Mark read', 'ghost')}</div><div class="card-body"><ul class="brief-list">${brief.detail.map(l => `<li>${esc(l)}</li>`).join('')}</ul></div></section>` : ''}
+      ${useList({
+        key: 'approvals', title: 'Approvals',
+        actions: actBtn('agents-run-all', '', 'Run all agents now', 'ghost'),
+        tabs: [{ id: 'pend', label: 'Waiting', filter: a => a.status === 'Pending' && a.kind !== 'briefing' }, { id: 'Done', label: 'Done', filter: a => a.status === 'Done' }, { id: 'Dismissed', label: 'Dismissed', filter: a => a.status === 'Dismissed' }, { id: 'all', label: 'All' }],
+        filters: [{ k: 'agent', label: 'Agent', options: Object.entries(AGENT_DEFS).map(([k, v]) => [k, v.name]), test: (a, v) => a.agent === v }],
+        rows: () => [...(db.approvals || [])].sort((a, b) => (b.updated || b.created).localeCompare(a.updated || a.created)),
+        text: a => [a.title, ...(a.detail || [])].join(' '),
+        empty: 'Nothing waiting. Agents put purchase orders, payment reminders and alerts here for you to approve.',
+        columns: [
+          { h: 'Agent', c: a => `<span class="agent-tag">${icon(AGENT_DEFS[a.agent]?.icon || 'spark')}${esc(agentName(a.agent))}</span>` },
+          { h: 'Item', c: a => `<span class="strong">${esc(a.title)}</span>${(a.detail || []).slice(0, 3).map(l => `<div class="small muted">${esc(l)}</div>`).join('')}${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}` },
+          { h: 'When', c: a => `<span class="small">${new Date(a.updated || a.created).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>` },
+          { h: 'Status', c: a => pill(a.status === 'Pending' ? 'Waiting' : a.status) },
+          { h: '', c: a => a.status !== 'Pending' ? '' : rowActs(actBtn('appr-open', a.id, a.kind === 'po' ? 'Review PO' : a.kind === 'reminder' ? 'Send reminder' : a.kind === 'briefing' ? 'Share' : 'Open', 'primary'), a.kind === 'info' ? actBtn('appr-done', a.id, 'Done', 'ghost') : '', actBtn('appr-dismiss', a.id, 'Dismiss', 'ghost')) },
+        ],
+      })}
+      <div class="int-grid">${Object.keys(AGENT_DEFS).map(id => agentCard(id, false)).join('')}</div>
+      <section class="card"><div class="card-head"><h2 class="card-title">Activity</h2><span class="hint">What the agents and you did</span></div>
+        <div class="alert-list">${(db.agentLog || []).slice(0, 25).map(l => `<div class="alert-item"><span class="agent-tag">${icon(AGENT_DEFS[l.agent]?.icon || 'user')}${esc(agentName(l.agent))}</span><div style="flex:1;min-width:0" class="small">${esc(l.msg)}</div><span class="small muted">${new Date(l.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></div>`).join('') || '<div class="empty">No activity yet.</div>'}</div></section>`;
+  };
+  ACTIONS['agent-run'] = id => { if (!AGENT_RUN[id]) return; const made = runAgent(id, false); refresh(); toast(`${agentName(id)}: ${agentCfg(id).lastResult}${made ? ` — ${made} new` : ''}.`); };
+  ACTIONS['agents-run-all'] = () => { let made = 0; ['compliance', 'stock', 'collections', 'briefing'].forEach(id => { if (agentCfg(id).enabled) made += runAgent(id, false); }); refresh(); toast(`Agents ran — ${made} new item${made === 1 ? '' : 's'}.`); };
+  ACTIONS['agent-config'] = id => {
+    const d = AGENT_DEFS[id], c = agentCfg(id);
+    const fs = AGENT_FIELDS[id] || [];
+    openModal({
+      title: `${d.name} — settings`, size: 'lg', submitLabel: 'Save',
+      body: `<div class="small">${esc(d.desc)}</div>
+        <div class="form-grid">
+          <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="enabled" ${c.enabled ? 'checked' : ''}> Agent turned on</label></div>
+          ${d.auto ? `<div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="auto" ${c.auto ? 'checked' : ''}> Run by itself every day</label></div>${field('Run after (time)', 'time', { type: 'time', value: c.time || '09:00' })}` : ''}
+          ${fs.map(f => f.type === 'check' ? `<div class="field full"><label class="check-line"><input type="checkbox" name="${f.k}" ${c[f.k] ? 'checked' : ''}> ${esc(f.label)}</label></div>` : f.type === 'textarea' ? `<div class="field full"><label for="f-${f.k}">${esc(f.label)}</label><textarea id="f-${f.k}" name="${f.k}" rows="6">${esc(c[f.k] || '')}</textarea></div>` : field(f.label, f.k, { type: 'number', value: c[f.k], attrs: 'min="0" step="1"' })).join('')}
+        </div>
+        ${d.auto ? '<div class="small muted">Daily agents run the first time the dashboard is open after this time each day. They only prepare items for you to approve — nothing is sent or ordered without you.</div>' : ''}`,
+      onSubmit: v => {
+        c.enabled = !!v.enabled; if (d.auto) { c.auto = !!v.auto; c.time = v.time || '09:00'; }
+        fs.forEach(f => { c[f.k] = f.type === 'check' ? !!v[f.k] : f.type === 'number' ? Math.max(0, num(v[f.k])) : String(v[f.k] || '').trim() || d.defaults[f.k]; });
+        return `${d.name} settings saved.`;
+      },
+    });
+  };
+  ACTIONS['appr-dismiss'] = id => { const a = approvalById(id); if (!a) return; Object.assign(a, { status: 'Dismissed', done: new Date().toISOString() }); logAgent('manual', `Dismissed: ${a.title}`); refresh(); };
+  ACTIONS['appr-done'] = id => { const a = approvalById(id); if (!a) return; doneApproval(id, 'Seen'); refresh(); };
+  ACTIONS['appr-open'] = id => {
+    const a = approvalById(id); if (!a) return;
+    if (a.kind === 'po') { poModal(null, { supplierId: a.payload.supplierId, lines: a.payload.lines.filter(l => prod(l.productId)), approvalId: a.id }); return; }
+    if (a.kind === 'reminder') {
+      const { type, id: pid, amount, bills, days } = a.payload;
+      const p = type === 'chemist' ? chem(pid) : custById(pid); if (!p) { toast('This party no longer exists.'); return; }
+      const c = agentCfg('collections');
+      openSendDialog({ agent: 'collections', approvalId: a.id, reminderKey: `${type}:${pid}`, title: `Payment reminder — ${p.name}`, name: p.name, phone: p.phone, email: p.email, payAmount: amount, payNote: `Bills ${bills.join(', ')}`, subject: `Payment reminder — ${db.settings.firm.name}`, template: true, templateParams: [p.owner || p.name, money(amount), bills.join(', ')],
+        text: fillTpl(c.template, { party: p.owner || p.name, amount: dec(amount), count: bills.length, bills: bills.join(', '), days, firm: db.settings.firm.name, pay: upiText(amount) }) });
+      return;
+    }
+    if (a.kind === 'briefing') {
+      const pr = db.settings.profile || {};
+      openSendDialog({ agent: 'briefing', approvalId: a.id, title: 'Share the daily briefing', name: pr.name || 'Me', phone: pr.phone || intCfg('whatsapp').businessNumber, email: pr.email, subject: `Daily briefing — ${fmtDate(todayIso)}`, text: a.payload.lines.join('\n') });
+      return;
+    }
+    if (a.payload?.act) { const [act, aid] = a.payload.act; ACTIONS[act]?.(aid); return; }
+    if (a.payload?.go) { if (a.payload.tab && listState[a.payload.go]) listState[a.payload.go].tab = a.payload.tab; location.hash = a.payload.go; }
+  };
+
+  // GST summary for the monthly return (GSTR-1 working)
+  const plainNum = v => round2(v).toFixed(2); // CSV: no thousands separators
+  ACTIONS['gst-export'] = () => {
+    const prev = new Date(TODAY.getFullYear(), TODAY.getMonth() - 1, 1); const def = iso(prev).slice(0, 7);
+    openModal({
+      title: 'GST summary for a month', size: 'sm', submitLabel: 'Download CSV',
+      body: `<div class="form-grid">${field('Month', 'month', { type: 'month', value: def, required: true, full: true })}</div><div class="small muted">B2B invoices (chemists with GSTIN), B2C totals by rate, HSN summary and credit notes from approved sales returns — a working sheet for GSTR-1. Check it with your accountant before filing.</div>`,
+      onSubmit: v => {
+        const m = v.month; if (!/^\d{4}-\d{2}$/.test(m)) { toast('Choose a month.'); return false; }
+        const sales = db.sales.filter(x => x.date.slice(0, 7) === m);
+        const rows = [['B2B invoices'], ['GSTIN', 'Party', 'Invoice no', 'Date', 'Invoice value', 'Rate %', 'Taxable', 'CGST', 'SGST']];
+        const b2c = {}, hsn = {};
+        sales.forEach(x => {
+          const c = x.party.type === 'chemist' ? chem(x.party.chemistId) : null;
+          Object.entries(x.slabs || {}).forEach(([rate, sl]) => {
+            if (c?.gstin) rows.push([c.gstin, c.name, x.no, x.date, plainNum(x.total), rate, plainNum(sl.taxable), plainNum(sl.gst / 2), plainNum(sl.gst / 2)]);
+            else { const k = rate; b2c[k] = b2c[k] || { taxable: 0, gst: 0 }; b2c[k].taxable += sl.taxable; b2c[k].gst += sl.gst; }
+          });
+          x.lines.forEach(l => { const p = prod(l.productId); const k = `${p?.hsn || ''}|${l.gst}`; const cl = calcLine(l); hsn[k] = hsn[k] || { qty: 0, taxable: 0, gst: 0 }; hsn[k].qty += l.qty + (l.free || 0); hsn[k].taxable += cl.taxable; hsn[k].gst += cl.gstA; });
+        });
+        rows.push([], ['B2C (unregistered) by rate'], ['Rate %', 'Taxable', 'CGST', 'SGST']);
+        Object.entries(b2c).sort((a, b) => a[0] - b[0]).forEach(([r, x]) => rows.push([r, plainNum(x.taxable), plainNum(x.gst / 2), plainNum(x.gst / 2)]));
+        rows.push([], ['HSN summary'], ['HSN', 'Rate %', 'Total qty', 'Taxable', 'CGST', 'SGST']);
+        Object.entries(hsn).sort().forEach(([k, x]) => { const [h, r] = k.split('|'); rows.push([h, r, x.qty, plainNum(x.taxable), plainNum(x.gst / 2), plainNum(x.gst / 2)]); });
+        rows.push([], ['Credit notes (approved sales returns)'], ['Note no', 'Date', 'Party', 'GSTIN', 'Against', 'Taxable', 'CGST', 'SGST', 'Total']);
+        (db.returns || []).filter(r => r.status === 'Approved' && (r.approvedOn || r.date).slice(0, 7) === m).forEach(r => { const c = r.party.type === 'chemist' ? chem(r.party.chemistId) : null; rows.push([r.no, r.approvedOn || r.date, retPartyName(r), c?.gstin || '', [...new Set(r.lines.map(l => l.saleNo))].join(' '), plainNum(r.taxable), plainNum(r.gst / 2), plainNum(r.gst / 2), plainNum(r.total)]); });
+        downloadText(`gst-summary-${m}.csv`, rows.map(r => r.map(csvCell).join(',')).join('\r\n'));
+        logAgent('compliance', `GST summary downloaded for ${m}`);
+        return `GST summary for ${m} downloaded.`;
       },
     });
   };
@@ -3665,6 +4337,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         if (existing) { Object.assign(existing, { supplierId: d.supplierId, expected: d.expected, lines, ...billCalc(lines) }); return `${existing.no} updated.`; }
         const no = nextNo('PO-', db.pos);
         db.pos.push({ no, date: todayIso, expected: d.expected, supplierId: d.supplierId, lines, ...billCalc(lines), status: 'Open' });
+        if (preset.approvalId) { doneApproval(preset.approvalId, `Created ${no}`); logAgent('stock', `${no} created from the agent's draft`); }
         return `${no} created for ${money(billCalc(lines).total)}.`;
       },
     });
@@ -3972,7 +4645,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       },
     });
   };
-  ACTIONS['export-data'] = () => downloadText(`pharma-suite-backup-${todayIso}.json`, JSON.stringify(db, null, 1), 'application/json');
+  ACTIONS['export-data'] = () => { db.settings.lastBackup = todayIso; save(); downloadText(`pharma-suite-backup-${todayIso}.json`, JSON.stringify(db, null, 1), 'application/json'); if (route === 'settings') render(); };
+  ACTIONS['settings-data'] = () => { settingsTab = 'data'; if (location.hash === '#settings') render(); else location.hash = 'settings'; };
   ACTIONS['reset-data'] = () => confirmModal('Reset to sample data?', 'Everything in this browser will be replaced with the sample data. Download a backup first if you need it. This cannot be undone.', 'Reset', () => {
     db = seed(); entry = null; Object.keys(listState).forEach(k => delete listState[k]); billStore.clear().catch(() => {}); return 'Sample data restored.';
   });
@@ -3997,6 +4671,12 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       $$('button', tab.parentElement).forEach(b => b.classList.toggle('active', b === tab));
       fillList(key); return;
     }
+    const stab = e.target.closest('[data-settings-tab]');
+    if (stab) { settingsTab = stab.dataset.settingsTab; render(); return; }
+    const snd = e.target.closest('[data-send]');
+    if (snd) { handleSend(snd.dataset.send); return; }
+    const oda = e.target.closest('[data-od-act]');
+    if (oda) { odAction(oda.dataset.odAct); return; }
     if (e.target.closest('[data-add-iline]')) { $('#iBody').insertAdjacentHTML('beforeend', inqRow()); $('#iBody tr:last-child [data-i=name]').focus(); return; }
     const ril = e.target.closest('[data-rm-iline]');
     if (ril) { if ($$('#iBody tr[data-iline]').length > 1) ril.closest('tr').remove(); else $$('input', ril.closest('tr')).forEach(i => { i.value = i.dataset.i === 'qty' ? 1 : ''; }); return; }
@@ -4120,6 +4800,11 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       t.value = ''; return;
     }
     if (t.matches('[name="paperSize"]')) { setPaperSize(t.value); return; }
+    if (t.matches('[data-int-toggle]')) { const c = intCfg(t.dataset.intToggle); c.enabled = t.checked; delete c.lastTest; refresh(); return; }
+    if (t.matches('[data-agent-toggle]')) { agentCfg(t.dataset.agentToggle).enabled = t.checked; refresh(); return; }
+    if (t.matches('[data-int-mode]')) { $$('#mform [data-when]').forEach(el => el.classList.toggle('hidden', el.dataset.when !== t.value)); return; }
+    if (t.matches('[data-od]') && odState) { const i = +t.closest('tr').dataset.odl, k = t.dataset.od; odState.lines[i][k] = k === 'productId' ? t.value : Math.max(k === 'qty' ? 1 : 0, Math.round(num(t.value))); renderOdResult(); return; }
+    if (t.id === 'odParty' && odState) { odState.party = odParty(); renderOdResult(); return; }
     if (t.matches('[name="itype"]')) { $$('#mform [data-it]').forEach(el => el.classList.toggle('hidden', el.dataset.it !== t.value)); return; }
     if (t.matches('[name="rtype"]')) { $$('#mform [data-rt]').forEach(el => el.classList.toggle('hidden', el.dataset.rt !== t.value)); retDraft.picks = {}; renderReturnLines(); return; }
     if (t.id === 'f-rChem' || t.id === 'f-rCust') { retDraft.picks = {}; renderReturnLines(); return; }
@@ -4222,7 +4907,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   });
   $('#modalClose').addEventListener('click', () => closeModal());
   $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
-  $('#settingsBtn').addEventListener('click', () => ACTIONS['open-settings']());
+  $('#settingsBtn').addEventListener('click', () => { closeModal(); if (location.hash === '#settings') render(); else location.hash = 'settings'; });
   $('#avatarBtn').addEventListener('click', () => ACTIONS['open-profile']());
   window.addEventListener('hashchange', render);
   window.addEventListener('beforeunload', e => { if ((entry && entry.lines.some(l => l.name)) || saveTimer || saving) { e.preventDefault(); e.returnValue = ''; } });
@@ -4251,13 +4936,15 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       }
       $('#storageNote').textContent = `Signed in as ${me.username}. Data is saved on the server.`;
       $('#accountBtns').hidden = false;
-      await Promise.all([loadOrders(), loadLogins()]);
+      await Promise.all([loadOrders(), loadLogins(), loadSecretMask()]);
       setInterval(loadOrders, 30000);
     } else {
       db = migrate(load() || seed());
       save();
     }
     render();
+    agentsTick();
+    setInterval(agentsTick, 15 * 60 * 1000);
   }
   boot();
 })();

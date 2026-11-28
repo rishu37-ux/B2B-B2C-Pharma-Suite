@@ -37,6 +37,42 @@ let auth = readJson('auth.json', { admin: null, chemists: {} });
 let orders = readJson('orders.json', []);
 const saveAuth = () => writeJson('auth.json', auth);
 const saveOrders = () => writeJson('orders.json', orders);
+// Integration keys and passwords live only here (data/secrets.json), never in the dashboard data or the browser
+let secrets = readJson('secrets.json', {});
+const saveSecrets = () => writeJson('secrets.json', secrets);
+const maskSecret = v => ({ set: true, last4: String(v).slice(-4) });
+const intCfg = id => store.data?.settings?.integrations?.[id] || {};
+const SECRET_ID_RE = /^[a-z0-9:_-]{2,60}$/;
+async function outbound(url, opts = {}) {
+  const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(15000) });
+  const text = await r.text();
+  let body; try { body = JSON.parse(text); } catch { body = { raw: text.slice(0, 300) }; }
+  return { ok: r.ok, status: r.status, body };
+}
+const indianNumber = v => { const d = String(v || '').replace(/\D/g, ''); return d.length === 10 ? '91' + d : d; };
+async function whatsappSend({ to, text, template, lang, params }) {
+  const c = intCfg('whatsapp'), token = secrets.whatsapp?.token;
+  if (!c.enabled || c.mode !== 'cloud' || !c.phoneId || !token) throw Object.assign(new Error('WhatsApp Business API is not set up in Settings → Integrations.'), { status: 400 });
+  const ver = /^v\d+\.\d+$/.test(c.apiVersion || '') ? c.apiVersion : 'v23.0';
+  const body = template
+    ? { messaging_product: 'whatsapp', to: indianNumber(to), type: 'template', template: { name: template, language: { code: lang || 'en' }, components: params?.length ? [{ type: 'body', parameters: params.map(t => ({ type: 'text', text: String(t).slice(0, 900) })) }] : [] } }
+    : { messaging_product: 'whatsapp', to: indianNumber(to), type: 'text', text: { body: String(text || '').slice(0, 4000) } };
+  const r = await outbound(`https://graph.facebook.com/${ver}/${encodeURIComponent(c.phoneId)}/messages`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw Object.assign(new Error(r.body?.error?.message || `WhatsApp returned ${r.status}`), { status: 502 });
+  return { id: r.body?.messages?.[0]?.id || '' };
+}
+const razorpayAuth = () => { const c = intCfg('payments'), sec = secrets.payments?.keySecret; if (!c.enabled || !c.keyId || !sec) throw Object.assign(new Error('Razorpay is not set up in Settings → Integrations → Online payments.'), { status: 400 }); return 'Basic ' + Buffer.from(`${c.keyId}:${sec}`).toString('base64'); };
+async function fireHooks(event, data) {
+  const c = intCfg('custom'); if (!c.enabled) return 0;
+  let n = 0;
+  for (const h of c.hooks || []) {
+    if (!h.url || !(h.events || []).includes(event)) continue;
+    const headers = { 'Content-Type': 'application/json' };
+    const key = secrets['custom:' + h.id]?.key; if (key && h.header) headers[h.header] = key;
+    try { await outbound(h.url, { method: 'POST', headers, body: JSON.stringify({ event, at: new Date().toISOString(), data }) }); n++; } catch (e) { console.error('Webhook failed', h.name, e.message); }
+  }
+  return n;
+}
 
 // ---------- Passwords & sessions ----------
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('hex')) =>
@@ -261,6 +297,67 @@ async function api(req, res, url) {
     saveOrders();
     return send(res, 200, o);
   }
+  // ----- Integrations -----
+  if (route === 'GET /api/secrets') return send(res, 200, Object.fromEntries(Object.entries(secrets).map(([id, f]) => [id, Object.fromEntries(Object.entries(f).map(([k, v]) => [k, maskSecret(v)]))])));
+  const sec = /^PUT \/api\/secrets\/([^/]+)$/.exec(route);
+  if (sec) {
+    const id = decodeURIComponent(sec[1]); if (!SECRET_ID_RE.test(id)) return fail400(res, 'Bad id.');
+    const b = await readBody(req, 20_000);
+    const cur = secrets[id] || {};
+    for (const [k, v] of Object.entries(b.fields || {})) {
+      if (!/^[A-Za-z0-9_]{1,40}$/.test(k)) continue;
+      if (v === null) delete cur[k]; else if (typeof v === 'string' && v.trim()) cur[k] = v.trim().slice(0, 2000);
+    }
+    if (Object.keys(cur).length) secrets[id] = cur; else delete secrets[id];
+    saveSecrets();
+    return send(res, 200, { ok: true });
+  }
+  const test = /^POST \/api\/int\/test\/([^/]+)$/.exec(route);
+  if (test) {
+    const id = decodeURIComponent(test[1]);
+    try {
+      if (id === 'whatsapp') {
+        const c = intCfg('whatsapp'), token = secrets.whatsapp?.token;
+        if (!c.phoneId || !token) return fail400(res, 'Enter the phone number ID and access token first, and save.');
+        const ver = /^v\d+\.\d+$/.test(c.apiVersion || '') ? c.apiVersion : 'v23.0';
+        const r = await outbound(`https://graph.facebook.com/${ver}/${encodeURIComponent(c.phoneId)}?fields=display_phone_number,verified_name`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!r.ok) return send(res, 200, { ok: false, msg: r.body?.error?.message || `WhatsApp returned ${r.status}` });
+        return send(res, 200, { ok: true, msg: `Connected: ${r.body.verified_name || ''} ${r.body.display_phone_number || ''}`.trim() });
+      }
+      if (id === 'payments') {
+        const r = await outbound('https://api.razorpay.com/v1/payments?count=1', { headers: { Authorization: razorpayAuth() } });
+        return send(res, 200, r.ok ? { ok: true, msg: 'Razorpay keys accepted.' } : { ok: false, msg: r.body?.error?.description || `Razorpay returned ${r.status}` });
+      }
+      if (id.startsWith('custom:')) {
+        const h = (intCfg('custom').hooks || []).find(x => 'custom:' + x.id === id); if (!h?.url) return fail400(res, 'Save the webhook URL first.');
+        const headers = { 'Content-Type': 'application/json' }; const key = secrets[id]?.key; if (key && h.header) headers[h.header] = key;
+        const r = await outbound(h.url, { method: 'POST', headers, body: JSON.stringify({ event: 'test', at: new Date().toISOString(), data: { message: 'Test from Pharma Suite' } }) });
+        return send(res, 200, r.ok ? { ok: true, msg: `Webhook answered ${r.status}.` } : { ok: false, msg: `Webhook answered ${r.status}.` });
+      }
+      return fail400(res, 'This integration has no connection test yet.');
+    } catch (e) { return send(res, 200, { ok: false, msg: e.message || 'Could not connect.' }); }
+  }
+  if (route === 'POST /api/int/whatsapp/send') {
+    const b = await readBody(req, 20_000);
+    if (!/^\d{10,13}$/.test(String(b.to || '').replace(/\D/g, ''))) return fail400(res, 'Enter a valid mobile number.');
+    return send(res, 200, await whatsappSend(b));
+  }
+  if (route === 'POST /api/int/razorpay/link') {
+    const b = await readBody(req, 10_000);
+    const amount = Math.round(Number(b.amount) * 100);
+    if (!(amount >= 100)) return fail400(res, 'Amount must be at least ₹1.');
+    const body = { amount, currency: 'INR', description: str(b.description, 240) || 'Payment', reference_id: str(b.ref, 40) || undefined, customer: { name: str(b.name, 80) || undefined, contact: b.phone ? '+' + indianNumber(b.phone) : undefined }, notify: { sms: false, email: false }, reminder_enable: false };
+    const r = await outbound('https://api.razorpay.com/v1/payment_links', { method: 'POST', headers: { Authorization: razorpayAuth(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) return send(res, 502, { error: r.body?.error?.description || `Razorpay returned ${r.status}` });
+    return send(res, 200, { url: r.body.short_url, id: r.body.id });
+  }
+  if (route === 'POST /api/hooks/fire') {
+    const b = await readBody(req, 200_000);
+    if (!/^[a-z.]{3,40}$/.test(String(b.event || ''))) return fail400(res, 'Bad event.');
+    fireHooks(b.event, b.data || {}).catch(() => {});
+    return send(res, 202, { ok: true });
+  }
+
   if (route === 'GET /api/logins') {
     return send(res, 200, Object.fromEntries(Object.entries(auth.chemists).map(([id, r]) => [id, { username: r.username, active: r.active, created: r.created, lastLogin: r.lastLogin || '', mustChange: !!r.mustChange }])));
   }

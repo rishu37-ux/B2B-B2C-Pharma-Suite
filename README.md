@@ -11,6 +11,15 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 - **Customers** — walk-in / retail customers with address, bills, purchases and balance; picked or created in the sale bill
 - **Party Ledger** — for any chemist, customer or supplier: bills, dated payments and returns with a running balance, opening balance for a date range, a balances summary for all parties, A4 print and CSV export
 - **Profile** (click the avatar, top right) — business name, tagline, logo (shown in the sidebar and on bills), your name and designation
+- **Agents & Approvals** — five assistants. Nothing is sent or ordered without you: they put items in an Approvals inbox.
+  - *Order Desk* (AI): paste an order message; it matches items to your products and stock, then make a bill, save an enquiry or reply with availability
+  - *Stock & Purchase*: draft purchase orders per supplier from sales, enquiries and chemist orders; near-expiry and slow-moving stock
+  - *Collections*: overdue parties with a ready reminder (WhatsApp / SMS / email, UPI ID or Razorpay link); does not repeat within the set days
+  - *Compliance*: expired / expiring drug licence and FSSAI, missing licences, wrong GSTIN check digit; can stop billing to a chemist with an expired licence; GST summary CSV (B2B, B2C, HSN, credit notes) for GSTR-1
+  - *Daily Briefing*: yesterday's sales and collections, approvals waiting, follow-ups, stock alerts, demand by district, backup reminder
+
+  Daily agents run the first time the dashboard is open after their set time each day.
+- **Settings** — Business, **Integrations** (AI providers, WhatsApp, voice calls, SMS, online payments, email, Instagram & Facebook, business profiles, geo demand, online classes, sheets & accounting, Google & backups, data & demo mode, GST e-invoice, and custom webhooks — each with on/off, status dot, configuration and a connection test where possible), Agents and Data & backups (backup, restore, start with empty data). Keys and passwords for integrations are stored only on the server (`data/secrets.json`), never in the browser or the backup. Working now without extra setup: messages open in WhatsApp / SMS / email ready to send, UPI ID in reminders, CSV exports. With the server and your keys: WhatsApp Business API sending, Razorpay payment links and custom webhooks. Voice, bulk SMS, SMTP, social posting, Google Business, Tally sync, Drive backup and e-invoice save their settings for later.
 - **Chemist Orders** — orders placed on the chemist portal; turn them into a sale bill, or a purchase order for items that are short
 - **Onboard Chemists** — drug licence 1 & 2, GSTIN, licence validity, credit limit, status and portal login
 - **Stock Details** — batch-wise stock, near-expiry and expired batches, reorder list
