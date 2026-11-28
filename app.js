@@ -337,7 +337,8 @@
   const category = id => db.categories.find(c => c.id === id);
   const batchById = id => db.batches.find(b => b.id === id);
   const avail = b => (b.qty || 0) + (b.free || 0);
-  const sellableBatches = pid => db.batches.filter(b => b.productId === pid && avail(b) > 0 && expDays(b.expiry) >= 0).sort((a, b) => a.expiry.localeCompare(b.expiry));
+  // Blocked batches (drug alerts / recalls) are kept in stock but cannot be billed
+  const sellableBatches = pid => db.batches.filter(b => b.productId === pid && avail(b) > 0 && !b.blocked && expDays(b.expiry) >= 0).sort((a, b) => a.expiry.localeCompare(b.expiry));
   const sellableQty = pid => sellableBatches(pid).reduce((a, b) => a + avail(b), 0);
   const batchAmount = b => round2((b.qty || 0) * (b.rate || 0));
   const stockValue = () => db.batches.filter(b => expDays(b.expiry) >= 0).reduce((a, b) => a + batchAmount(b), 0);
@@ -417,6 +418,7 @@
     'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
     New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
     Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
+    Blocked: 'bad', Upcoming: 'info', Ended: 'neutral', Claimed: 'warn', 'Score A': 'ok', 'Score B': 'info', 'Score C': 'warn', 'Score D': 'bad',
   };
   const pill = s => `<span class="pill ${PILL[s] || (/^Short/.test(s) || / short$/.test(s) ? 'warn' : 'neutral')}">${esc(s)}</span>`;
 
@@ -458,9 +460,9 @@
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
     { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['returns', 'Sales Returns', 'undo'], ['inquiries', 'Enquiries', 'chat'], ['chemorders', 'Chemist Orders', 'cart'], ['customers', 'Customers', 'user'], ['chemists', 'Onboard Chemists', 'store']] },
     { group: 'Accounts', items: [['ledger', 'Party Ledger', 'book']] },
-    { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
+    { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill'], ['recalls', 'Recalls & NSQ', 'alert']] },
     { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
-  { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file'], ['preturns', 'Purchase Returns', 'undo']] },
+  { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file'], ['preturns', 'Purchase Returns', 'undo'], ['schemes', 'Schemes & Claims', 'spark']] },
   { group: 'System', items: [['agents', 'Agents & Approvals', 'spark'], ['settings', 'Settings', 'settings']] },
   ];
   const SUBTITLES = {
@@ -475,6 +477,8 @@
     agents: 'Your assistants prepare purchase orders, reminders and alerts — you approve',
     settings: 'Business details, integrations, agents and data',
     preturns: 'Goods sent back to suppliers — expiry claims and debit notes',
+    recalls: 'CDSCO NSQ / spurious drug alerts, banned FDCs and recalls — checked against your stock and sales',
+    schemes: 'Company schemes, free goods and claims on your sales',
     stock: 'Batch-wise stock in bill format',
     products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
@@ -498,6 +502,7 @@
       billentry: entry && entry.lines.length ? '•' : 0,
       chemorders: chemOrders.filter(o => o.status === 'New').length,
       agents: (db.approvals || []).filter(a => a.status === 'Pending' && a.kind !== 'briefing').length,
+      recalls: (db.approvals || []).filter(a => a.status === 'Pending' && a.kind === 'recall').length,
     };
     $('#nav').innerHTML = NAV.map(g => `
       <div class="nav-group-title">${g.group}</div>
@@ -809,7 +814,7 @@
           { h: 'Drug licence 1 / 2', c: c => licCell(c) },
           { h: 'GSTIN', c: c => `<span class="small">${esc(c.gstin || '—')}</span>` },
           { h: 'CD% / TD%', r: 1, c: c => `${dec(c.cd)} / ${dec(c.td)}` },
-          { h: 'Credit limit', r: 1, c: c => money(c.creditLimit) },
+          { h: 'Credit limit', r: 1, c: c => `${money(c.creditLimit)}<div>${gradePill(creditProfile(c.id))}</div>` },
           { h: 'Outstanding', r: 1, c: c => { const o = chemOutstanding(c.id); return `<span style="${o > c.creditLimit ? 'color:var(--bad);font-weight:600' : ''}">${money(o)}</span>`; } },
           { h: 'Status', c: c => pill(c.status) },
           ...(SERVER ? [{ h: 'Portal login', c: c => portalCell(c) }] : []),
@@ -1148,6 +1153,7 @@
           { id: 'unver', label: 'Needs check', filter: b => !b.verified && avail(b) > 0 },
           { id: 'near', label: 'Near expiry', filter: b => avail(b) > 0 && batchStatus(b) === 'Near expiry' },
           { id: 'exp', label: 'Expired', filter: b => avail(b) > 0 && batchStatus(b) === 'Expired' },
+          { id: 'blocked', label: 'Blocked', filter: b => avail(b) > 0 && b.blocked },
           { id: 'zero', label: 'Sold out', filter: b => avail(b) <= 0 },
         ],
         rows: () => [...db.batches].sort((a, b) => (prod(a.productId)?.name || '').localeCompare(prod(b.productId)?.name || '') || a.expiry.localeCompare(b.expiry)),
@@ -1169,7 +1175,7 @@
         foot: rows => rows.length ? `<tfoot><tr><td colspan="9" class="strong">Total</td><td class="r num strong">${qty(rows.reduce((a, b) => a + (b.qty || 0), 0))}</td><td class="r num">${qty(rows.reduce((a, b) => a + (b.free || 0), 0))}</td><td colspan="5"></td><td class="r num strong">${dec(rows.reduce((a, b) => a + batchAmount(b), 0))}</td><td colspan="2"></td></tr></tfoot>` : '',
         columns: [
           { h: 'SN', c: (b, i) => `<span class="muted">${i + 1}</span>` },
-          { h: 'Item name', c: b => `<span class="strong">${esc(prod(b.productId)?.name)}</span>${b.source ? `<div class="small muted">${esc(b.source)}</div>` : ''}` },
+          { h: 'Item name', c: b => `<span class="strong">${esc(prod(b.productId)?.name)}</span>${b.blocked ? ' ' + pill('Blocked') : ''}${b.source ? `<div class="small muted">${esc(b.source)}</div>` : ''}${b.blocked && b.blockNote ? `<div class="small bad-text">${esc(b.blockNote)}</div>` : ''}` },
           { h: 'Company', c: b => esc(company(prod(b.productId)?.companyId)?.name || '—') },
           { h: 'MFG name', c: b => esc(prod(b.productId)?.mfg || '—') },
           { h: 'Pack', c: b => esc(prod(b.productId)?.pack) },
@@ -1185,7 +1191,7 @@
           { h: 'GST%', r: 1, c: b => dec(b.gst) },
           { h: 'Amount', r: 1, c: b => dec(batchAmount(b)) },
           { h: 'Check', c: b => b.verified ? pill('Verified') : pill('Needs check') },
-          { h: '', c: b => rowActs(!b.verified && actBtn('verify-batch', b.id, 'Mark checked'), actBtn('edit-batch', b.id, 'Edit', 'ghost'), actBtn('del-batch', b.id, 'Delete', 'ghost danger')) },
+          { h: '', c: b => rowActs(!b.verified && actBtn('verify-batch', b.id, 'Mark checked'), b.blocked && actBtn('batch-unblock', b.id, 'Unblock', 'ghost'), actBtn('edit-batch', b.id, 'Edit', 'ghost'), actBtn('del-batch', b.id, 'Delete', 'ghost danger')) },
         ],
       })}
       ${useList({
@@ -1222,10 +1228,10 @@
       key: 'products', title: 'Products',
       actions: actBtn('new-product', '', icon('plus') + 'Add product', 'primary'),
       tabs: [{ id: 'all', label: 'All' }, { id: 'low', label: 'Low stock', filter: p => { const q = sellableQty(p.id); return q > 0 && q < p.reorder; } }, { id: 'out', label: 'Out of stock', filter: p => sellableQty(p.id) <= 0 }],
-      filters: prodFilters(p => [p], ['company', 'category', 'form']),
+      filters: [...prodFilters(p => [p], ['company', 'category', 'form']), { k: 'sch', label: 'Schedule', options: [['none', 'Not set'], ...RX_SCHEDULES.filter(x => x[0])], test: (p, v) => v === 'none' ? !p.schedule : p.schedule === v }],
       select: {
         id: p => p.id,
-        fields: [GST_FIELD, { k: 'categoryId', label: 'Category', type: 'select', options: db.categories.map(c => [c.id, c.name]) }, { k: 'form', label: 'Form', type: 'select', options: db.forms.map(f => [f.name, f.name]) }, { k: 'companyId', label: 'Company', type: 'select', options: db.companies.map(c => [c.id, c.name]).sort(byName) }],
+        fields: [GST_FIELD, { k: 'schedule', label: 'Schedule', type: 'select', options: RX_SCHEDULES.filter(x => x[0]) },{ k: 'categoryId', label: 'Category', type: 'select', options: db.categories.map(c => [c.id, c.name]) }, { k: 'form', label: 'Form', type: 'select', options: db.forms.map(f => [f.name, f.name]) }, { k: 'companyId', label: 'Company', type: 'select', options: db.companies.map(c => [c.id, c.name]).sort(byName) }],
         extra: '<label class="check-line small"><input type="checkbox" id="bulkSyncGst" checked> Also change GST on their stock</label>',
         apply: (items, v) => {
           const sync = $('#bulkSyncGst')?.checked;
@@ -1240,7 +1246,7 @@
       rows: () => [...db.products].sort((a, b) => a.name.localeCompare(b.name)),
       text: p => [p.id, p.name, p.salt, company(p.companyId)?.name, p.mfg, category(p.categoryId)?.name, p.form, p.hsn].join(' '),
       columns: [
-        { h: 'Item name', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.id)}${p.salt ? ' · ' + esc(p.salt) : ''}</div>` },
+        { h: 'Item name', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.id)}${p.salt ? ' · ' + esc(p.salt) : ''}${p.schedule ? ` · <b>${p.schedule === 'NDPS' || p.schedule === 'OTC' ? esc(p.schedule) : 'Sch. ' + esc(p.schedule)}</b>` : ''}${p.ceiling > 0 ? ` · ceiling ₹${dec(p.ceiling)}` : ''}</div>` },
         { h: 'Company', c: p => esc(company(p.companyId)?.name || '—') },
         { h: 'MFG name', c: p => esc(p.mfg || '—') },
         { h: 'Category', c: p => esc(category(p.categoryId)?.name || '—') },
@@ -1558,6 +1564,7 @@
     const p = findProductByName(l.name);
     const info = p ? 'Existing product' : (String(l.name).trim() ? 'New product will be created' : '');
     if (p) { const b = db.batches.find(x => x.productId === p.id && norm(x.batch) === norm(l.batch)); if (b) msgs.push('Adds to existing batch'); priceChecks(l, p, warn); }
+    phase4LineChecks(l, p, warn);
     return { level, msgs, info };
   }
   const levelPill = lv => pill(lv === 'ok' ? 'OK' : lv === 'warn' ? 'Check' : 'Error');
@@ -2254,7 +2261,9 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     }
     if (!Array.isArray(d.inquiries)) d.inquiries = [];
     if (!Array.isArray(d.returns)) d.returns = [];
-    ['approvals', 'agentLog', 'reminders', 'purchaseReturns'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
+    ['approvals', 'agentLog', 'reminders', 'purchaseReturns', 'recalls', 'schemes', 'schemeClaims', 'visits'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
+    // Delivery tracking (added later): bills made before it count as delivered
+    if (!d.deliveryRev) { (d.sales || []).forEach(s => { if (!s.delivered) s.delivered = s.date; }); d.deliveryRev = 1; }
     if (d.settings && !d.settings.profile) d.settings.profile = {};
     [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(x => {
       if (!x || x.hospitalId || !x.hospital) return;
@@ -2499,6 +2508,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
           <div class="field ${isChem || s.party.customerId ? 'hidden' : ''}" data-pt="individual" data-newcust><label for="f-cphone">Mobile</label><input id="f-cphone" name="cphone" type="tel" inputmode="numeric" maxlength="10" value=""></div>
           ${field('Bill date', 'date', { type: 'date', value: s.date, required: true, attrs: `max="${todayIso}"` })}
           ${field('Term', 'mode', { value: s.mode || 'Credit', options: ['Credit', 'Cash', 'UPI', 'Card'] })}
+          <div class="field ${isChem ? 'hidden' : ''}" data-pt="individual"><label for="f-rx">Prescription (doctor, reg. no.)</label><input id="f-rx" name="rx" value="${esc(s.rx || '')}" placeholder="For Schedule H1 / X / NDPS items"></div>
         </div>
         <div id="chemInfo" class="small muted"></div>
         <div class="lines"><div class="table-wrap"><table>
@@ -2530,7 +2540,14 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         for (const bid in need) {
           const b = batchById(bid);
           if (need[bid] > avail(b)) { toast(`Batch ${b.batch} of ${prod(b.productId).name} has only ${qty(avail(b))} in stock.`); return false; }
+          if (b.blocked && !(existing && existing.lines.some(l => l.batchId === bid))) { toast(`Batch ${b.batch} of ${prod(b.productId).name} is blocked (${b.blockNote || 'drug alert'}) and cannot be billed.`); return false; }
         }
+        if (type === 'chemist' && !existing) {
+          const ch = chem(d.chemistId), cr = agentCfg('credit'), tot = billCalc(lines).total;
+          const after = round2(chemOutstanding(ch.id) + tot - Math.min(tot, num(d.paid)));
+          if (cr.enabled && cr.blockOverLimit && ch.creditLimit && after > ch.creditLimit && !confirm(`${ch.name}: this bill takes the outstanding to ${money(after)}, above the credit limit of ${money(ch.creditLimit)}.\n\nCreate the bill anyway?`)) return false;
+        }
+        if (type === 'individual' && agentCfg('h1').enabled && !String(d.rx || '').trim() && lines.some(l => regItem(prod(l.productId))) && !confirm('This bill has Schedule H1 / X / NDPS items. They need a prescription — enter the doctor’s name and registration number in “Prescription”.\n\nCreate the bill without it?')) return false;
         lines.forEach(deductLine);
         const t = billCalc(lines);
         let party;
@@ -2547,13 +2564,13 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         const paid = Math.min(t.total, round2(num(d.paid)));
         if (existing) {
           const hadPay = payList(existing).map(x => ({ ...x }));
-          Object.assign(existing, { date: d.date, party, lines, ...t, mode: d.mode });
+          Object.assign(existing, { date: d.date, party, lines, ...t, mode: d.mode, rx: type === 'individual' ? String(d.rx || '').trim() : '' });
           existing.payments = hadPay; existing.paid = round2(hadPay.reduce((a, x) => a + x.amount, 0));
           adjustPaid(existing, paid, 'Adjusted when the bill was edited');
           return `${existing.no} updated — stock adjusted.`;
         }
         const no = nextNo('SMS-', db.sales);
-        db.sales.push({ no, date: d.date, party, lines, ...t, paid, payments: paid > 0 ? [{ date: d.date, amount: paid, mode: d.mode === 'Credit' ? 'Cash' : d.mode }] : [], mode: d.mode, ...(preset.orderId ? { orderId: preset.orderId } : {}), ...(preset.inquiryNo ? { inquiryNo: preset.inquiryNo } : {}) });
+        db.sales.push({ no, date: d.date, party, lines, ...t, paid, payments: paid > 0 ? [{ date: d.date, amount: paid, mode: d.mode === 'Credit' ? 'Cash' : d.mode }] : [], mode: d.mode, ...(type === 'individual' && String(d.rx || '').trim() ? { rx: String(d.rx).trim() } : {}), ...(preset.orderId ? { orderId: preset.orderId } : {}), ...(preset.inquiryNo ? { inquiryNo: preset.inquiryNo } : {}) });
         if (preset.orderId) setOrder(preset.orderId, { status: 'Billed', saleNo: no });
         fireHook('sale.created', { no, date: d.date, party: type === 'chemist' ? chem(d.chemistId)?.name : party.name, total: t.total });
         if (preset.inquiryNo) { const q = db.inquiries.find(x => x.no === preset.inquiryNo); if (q) Object.assign(q, { status: 'Converted', saleNo: no, closedOn: todayIso }); }
@@ -2565,7 +2582,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     recalcSale();
     const showInfo = () => {
       const c = chem($('#f-chemistId').value);
-      $('#chemInfo').innerHTML = c ? `Credit limit ${money(c.creditLimit)} · outstanding ${money(chemOutstanding(c.id))} · terms ${c.terms} days · default CD ${dec(c.cd)}%` : '';
+      $('#chemInfo').innerHTML = c ? `Credit limit ${money(c.creditLimit)} · outstanding ${money(chemOutstanding(c.id))} · terms ${c.terms} days · default CD ${dec(c.cd)}% · ${gradePill(creditProfile(c.id))}` : '';
     };
     $('#f-chemistId').addEventListener('change', () => {
       showInfo();
@@ -2722,12 +2739,16 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ${field('Sale rate to chemist (₹)', 'ptr', { type: 'number', value: p.ptr ?? '', required: true, attrs: numAttrs() })}
       ${field('Purchase rate (₹)', 'pts', { type: 'number', value: p.pts ?? '', required: true, attrs: numAttrs() })}
       ${field('Reorder level', 'reorder', { type: 'number', value: p.reorder ?? 10, required: true, attrs: numAttrs('1') })}
+      ${field('Schedule', 'schedule', { value: p.schedule || '', options: RX_SCHEDULES })}
+      ${field('NPPA ceiling price per pack, before GST (₹)', 'ceiling', { type: 'number', value: p.ceiling || '', attrs: numAttrs() + ' placeholder="Only for scheduled (DPCO) medicines"' })}
+      <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="dpco" ${p.dpco ? 'checked' : ''}> Scheduled formulation under DPCO (NLEM)</label></div>
     </div>`;
   }
   function readProduct(d, p) {
     Object.assign(p, {
       name: norm(d.name), companyId: findOrCreateCompany(d.company), mfg: d.mfg.trim(), categoryId: d.categoryId, form: d.form, pack: d.pack.trim(), hsn: d.hsn.trim(), salt: (d.salt || '').trim(),
       gst: num(d.gst), mrp: round2(num(d.mrp)), ptr: round2(num(d.ptr)), pts: round2(num(d.pts)), reorder: Math.floor(num(d.reorder)),
+      schedule: d.schedule || '', ceiling: round2(num(d.ceiling)) || 0, dpco: !!d.dpco || num(d.ceiling) > 0,
     });
   }
   const productCheck = (d, self) => {
@@ -3654,7 +3675,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   ACTIONS['hook-del'] = hid => { const c = intCfg('custom'); const h = (c.hooks || []).find(x => x.id === hid); if (!h) return; confirmModal(`Delete ${h.name}?`, 'This cannot be undone.', 'Delete', () => { c.hooks = c.hooks.filter(x => x !== h); if (SERVER) api('PUT', `api/secrets/${encodeURIComponent('custom:' + h.id)}`, { fields: { key: null } }).then(loadSecretMask).catch(() => {}); return `${h.name} deleted.`; }); };
   ACTIONS['hook-test'] = async hid => { save(); try { const r = await api('POST', `api/int/test/${encodeURIComponent('custom:' + hid)}`, {}); toast(r.msg || (r.ok ? 'OK' : 'Failed')); } catch (err) { toast(err.message); } };
   ACTIONS['empty-data'] = () => confirmModal('Start with empty data?', 'All products, stock, chemists, customers, suppliers, bills, orders, returns, enquiries and doctors are removed. Your business details, profile, settings, integrations and the hospital directory are kept. Download a backup first if you may need the sample data. This cannot be undone.', 'Start empty', () => {
-    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [], purchaseReturns: [] });
+    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [], purchaseReturns: [], recalls: [], schemes: [], schemeClaims: [], visits: [] });
     db.settings.demo = false; entry = null; Object.keys(listState).forEach(k => delete listState[k]);
     return 'Data cleared — you are starting fresh.';
   });
@@ -4473,6 +4494,12 @@ Message:
       compliance: actBtn('gst-export', '', 'GST summary CSV', 'ghost'),
       retclaims: actBtn('new-preturn', '', 'New purchase return', 'ghost'),
       accounts: actBtn('bank-import', '', 'Match bank statement', 'ghost') + actBtn('tally-export', '', 'Tally XML', 'ghost'),
+      recall: actBtn('recall-new', '', 'Add alert list', 'ghost') + '<button type="button" class="btn sm ghost" data-nav="recalls">Alert lists</button>',
+      ceiling: actBtn('ceiling-import', '', 'Import NPPA list', 'ghost'),
+      h1: actBtn('h1-register', '', 'Register', 'ghost'),
+      credit: actBtn('credit-report', '', 'Credit scores', 'ghost'),
+      schemes: '<button type="button" class="btn sm ghost" data-nav="schemes">Schemes</button>',
+      route: actBtn('route-plan', '', 'Dispatch list', 'ghost'),
     })[id] || '';
   }
   const APPR_LABEL = { po: 'Review PO', reminder: 'Send reminder', briefing: 'Share', price: 'Apply new rate', returnadvice: 'Approve return', claim: 'Review claim', followup: 'Send message', lost: 'Mark lost', statement: 'Send statement', bankmatch: 'Record payment', info: 'Open' };
@@ -4646,6 +4673,820 @@ Message:
         ${d.chats.length ? d.chats.map(ch => `<div class="chat-log"><div class="strong">${esc(ch.name)} <span class="small muted">${ch.last ? new Date(ch.last).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</span></div>${ch.messages.slice(-8).map(m => `<div class="chat-line ${m.role}"><b>${m.role === 'user' ? 'Chemist' : 'Assistant'}:</b> ${esc(m.text)}${m.order ? ` ${pill(m.order)}` : ''}</div>`).join('')}</div>`).join('') : '<div class="empty">No conversations yet.</div>'}`,
     });
   };
+
+  // =====================================================================
+  // Phase 4 agents: Recall & NSQ Watch, Price Ceiling (NPPA), Schedule H1 / NDPS
+  // register, Chemist Credit Risk, Schemes & Claims, Route & Delivery, and
+  // Hospital & Doctor Outreach
+  // =====================================================================
+  const RX_SCHEDULES = [['', 'Not set'], ['OTC', 'OTC (no prescription)'], ['G', 'Schedule G'], ['H', 'Schedule H'], ['H1', 'Schedule H1'], ['X', 'Schedule X'], ['NDPS', 'NDPS (narcotic / psychotropic)']];
+  const REG_SCH = ['H1', 'X', 'NDPS'];
+  const regItem = p => !!p && REG_SCH.includes(p.schedule);
+  const bkey = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const DAYS_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const maxMrp = p => p && p.ceiling > 0 ? round2(p.ceiling * (1 + num(p.gst) / 100)) : 0;
+  const partyOf = s => s.party.type === 'chemist' ? chem(s.party.chemistId) : custById(s.party.customerId);
+  const docById = id => (db.doctors || []).find(d => d.id === id);
+  const weekKey = () => `${todayIso.slice(0, 4)}-W${Math.ceil(((parse(todayIso) - new Date(TODAY.getFullYear(), 0, 1)) / DAY + 1) / 7)}`;
+  const monthlySold = pid => Math.round(db.sales.filter(s => s.date >= addDays(todayIso, -90)).reduce((a, s) => a + s.lines.filter(l => l.productId === pid).reduce((b, l) => b + l.qty + (l.free || 0), 0), 0) / 3);
+  // An item the user already approved or dismissed is not suggested again for `days` days
+  const recentlyHandled = (key, days) => db.approvals.some(a => a.key === key && a.status !== 'Pending' && String(a.done || a.updated || a.created || '').slice(0, 10) >= addDays(todayIso, -days));
+  const p4Add = (agent, keep, item, days) => { if (days && recentlyHandled(item.key, days)) return 0; keep.add(item.key); return upsertApproval({ agent, ...item }); };
+  const openWa = (phone, text) => { const a = document.createElement('a'); a.href = `https://wa.me/91${phone10(phone)}?text=${encodeURIComponent(text)}`; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove(); };
+  const paperHead = (title, right) => { const f = db.settings.firm; return `<div class="bill-top"><span class="bill-title">${title}</span></div>
+    <div class="bill-head ledger-head"><div class="bill-from">${f.logo ? `<img class="bill-logo" src="${esc(f.logo)}" alt="">` : ''}<div><div class="bill-firm">${esc(f.name)}</div>${firmLines(f).map(x => `<div>${esc(x)}</div>`).join('')}</div></div><div class="bill-to">${right}</div></div>`; };
+  const printFoot = (size, extra = '') => `<div class="foot-left"><button type="button" class="btn" data-act="print" data-id="${size}">${icon('file')}Print (${size === 'a4l' ? 'A4 landscape' : 'A4'})</button>${extra}</div>`;
+  PR_REASONS.splice(PR_REASONS.length - 1, 0, 'Recall / drug alert');
+
+  // ----- Recall & NSQ Watch -----
+  const RECALL_SOURCES = ['CDSCO NSQ alert (Not of Standard Quality)', 'Spurious / adulterated drug alert', 'Banned FDC list', 'Company recall', 'State Drug Controller alert', 'Other'];
+  const DEFAULT_RECALL_MSG = 'Namaste {party} ji,\n{firm} ki taraf se zaroori soochna: {product}{batch} drug alert list mein aaya hai ({reason}).\nKripya is batch ko bechna turant band karein aur bacha hua stock hamein wapas bhej dein — hum credit de denge.\nDhanyavaad';
+  const recallById = id => (db.recalls || []).find(r => r.id === id);
+  // Stock and sales matching one entry of a drug alert. A batch number matches exactly (spaces and dashes ignored).
+  // An entry without a batch (a banned combination) matches products whose salt has every ingredient it lists.
+  function recallHits(it) {
+    const k = bkey(it.batch); let batches = [], lines = [];
+    if (k) {
+      batches = db.batches.filter(b => bkey(b.batch) === k);
+      db.sales.forEach(s => s.lines.forEach(l => { if (bkey(l.batch) === k) lines.push({ s, l }); }));
+    } else {
+      const parts = norm(it.name).split(/\s*\+\s*|\s*&\s*|\s+AND\s+/).map(x => x.replace(/[^A-Z0-9 ]/g, '').trim()).filter(x => x.length > 2);
+      if (parts.length < 2) return [];
+      const pids = new Set(db.products.filter(p => p.salt && parts.every(x => norm(p.salt).includes(x.split(' ')[0]))).map(p => p.id));
+      batches = db.batches.filter(b => pids.has(b.productId));
+      const since = addDays(todayIso, -180);
+      db.sales.filter(s => s.date >= since).forEach(s => s.lines.forEach(l => { if (pids.has(l.productId)) lines.push({ s, l }); }));
+    }
+    const by = {}; const slot = pid => by[pid] || (by[pid] = { batches: [], lines: [] });
+    batches.forEach(b => slot(b.productId).batches.push(b));
+    lines.forEach(x => slot(x.l.productId).lines.push(x));
+    const word = norm(it.name).split(/[^A-Z0-9]+/).find(w => w.length > 2) || '';
+    return Object.entries(by).filter(([pid]) => prod(pid)).map(([pid, v]) => ({ pid, ...v, nameOk: !k || !word || norm(prod(pid).name).includes(word) || norm(prod(pid).salt).includes(word) }));
+  }
+  const hitParties = h => { const m = {}; h.lines.forEach(({ s, l }) => { const k = s.party.type === 'chemist' ? 'chemist:' + s.party.chemistId : 'customer:' + s.party.customerId; const x = m[k] || (m[k] = { k, p: partyOf(s), name: partyName(s), bills: [], qty: 0 }); if (!x.bills.includes(s.no)) x.bills.push(s.no); x.qty += l.qty + (l.free || 0); }); return Object.values(m); };
+  function runRecallAgent() {
+    const c = agentCfg('recall'); const keep = new Set(); let made = 0, hits = 0;
+    const rs = db.recalls || [];
+    rs.forEach(r => r.items.forEach((it, i) => recallHits(it).forEach(h => {
+      if (it.done?.[h.pid]) return;
+      const stock = h.batches.reduce((a, b) => a + avail(b), 0), parties = hitParties(h);
+      if (!stock && !parties.length) return;
+      hits++;
+      const p = prod(h.pid), open = h.batches.filter(b => avail(b) > 0), blocked = open.filter(b => b.blocked).length;
+      made += p4Add('recall', keep, { key: `recall:${r.id}:${i}:${h.pid}`, kind: 'recall', title: `${r.source.split(' (')[0]}: ${p.name}${it.batch ? ` · batch ${it.batch}` : ''}`,
+        detail: [`${stock ? `${qty(stock)} in stock — ${blocked === open.length ? 'blocked for billing' : 'not blocked yet'}` : 'None left in stock'} · sold to ${parties.length} part${parties.length === 1 ? 'y' : 'ies'}`, `Alert: ${[it.name, it.mfg, it.reason].filter(Boolean).join(' · ')}`, h.nameOk ? `${r.ref || r.source} · ${fmtDate(r.date)}` : 'Only the batch number matches — check it is the same product and manufacturer'],
+        payload: { rid: r.id, i, pid: h.pid } });
+    })));
+    const month = todayIso.slice(0, 7);
+    if (TODAY.getDate() >= c.remindDay && !rs.some(r => (r.created || '').slice(0, 7) === month)) made += p4Add('recall', keep, { key: 'recall:remind:' + month, kind: 'info', title: 'Add this month’s CDSCO drug alert (NSQ / spurious list)', detail: ['CDSCO publishes the list of drugs found Not of Standard Quality every month (cdsco.gov.in → Drug Alerts). Add it so your stock and sales are checked.'], payload: { act: ['recall-new', ''] } }, 25);
+    closeStale('recall', keep);
+    return { made, summary: rs.length ? `${hits} match${hits === 1 ? '' : 'es'} in stock or sold, from ${rs.length} alert list${rs.length === 1 ? '' : 's'}` : 'No alert lists added yet' };
+  }
+  const RECALL_SCHEMA = { type: 'object', additionalProperties: false, required: ['items'], properties: { items: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'batch', 'manufacturer', 'reason'], properties: { name: strS, batch: strS, manufacturer: strS, reason: strS } } } } };
+  const RECALL_PROMPT = `This is a drug safety alert published in India — for example the CDSCO or a State Drug Controller's monthly list of drugs declared Not of Standard Quality (NSQ), spurious or adulterated, a list of banned fixed-dose combinations (FDCs), or a manufacturer's recall notice.
+
+List every drug in it, one entry per batch:
+- name: the product name with strength and dosage form exactly as printed (the brand name if printed, else the generic name). For a banned combination, write the ingredients joined with " + ".
+- batch: the batch number exactly as printed; empty if none is printed.
+- manufacturer: the manufacturer's company name only, without the address.
+- reason: a short reason, e.g. "Fails dissolution", "Fails assay", "Spurious", "Banned FDC".
+
+Copy text exactly as printed. Use an empty string for anything not printed. Do not guess. Skip page headers, footers and notes.`;
+  function parseRecallItems(text) {
+    return String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(l => {
+      const c = (l.includes('|') ? l.split('|') : l.includes('\t') ? l.split('\t') : parseCsv(l)[0] || [l]).map(x => String(x).trim());
+      return { name: c[0] || '', batch: (c[1] || '').toUpperCase(), mfg: c[2] || '', reason: c[3] || '' };
+    }).filter(x => (x.name || x.batch) && !(/^(product|name|drug)/i.test(x.name) && /^batch/i.test(x.batch)));
+  }
+  ACTIONS['recall-new'] = () => openModal({
+    title: 'Add a drug alert list', size: 'xl', submitLabel: 'Save and check stock',
+    body: `<div class="form-grid">
+        ${field('Type of alert', 'source', { options: RECALL_SOURCES })}
+        ${field('Reference (e.g. CDSCO NSQ list, October 2026)', 'ref', {})}
+        ${field('Date of the alert', 'date', { type: 'date', value: todayIso, required: true })}
+        <div class="field full"><label for="rcFiles">Alert PDF or photo (optional) — AI reads the list</label><div class="toolbar"><input type="file" id="rcFiles" accept="application/pdf,image/*" multiple><button type="button" class="btn" data-p4="rc-read">${icon('spark')}Read with AI</button></div></div>
+        <div class="field full"><label for="rcItems">Items — one per line: Product name | Batch no. | Manufacturer | Reason *</label><textarea id="rcItems" name="items" rows="10" placeholder="Paracetamol Tablets IP 500 mg | PCT2401 | XYZ Pharma | Fails dissolution&#10;Nimesulide + Paracetamol | | | Banned FDC"></textarea></div>
+      </div>
+      <div class="small muted">Get the monthly list of drugs Not of Standard Quality / spurious from cdsco.gov.in (Drug Alerts), or paste it from a circular. An entry with a batch number is matched to your batches and to the bills that sold them. A banned combination without a batch matches products whose salt / composition has every ingredient — keep the salt filled in your products. ${getApiKey() ? 'AI reading sends the file to Anthropic.' : 'AI reading needs the Anthropic API key (Settings → Integrations → AI providers).'}</div>`,
+    onSubmit: v => {
+      const items = parseRecallItems(v.items);
+      if (!items.length) { toast('Add at least one item.'); return false; }
+      db.recalls.unshift({ id: uid(), source: v.source, ref: (v.ref || '').trim(), date: v.date || todayIso, created: todayIso, items });
+      const made = runAgent('recall', false);
+      return `${items.length} item(s) saved. ${agentCfg('recall').lastResult}${made ? ` — ${made} new in Approvals` : ''}.`;
+    },
+  });
+  async function readRecallFile() {
+    const files = [...($('#rcFiles')?.files || [])];
+    if (!files.length) { toast('Choose the alert PDF or photo first.'); return; }
+    if (!getApiKey()) { toast('Add the Anthropic API key in Settings → Integrations → AI providers.'); return; }
+    const btn = $('[data-p4="rc-read"]'); btn.disabled = true; btn.textContent = 'Reading…';
+    try {
+      const x = await callClaudeJson(files, RECALL_PROMPT, RECALL_SCHEMA, 32000, aiModel('bill'));
+      const rows = (x.items || []).map(i => [i.name, i.batch, i.manufacturer, i.reason].map(v => String(v || '').replace(/\|/g, '/').trim()).join(' | '));
+      const ta = $('#rcItems'); if (ta) ta.value = [ta.value.trim(), ...rows].filter(Boolean).join('\n');
+      logAgent('recall', `Read an alert file: ${rows.length} item(s)`);
+      toast(`${rows.length} item(s) read — check them before saving.`);
+    } catch (err) { toast(err.message || 'Could not read the file.'); }
+    finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = icon('spark') + 'Read with AI'; } }
+  }
+  let recallState = null;
+  function recallModal(a) {
+    const r = recallById(a.payload.rid), it = r?.items[a.payload.i], p = prod(a.payload.pid);
+    if (!r || !it || !p) { doneApproval(a.id, 'Alert removed'); refresh(); return; }
+    const h = recallHits(it).find(x => x.pid === p.id) || { batches: [], lines: [] };
+    const parties = hitParties(h);
+    recallState = { a, r, it, p, h, parties };
+    const open = h.batches.filter(b => avail(b) > 0);
+    openModal({
+      title: `Drug alert — ${p.name}`, size: 'xl', submitLabel: 'Mark as handled',
+      extraFoot: open.some(b => b.supplierId) ? '<div class="foot-left"><button type="button" class="btn" data-p4="rc-return">Purchase return to supplier</button></div>' : '',
+      body: `${detailGrid([['Alert', esc(r.source)], ['Reference', esc(r.ref || '—')], ['Date', fmtDate(r.date)], ['Listed as', esc([it.name, it.mfg].filter(Boolean).join(' · '))], ['Batch', esc(it.batch || 'All batches (combination)')], ['Reason', esc(it.reason || '—')]])}
+        <div class="card-title" style="font-size:15px">Your stock of ${esc(p.name)}</div>
+        ${miniTable([
+          { h: 'Batch', c: b => `<span class="strong">${esc(b.batch)}</span>${b.blocked ? ' ' + pill('Blocked') : ''}` },
+          { h: 'Exp', c: b => isoToExp(b.expiry) },
+          { h: 'In stock', r: 1, c: b => qty(avail(b)) },
+          { h: 'Supplier', c: b => esc(sup(b.supplierId)?.name || '—') },
+          { h: '', c: b => avail(b) > 0 ? `<button type="button" class="btn sm ${b.blocked ? 'ghost' : 'primary'}" data-p4="rc-block" data-id="${esc(b.id)}">${b.blocked ? 'Unblock' : 'Block for billing'}</button>` : '' },
+        ], h.batches)}
+        <div class="card-title" style="font-size:15px">Sold to</div>
+        ${miniTable([
+          { h: 'Party', c: x => `<span class="strong">${esc(x.name)}</span><div class="small muted">${esc(x.p?.phone || 'No mobile')}</div>` },
+          { h: 'Bills', c: x => `<span class="small">${esc(x.bills.join(', '))}</span>` },
+          { h: 'Qty', r: 1, c: x => qty(x.qty) },
+          { h: '', c: x => x.p?.phone ? `<button type="button" class="btn sm ghost" data-p4="rc-wa" data-id="${esc(x.k)}">${icon('chat')}WhatsApp</button>` : '' },
+        ], parties)}
+        <div class="field"><label for="rcMsg">Message to parties — {party} is replaced with each name</label><textarea id="rcMsg" rows="5">${esc(fillTpl(agentCfg('recall').template, { party: '{party}', product: p.name, batch: it.batch ? ` (batch ${it.batch})` : '', reason: it.reason || r.source.split(' (')[0], firm: db.settings.firm.name }))}</textarea></div>
+        <div class="small muted">What to do: block the batch so it cannot be billed, tell the chemists who bought it to stop selling and send it back, and return it to the supplier (purchase return) — or keep it aside if the Drug Inspector asks you to. Press “Mark as handled” when done.</div>`,
+      onSubmit: () => { it.done = { ...(it.done || {}), [p.id]: todayIso }; doneApproval(a.id, 'Handled'); logAgent('recall', `${p.name}${it.batch ? ' ' + it.batch : ''}: alert handled`); return 'Marked as handled.'; },
+    });
+  }
+  function toggleBlock(bid) {
+    const b = batchById(bid); if (!b) return;
+    b.blocked = !b.blocked;
+    if (b.blocked) { b.blockNote = recallState ? `${recallState.r.source.split(' (')[0]} · ${recallState.r.ref || fmtDate(recallState.r.date)}` : 'Blocked'; b.blockedOn = todayIso; } else { delete b.blockNote; delete b.blockedOn; }
+    logAgent('recall', `${prod(b.productId)?.name} batch ${b.batch} ${b.blocked ? 'blocked' : 'unblocked'} for billing`);
+    save(); toast(`Batch ${b.batch} ${b.blocked ? 'blocked — it cannot be billed' : 'unblocked'}.`);
+    if (recallState && $('#modalBack').classList.contains('open')) recallModal(recallState.a);
+  }
+  function recallWa(k) {
+    const x = recallState?.parties.find(y => y.k === k); if (!x?.p) return;
+    openWa(x.p.phone, ($('#rcMsg')?.value || '').replace(/\{party\}/g, x.p.owner || x.p.name));
+    logAgent('recall', `Recall message → ${x.name} (WhatsApp)`);
+  }
+  function recallReturn() {
+    const st = recallState; if (!st) return;
+    const open = st.h.batches.filter(b => avail(b) > 0 && b.supplierId); if (!open.length) return;
+    const sid = open[0].supplierId;
+    purchaseReturnModal({ supplierId: sid, picks: Object.fromEntries(open.filter(b => b.supplierId === sid).map(b => [b.id, { qty: b.qty || 0, free: b.free || 0 }])), reason: 'Recall / drug alert' });
+  }
+  ACTIONS['batch-unblock'] = id => { const b = batchById(id); if (!b) return; b.blocked = false; delete b.blockNote; delete b.blockedOn; logAgent('manual', `${prod(b.productId)?.name} batch ${b.batch} unblocked`); refresh(); toast(`Batch ${b.batch} can be billed again.`); };
+  ACTIONS['recall-view'] = id => {
+    const r = recallById(id); if (!r) return;
+    openModal({
+      title: `${r.source} — ${r.ref || fmtDate(r.date)}`, size: 'xl',
+      body: `${detailGrid([['Date', fmtDate(r.date)], ['Items', qty(r.items.length)], ['Added on', fmtDate(r.created || r.date)]])}
+        ${miniTable([
+          { h: 'Listed as', c: it => `<span class="strong">${esc(it.name || '—')}</span><div class="small muted">${esc(it.mfg || '')}</div>` },
+          { h: 'Batch', c: it => esc(it.batch || '—') },
+          { h: 'Reason', c: it => `<span class="small">${esc(it.reason || '')}</span>` },
+          { h: 'Your stock / sales', c: it => { const hs = recallHits(it); return hs.length ? hs.map(h => `<div><b>${esc(prod(h.pid).name)}</b> · ${qty(h.batches.reduce((a, b) => a + avail(b), 0))} in stock · ${hitParties(h).length} part(ies)${it.done?.[h.pid] ? ' ' + pill('Done') : ''}</div>`).join('') : '<span class="muted">No match</span>'; } },
+        ], r.items)}`,
+    });
+  };
+  ACTIONS['recall-del'] = id => { const r = recallById(id); if (!r) return; confirmModal('Delete this alert list?', `${esc(r.source)} with ${r.items.length} item(s). Blocked batches stay blocked until you unblock them. This cannot be undone.`, 'Delete', () => { db.recalls = db.recalls.filter(x => x !== r); db.approvals.forEach(a => { if (a.kind === 'recall' && a.status === 'Pending' && a.payload?.rid === id) Object.assign(a, { status: 'Dismissed', done: new Date().toISOString(), note: 'Alert list deleted' }); }); return 'Alert list deleted.'; }); };
+  VIEWS.recalls = () => {
+    const rs = db.recalls || [];
+    const blocked = db.batches.filter(b => b.blocked && avail(b) > 0);
+    const all = rs.flatMap(r => r.items.map(it => recallHits(it)));
+    const inStock = all.filter(hs => hs.some(h => h.batches.some(b => avail(b) > 0))).length;
+    return `
+      <div class="grid g-4">
+        ${kpi('Alert lists saved', qty(rs.length), rs[0] ? `Latest ${fmtDate(rs[0].date)}` : 'Add the monthly CDSCO list')}
+        ${kpi('Items on the lists', qty(all.length), 'Product / batch entries')}
+        ${kpi('Matches in your stock', qty(inStock), inStock ? 'See Agents & Approvals' : 'Nothing in stock matches')}
+        ${kpi('Blocked batches', qty(blocked.length), 'Cannot be billed')}
+      </div>
+      ${useList({
+        key: 'recalls', title: 'Drug alert lists',
+        actions: actBtn('recall-new', '', icon('plus') + 'Add alert list', 'primary'),
+        rows: () => rs, text: r => [r.source, r.ref, ...r.items.map(i => [i.name, i.batch, i.mfg].join(' '))].join(' '),
+        empty: 'No alert lists yet. Add the monthly CDSCO NSQ / spurious drug alert, a banned FDC list or a company recall — the Recall & NSQ Watch agent checks your stock and sales against it.',
+        columns: [
+          { h: 'Date', c: r => fmtDate(r.date) },
+          { h: 'Alert', c: r => `<span class="strong">${esc(r.source)}</span><div class="small muted">${esc(r.ref || '')}</div>` },
+          { h: 'Items', r: 1, c: r => qty(r.items.length) },
+          { h: 'Found in stock / sales', r: 1, c: r => { const n = r.items.filter(it => recallHits(it).length).length; return n ? `<span class="bad-text strong">${n}</span>` : '0'; } },
+          { h: '', c: r => rowActs(actBtn('recall-view', r.id, 'View', 'ghost'), actBtn('recall-del', r.id, 'Delete', 'ghost danger')) },
+        ],
+      })}
+      ${useList({
+        key: 'blocked', title: 'Blocked batches', noSearch: true, rows: () => blocked, text: b => prod(b.productId)?.name || '',
+        empty: 'No batch is blocked.',
+        columns: [
+          { h: 'Item', c: b => `<span class="strong">${esc(prod(b.productId)?.name || '')}</span><div class="small muted">${esc(b.blockNote || '')}${b.blockedOn ? ' · ' + fmtDate(b.blockedOn) : ''}</div>` },
+          { h: 'Batch', c: b => esc(b.batch) }, { h: 'Exp', c: b => isoToExp(b.expiry) }, { h: 'In stock', r: 1, c: b => qty(avail(b)) },
+          { h: 'Supplier', c: b => esc(sup(b.supplierId)?.name || '—') },
+          { h: '', c: b => rowActs(actBtn('batch-unblock', b.id, 'Unblock', 'ghost')) },
+        ],
+      })}`;
+  };
+
+  // ----- Price Ceiling (NPPA / DPCO) -----
+  function runCeilingAgent() {
+    const keep = new Set(); let made = 0, over = 0;
+    db.products.forEach(p => {
+      const mx = maxMrp(p); if (!mx) return;
+      const bad = db.batches.filter(b => b.productId === p.id && avail(b) > 0 && num(b.mrp) > mx + 0.01);
+      const masterBad = num(p.mrp) > mx + 0.01;
+      if (!bad.length && !masterBad) return;
+      over++;
+      made += p4Add('ceiling', keep, { key: 'ceil:' + p.id, kind: 'info', title: `MRP above the NPPA ceiling — ${p.name}`,
+        detail: [`Ceiling ₹${dec(p.ceiling)} + GST ${dec(p.gst)}% = highest allowed MRP ₹${dec(mx)} per pack${p.ceilingRef ? ` (${p.ceilingRef})` : ''}`, ...(masterBad ? [`Product MRP ₹${dec(p.mrp)}`] : []), ...bad.slice(0, 4).map(b => `Batch ${b.batch}: MRP ₹${dec(b.mrp)} · ${qty(avail(b))} in stock${b.supplierId ? ' · ' + (sup(b.supplierId)?.name || '') : ''}`), 'Do not sell above the ceiling: ask the supplier for corrected stock or a credit note, or return it. Check the latest NPPA notification first.'],
+        payload: { act: ['edit-product', p.id] } });
+    });
+    const missing = db.products.filter(p => p.dpco && !(p.ceiling > 0));
+    if (missing.length) made += p4Add('ceiling', keep, { key: 'ceil:missing', kind: 'info', title: `${missing.length} scheduled (DPCO) product${missing.length === 1 ? '' : 's'} without a ceiling price`, detail: [missing.slice(0, 6).map(p => p.name).join(', ') + (missing.length > 6 ? '…' : ''), 'Add the NPPA ceiling price in the product, or import the NPPA list.'], payload: { act: ['ceiling-import', ''] } }, 7);
+    closeStale('ceiling', keep);
+    return { made, summary: `${over} product(s) above the ceiling · ${db.products.filter(p => p.ceiling > 0).length} with a ceiling price` };
+  }
+  // Checks while entering a supplier bill (Bill Upload / Entry)
+  function phase4LineChecks(l, p, warn) {
+    const mx = maxMrp(p);
+    if (mx && num(l.mrp) > mx + 0.01 && agentCfg('ceiling').enabled) warn(`MRP ₹${dec(l.mrp)} is above the NPPA ceiling (₹${dec(mx)} with GST)`);
+    const k = bkey(l.batch);
+    if (k && agentCfg('recall').enabled && (db.recalls || []).some(r => r.items.some(it => bkey(it.batch) === k))) warn('This batch number is on a drug alert list — check before adding it to stock');
+  }
+  const CEIL_SCHEMA = { type: 'object', additionalProperties: false, required: ['matches'], properties: { matches: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['product_id', 'formulation', 'ceiling_per_unit', 'unit', 'units_per_pack', 'ceiling_per_pack', 'notification'], properties: { product_id: strS, formulation: strS, ceiling_per_unit: numS, unit: strS, units_per_pack: numS, ceiling_per_pack: numS, notification: strS } } } } };
+  let ceilState = [];
+  ACTIONS['ceiling-import'] = () => {
+    ceilState = [];
+    openModal({
+      title: 'Import NPPA ceiling prices', size: 'xl', submitLabel: 'Save ticked prices',
+      body: `<div class="form-grid">
+          <div class="field full"><label for="ceFiles">NPPA notification (PDF or photo) — AI matches it to your products</label><div class="toolbar"><input type="file" id="ceFiles" accept="application/pdf,image/*" multiple><button type="button" class="btn" data-p4="ceil-read">${icon('spark')}Read with AI</button></div></div>
+          <div class="field full"><label for="ceCsv">Or type: product ID or name, ceiling price per pack before GST — one per line</label><textarea id="ceCsv" rows="4" placeholder="P012, 41.20&#10;DOLO 650 15TAB, 30.50"></textarea><div style="margin-top:6px"><button type="button" class="btn sm" data-p4="ceil-csv">Check these</button></div></div>
+        </div>
+        <div id="ceResult"></div>
+        <div class="small muted">NPPA ceiling prices are per tablet / capsule / ml and exclude GST. The MRP may be at most the ceiling × units in the pack + GST. Notifications are on nppaindia.nic.in. Check every row before saving — an AI or name match can be wrong.</div>`,
+      onSubmit: v => {
+        const pick = ceilState.filter((r, i) => v['ce_' + i]);
+        if (!pick.length) { toast('Tick at least one row.'); return false; }
+        pick.forEach(r => { const p = prod(r.pid); if (p) Object.assign(p, { ceiling: round2(r.perPack), dpco: true, ceilingRef: r.ref || '' }); });
+        logAgent('ceiling', `Ceiling prices saved for ${pick.length} product(s)`);
+        runAgent('ceiling', false);
+        return `Ceiling prices saved for ${pick.length} product(s). ${agentCfg('ceiling').lastResult}.`;
+      },
+    });
+  };
+  function renderCeil() {
+    const box = $('#ceResult'); if (!box) return;
+    box.innerHTML = ceilState.length ? `<div class="card-title" style="font-size:15px">Matches — untick any that are wrong</div>${miniTable([
+      { h: '', c: (r, i) => `<input type="checkbox" class="cb" name="ce_${i}" checked aria-label="Use this row">` },
+      { h: 'Your product', c: r => `<span class="strong">${esc(prod(r.pid)?.name || '')}</span><div class="small muted">${esc(prod(r.pid)?.pack || '')}${prod(r.pid)?.salt ? ' · ' + esc(prod(r.pid).salt) : ''}</div>` },
+      { h: 'NPPA formulation', c: r => `<span class="small">${esc(r.formulation || '')}</span><div class="small muted">${esc(r.ref || '')}</div>` },
+      { h: 'Per unit', r: 1, c: r => r.perUnit ? `${dec(r.perUnit)}<div class="small muted">${esc(r.unit || '')}</div>` : '—' },
+      { h: 'Units', r: 1, c: r => r.units ? qty(r.units) : '—' },
+      { h: 'Ceiling / pack', r: 1, c: r => dec(r.perPack) },
+      { h: 'Max MRP', r: 1, c: r => dec(round2(r.perPack * (1 + num(prod(r.pid)?.gst) / 100))) },
+      { h: 'Your MRP', r: 1, c: r => { const p = prod(r.pid), mx = round2(r.perPack * (1 + num(p?.gst) / 100)); return `<span class="${num(p?.mrp) > mx + 0.01 ? 'bad-text strong' : ''}">${dec(p?.mrp)}</span>`; } },
+    ], ceilState)}` : '<div class="empty">No products matched.</div>';
+  }
+  async function readCeilingFile() {
+    const files = [...($('#ceFiles')?.files || [])];
+    if (!files.length) { toast('Choose the NPPA notification first.'); return; }
+    if (!getApiKey()) { toast('Add the Anthropic API key in Settings → Integrations → AI providers.'); return; }
+    const btn = $('[data-p4="ceil-read"]'); btn.disabled = true; btn.textContent = 'Reading…';
+    const list = db.products.slice(0, 1500).map(p => `${p.id} | ${p.name} | salt: ${p.salt || ''} | form: ${p.form || ''} | pack: ${p.pack || ''}`).join('\n');
+    const prompt = `This is a price notification of India's National Pharmaceutical Pricing Authority (NPPA) under the Drugs (Prices Control) Order 2013 — ceiling prices or retail prices of formulations.
+
+Our product list (ID | name | salt | form | pack):
+${list}
+
+For each of OUR products that is clearly the same formulation as a row in the document — same active ingredient(s), same strength and same dosage form — return:
+- product_id: our ID
+- formulation: the formulation as printed in the document, with strength
+- ceiling_per_unit: the ceiling (or retail) price in rupees per unit as printed, excluding GST
+- unit: the unit it is priced per, e.g. "1 tablet", "1 ml", "1 vial"
+- units_per_pack: how many such units are in our pack (e.g. 10TAB → 10, 15TAB → 15, 100ML priced per ml → 100)
+- ceiling_per_pack: ceiling_per_unit × units_per_pack, rounded to 2 decimals
+- notification: the S.O. number and date if printed, else empty
+
+Only include confident matches. A brand name alone is not enough: the ingredients and strength must match. Leave out our products that are not in the document. If no product matches, return an empty list.`;
+    try {
+      const x = await callClaudeJson(files, prompt, CEIL_SCHEMA, 16000, aiModel('bill'));
+      ceilState = (x.matches || []).filter(m => prod(m.product_id) && num(m.ceiling_per_pack) > 0).map(m => ({ pid: m.product_id, formulation: m.formulation, perUnit: num(m.ceiling_per_unit), unit: m.unit, units: num(m.units_per_pack), perPack: round2(num(m.ceiling_per_pack)), ref: m.notification }));
+      logAgent('ceiling', `Read an NPPA notification: ${ceilState.length} product match(es)`);
+      renderCeil();
+    } catch (err) { toast(err.message || 'Could not read the file.'); }
+    finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = icon('spark') + 'Read with AI'; } }
+  }
+  function ceilingFromCsv() {
+    const rows = String($('#ceCsv')?.value || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const out = [], miss = [];
+    rows.forEach(l => {
+      const m = /^(.*?)[,\t|]\s*([\d.]+)\s*$/.exec(l); if (!m) { miss.push(l); return; }
+      const key = m[1].trim(); const p = prod(key.toUpperCase()) || prod(key) || findProductByName(key);
+      if (!p || !(num(m[2]) > 0)) { miss.push(l); return; }
+      out.push({ pid: p.id, formulation: 'Typed by you', perUnit: 0, unit: '', units: 0, perPack: round2(num(m[2])), ref: '' });
+    });
+    ceilState = out; renderCeil();
+    if (miss.length) toast(`${miss.length} line(s) not matched: ${miss.slice(0, 2).join('; ')}`);
+  }
+
+  // ----- Schedule H1 / X / NDPS register -----
+  function registerRows(month, sch) {
+    const out = [];
+    db.sales.filter(s => s.date.slice(0, 7) === month).sort((a, b) => a.date.localeCompare(b.date) || a.no.localeCompare(b.no)).forEach(s => s.lines.forEach(l => {
+      const p = prod(l.productId); if (!regItem(p) || (sch && p.schedule !== sch)) return;
+      out.push({ s, l, p, pt: partyOf(s) });
+    }));
+    return out;
+  }
+  let regState = { month: todayIso.slice(0, 7), sch: '' };
+  ACTIONS['h1-register'] = m => { if (m && /^\d{4}-\d{2}$/.test(m)) regState.month = m; registerModal(); };
+  function registerModal() {
+    const { month, sch } = regState; const rows = registerRows(month, sch);
+    const unset = db.products.filter(p => !p.schedule).length;
+    const mLabel = new Date(month + '-01T00:00').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+    const head = sch ? (sch === 'NDPS' ? 'NDPS' : 'SCHEDULE ' + sch) : 'SCHEDULE H1 / X / NDPS';
+    openModal({
+      title: 'Schedule H1 / X / NDPS sale register', size: 'xl',
+      extraFoot: printFoot('a4l', '<button type="button" class="btn" data-p4="reg-csv">CSV</button>'),
+      body: `<div class="toolbar no-print"><label class="bf"><span>Month</span><input type="month" id="regMonth" value="${month}"></label><label class="bf"><span>Schedule</span><select id="regSch">${[['', 'H1, X and NDPS'], ['H1', 'Schedule H1'], ['X', 'Schedule X'], ['NDPS', 'NDPS']].map(([v, l]) => `<option value="${v}" ${v === sch ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${unset ? `<span class="small bad-text">${unset} product(s) have no schedule set and are not in this register (Products & Masters → Edit, or tick and set Schedule).</span>` : ''}</div>
+        <div class="paper-wrap"><div class="paper paper-a4l"><div class="bill">
+          ${paperHead(`REGISTER OF SALE — ${head} DRUGS`, `<div class="strong">Month: ${esc(mLabel)}</div><div>${rows.length} entr${rows.length === 1 ? 'y' : 'ies'}</div>`)}
+          <table class="ledger-table"><thead><tr><th>#</th><th>Date</th><th>Bill no.</th><th>Sold to (name and address)</th><th>Licence no. / prescriber</th><th>Name of drug</th><th>Sch.</th><th>Batch</th><th>Exp</th><th class="r">Qty</th></tr></thead>
+          <tbody>${rows.map((x, i) => `<tr><td>${i + 1}</td><td>${fmtDate(x.s.date)}</td><td>${esc(x.s.no)}</td><td><b>${esc(partyName(x.s))}</b><div class="small">${esc((x.pt && addrText(x.pt)) || x.s.party.phone || '')}</div></td><td class="small">${esc(x.s.party.type === 'chemist' ? [x.pt?.dl1, x.pt?.dl2].filter(Boolean).join(', ') || 'No licence saved' : x.s.rx || 'Prescription not entered')}</td><td>${esc(x.p.name)}<div class="small">${esc(x.p.salt || x.p.pack || '')}</div></td><td>${esc(x.p.schedule)}</td><td>${esc(x.l.batch)}</td><td>${isoToExp(x.l.expiry)}</td><td class="r num">${qty(x.l.qty + (x.l.free || 0))}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">No sales of these drugs in this month.</td></tr>'}</tbody></table>
+          <div class="bill-sign"><div><span>&nbsp;</span><span class="sig-line">Checked by</span></div><div><span>For <b>${esc(db.settings.firm.name)}</b></span><span class="sig-line">Registered pharmacist / competent person</span></div></div>
+        </div></div></div>`,
+    });
+  }
+  function registerCsv() {
+    const rows = registerRows(regState.month, regState.sch);
+    const out = [['Date', 'Bill no', 'Sold to', 'Address', 'Licence / prescriber', 'Drug', 'Salt', 'Schedule', 'Batch', 'Expiry', 'Qty'], ...rows.map(x => [x.s.date, x.s.no, partyName(x.s), (x.pt && addrText(x.pt)) || '', x.s.party.type === 'chemist' ? [x.pt?.dl1, x.pt?.dl2].filter(Boolean).join(' / ') : x.s.rx || '', x.p.name, x.p.salt || '', x.p.schedule, x.l.batch, isoToExp(x.l.expiry), x.l.qty + (x.l.free || 0)])];
+    downloadText(`register-${regState.sch || 'H1-X-NDPS'}-${regState.month}.csv`, out.map(r => r.map(csvCell).join(',')).join('\r\n'));
+  }
+  function runRegisterAgent() {
+    const c = agentCfg('h1'); const keep = new Set(); let made = 0;
+    const add = (item, days) => { made += p4Add('h1', keep, item, days); };
+    const recent = db.sales.filter(s => s.date >= addDays(todayIso, -c.days));
+    // Sold to chemists without a valid drug licence on the bill date
+    const noLic = {};
+    recent.forEach(s => {
+      if (s.party.type !== 'chemist' || !s.lines.some(l => regItem(prod(l.productId)))) return;
+      const ch = chem(s.party.chemistId); if (!ch) return;
+      const why = !ch.dl1 && !ch.dl2 ? 'no drug licence number saved' : ch.dlValid && ch.dlValid < s.date ? `licence expired on ${fmtDate(ch.dlValid)}` : '';
+      if (why) (noLic[ch.id] = noLic[ch.id] || { ch, why, bills: [] }).bills.push(s.no);
+    });
+    Object.values(noLic).forEach(x => add({ key: 'reg:lic:' + x.ch.id, kind: 'info', title: `H1 / X / NDPS items sold to ${x.ch.name} — ${x.why}`, detail: [`Bills: ${x.bills.join(', ')}`, 'These drugs may be sold only to a licensed chemist. Update the licence, or stop supplying these items.'], payload: { act: ['view-chemist', x.ch.id] } }, 7));
+    // Retail bills without prescription details
+    const noRx = recent.filter(s => s.party.type !== 'chemist' && !String(s.rx || '').trim() && s.lines.some(l => regItem(prod(l.productId))));
+    if (noRx.length) add({ key: 'reg:rx', kind: 'info', title: `${noRx.length} retail bill(s) with H1 / X / NDPS items have no prescription details`, detail: [noRx.slice(0, 8).map(s => s.no).join(', '), 'Edit the bill and fill “Prescription (doctor, reg. no.)”, and keep a copy of the prescription.'], payload: { go: 'sales' } }, 7);
+    // Unusual quantities to one chemist (possible misuse)
+    const watch = ['X', 'NDPS', ...(c.watchH1 ? ['H1'] : [])];
+    const from30 = addDays(todayIso, -30), from120 = addDays(todayIso, -120); const sum = {};
+    db.sales.filter(s => s.date >= from120 && s.party.type === 'chemist').forEach(s => s.lines.forEach(l => {
+      const p = prod(l.productId); if (!p || !watch.includes(p.schedule)) return;
+      const o = sum[s.party.chemistId + '|' + p.id] || (sum[s.party.chemistId + '|' + p.id] = { now: 0, before: 0 });
+      if (s.date >= from30) o.now += l.qty + (l.free || 0); else o.before += l.qty + (l.free || 0);
+    }));
+    Object.entries(sum).forEach(([k, o]) => {
+      const avgM = o.before / 3; if (o.now < c.minQty || o.now < avgM * c.spikeX) return;
+      const [cid, pid] = k.split('|');
+      add({ key: 'reg:spike:' + k, kind: 'info', title: `Unusual quantity — ${prod(pid).name} to ${chem(cid)?.name || cid}`, detail: [`${qty(o.now)} in the last 30 days · usually ${qty(Math.round(avgM))} a month`, 'Check the reason before supplying more. Schedule X and NDPS sales are watched by the Drug Controller and the NCB.'], payload: { act: ['view-chemist', cid] } }, 30);
+    });
+    if (c.remindUnset) { const unset = db.products.filter(p => !p.schedule); if (unset.length) add({ key: 'reg:unset', kind: 'info', title: `${unset.length} product(s) have no schedule set (OTC, G, H, H1, X, NDPS)`, detail: [unset.slice(0, 5).map(p => p.name).join(', ') + (unset.length > 5 ? '…' : ''), 'Products & Masters → tick products → Schedule. Only H1, X and NDPS items go into the register.'], payload: { go: 'products' } }, 14); }
+    if (TODAY.getDate() >= c.printDay) {
+      const prev = iso(new Date(TODAY.getFullYear(), TODAY.getMonth() - 1, 1)).slice(0, 7); const n = registerRows(prev, '').length;
+      if (n) add({ key: 'reg:print:' + prev, kind: 'info', title: `Print the H1 / X / NDPS register for ${prev}`, detail: [`${n} entr${n === 1 ? 'y' : 'ies'} · sign it and keep it for inspection`], payload: { act: ['h1-register', prev] } }, 45);
+    }
+    closeStale('h1', keep);
+    return { made, summary: `${db.products.filter(regItem).length} register item(s) · ${keep.size} alert(s)` };
+  }
+
+  // ----- Chemist Credit Risk -----
+  const DEFAULT_WINBACK = 'Namaste {party} ji,\n{firm} se kaafi din se aapka order kam aaya hai. Koi dikkat ho, rate ya koi item chahiye ho to bataiye — hum turant arrange karenge.\nDhanyavaad';
+  function creditProfile(cid) {
+    const ch = chem(cid); if (!ch) return null;
+    const terms = ch.terms ?? 30, out = chemOutstanding(cid);
+    const bills = db.sales.filter(s => s.party.chemistId === cid && s.date >= addDays(todayIso, -365));
+    if (!bills.length) return { grade: '—', score: null, avgPay: 0, out, overdue: 0, util: ch.creditLimit ? out / ch.creditLimit : 0, why: ['No bills in the last 12 months'] };
+    let wDays = 0, wAmt = 0;
+    bills.forEach(s => {
+      const closed = balance(s) <= 0.5;
+      if (!closed && -daysFrom(s.date) <= terms) return; // still within terms — no signal yet
+      const end = closed ? (payList(s).filter(p => p.amount > 0).map(p => p.date).sort().pop() || s.date) : todayIso;
+      wDays += Math.max(0, Math.round((parse(end) - parse(s.date)) / DAY)) * s.total; wAmt += s.total;
+    });
+    const avgPay = wAmt ? Math.round(wDays / wAmt) : 0;
+    const od = db.sales.filter(s => s.party.chemistId === cid && saleStatus(s) === 'Overdue');
+    const overdue = round2(od.reduce((a, s) => a + balance(s), 0));
+    const oldest = od.length ? Math.max(...od.map(s => -daysFrom(s.date))) : 0;
+    const util = ch.creditLimit ? out / ch.creditLimit : 0;
+    const why = [];
+    const p1 = Math.min(40, Math.round(Math.max(0, avgPay - terms) * 1.5));
+    if (wAmt) why.push(p1 ? `Pays in ${avgPay} days on average (terms ${terms})` : `Pays within terms (${avgPay} days on average)`);
+    const p2 = out > 0 && overdue > 0.5 ? Math.min(30, Math.round(Math.min(overdue, out) / out * 30)) : 0;
+    if (overdue > 0.5) why.push(`${money(overdue)} overdue in ${od.length} bill${od.length === 1 ? '' : 's'}`);
+    const p3 = util > 1 ? 20 : util > 0.8 ? 8 : 0; if (util > 0.8) why.push(`Using ${Math.round(util * 100)}% of the credit limit`);
+    const p4 = oldest > terms + 60 ? 10 : 0; if (p4) why.push(`Oldest unpaid bill is ${oldest} days old`);
+    const score = 100 - p1 - p2 - p3 - p4;
+    return { score, grade: score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D', avgPay, out, overdue, oldest, util, why };
+  }
+  const gradePill = pr => pr && pr.score != null ? pill('Score ' + pr.grade) : '<span class="muted small">—</span>';
+  function runCreditAgent() {
+    const c = agentCfg('credit'); const keep = new Set(); let made = 0, over = 0, up = 0, down = 0, wb = 0;
+    const add = (item, days) => { const n = p4Add('credit', keep, item, days); made += n; return keep.has(item.key); };
+    const r10 = v => Math.ceil(v / 10000) * 10000;
+    const sumSince = (cid, from, to) => db.sales.filter(s => s.party.chemistId === cid && s.date >= from && (!to || s.date < to)).reduce((a, s) => a + s.total, 0);
+    db.chemists.filter(ch => ch.status === 'Active').forEach(ch => {
+      const pr = creditProfile(ch.id); if (!pr) return;
+      if (ch.creditLimit && pr.out > ch.creditLimit && add({ key: 'credit:over:' + ch.id, kind: 'info', title: `${ch.name} is ${money(pr.out - ch.creditLimit)} above the credit limit`, detail: [`Outstanding ${money(pr.out)} · limit ${money(ch.creditLimit)} · score ${pr.grade}`, ...pr.why], payload: { act: ['view-chemist', ch.id] } }, 7)) over++;
+      const recent = sumSince(ch.id, addDays(todayIso, -90));
+      if (pr.grade === 'A' && ch.creditLimit && pr.util >= c.raiseAt / 100 && recent > 0) {
+        const nl = r10(Math.max(ch.creditLimit * (1 + c.stepPct / 100), pr.out * 1.2));
+        if (add({ key: 'credit:limit:' + ch.id, kind: 'creditlimit', title: `Raise ${ch.name}’s credit limit to ${money(nl)}?`, detail: [`Score A · ${pr.why[0] || ''} · using ${Math.round(pr.util * 100)}% of ${money(ch.creditLimit)}`, `Bought ${money(recent)} in the last 90 days`], payload: { cid: ch.id, limit: nl, from: ch.creditLimit } }, c.reviewDays)) up++;
+      } else if (pr.grade === 'D' && ch.creditLimit > Math.max(pr.out, 0)) {
+        const nl = Math.max(r10(Math.max(pr.out, 0)), r10(ch.creditLimit * (1 - c.stepPct / 100)));
+        if (nl < ch.creditLimit && add({ key: 'credit:limit:' + ch.id, kind: 'creditlimit', title: `Lower ${ch.name}’s credit limit to ${money(nl)}?`, detail: [`Score D (${pr.score}/100)`, ...pr.why], payload: { cid: ch.id, limit: nl, from: ch.creditLimit } }, c.reviewDays)) down++;
+      }
+      const usual = sumSince(ch.id, addDays(todayIso, -120), addDays(todayIso, -30)) / 3, now = sumSince(ch.id, addDays(todayIso, -30));
+      if (usual >= c.winbackMin && now < usual * (1 - c.dropPct / 100)) {
+        const last = db.sales.filter(s => s.party.chemistId === ch.id).map(s => s.date).sort().pop();
+        if (add({ key: 'credit:winback:' + ch.id, kind: 'winback', title: `${ch.name} is buying less — ${money(now)} in the last 30 days, usually ${money(usual)}`, detail: [`Last bill ${last ? fmtDate(last) : '—'} · score ${pr.grade}`, 'Call or message them: ask about service, rates or items they need.'], payload: { cid: ch.id } }, c.winbackDays)) wb++;
+      }
+    });
+    closeStale('credit', keep);
+    return { made, summary: `${over} over limit, ${up} limit raise(s), ${down} limit cut(s), ${wb} to win back` };
+  }
+  ACTIONS['credit-report'] = () => {
+    const rows = db.chemists.filter(ch => ch.status !== 'Pending verification').map(ch => ({ ch, pr: creditProfile(ch.id) })).sort((a, b) => (a.pr.score ?? 101) - (b.pr.score ?? 101));
+    openModal({
+      title: 'Chemist credit scores', size: 'xl',
+      body: `<div class="small muted">Score out of 100 from the last 12 months: how fast bills are paid against the chemist’s terms, overdue amount, use of the credit limit and the oldest unpaid bill. A ≥ 80 · B ≥ 60 · C ≥ 40 · D below 40.</div>
+        ${miniTable([
+          { h: 'Chemist', c: x => `<span class="strong">${esc(x.ch.name)}</span><div class="small muted">${esc([x.ch.tehsil, x.ch.district].filter(Boolean).join(', '))} · ${pill(x.ch.status)}</div>` },
+          { h: 'Score', c: x => `${gradePill(x.pr)} <span class="small">${x.pr.score ?? ''}</span>` },
+          { h: 'Pays in', r: 1, c: x => x.pr.score != null ? `${x.pr.avgPay} d` : '—' },
+          { h: 'Outstanding', r: 1, c: x => money(x.pr.out) },
+          { h: 'Limit', r: 1, c: x => money(x.ch.creditLimit) },
+          { h: 'Used', r: 1, c: x => `${Math.round(x.pr.util * 100)}%` },
+          { h: 'Why', c: x => `<span class="small">${esc(x.pr.why.join(' · '))}</span>` },
+        ], rows)}`,
+    });
+  };
+
+  // ----- Schemes & Claims -----
+  const SCHEME_TYPES = [['free', 'Free goods on purchase (buy X get Y)'], ['discount', 'Extra discount on purchase (%)'], ['claim', 'Company pays back on our sales (₹ per unit or %)']];
+  const schemeById = id => (db.schemes || []).find(s => s.id === id);
+  const schemeStatus = s => todayIso < s.from ? 'Upcoming' : todayIso > s.to ? 'Ended' : 'Active';
+  const schemeOffer = s => s.type === 'free' ? `Buy ${qty(s.buy)} get ${qty(s.get)} free` : s.type === 'discount' ? `${dec(s.pct)}% extra off on purchase` : s.perUnit > 0 ? `₹${dec(s.perUnit)} back per unit sold` : `${dec(s.pct)}% of sale value back`;
+  const schemeProducts = s => s.productIds?.length ? s.productIds.filter(prod) : db.products.filter(p => p.companyId === s.companyId).map(p => p.id);
+  const claimFrom = s => { const last = (db.schemeClaims || []).filter(c => c.schemeId === s.id).map(c => c.to).sort().pop(); return last ? addDays(last, 1) : s.from; };
+  function schemeClaimRows(s, from, to) {
+    const pids = new Set(schemeProducts(s)); const rows = [];
+    db.sales.filter(x => x.date >= from && x.date <= to).forEach(x => x.lines.forEach(l => {
+      if (!pids.has(l.productId)) return;
+      const val = calcLine(l).taxable;
+      rows.push({ x, l, q: l.qty, val, amt: round2(s.perUnit > 0 ? l.qty * s.perUnit : val * num(s.pct) / 100) });
+    }));
+    return rows;
+  }
+  function schemeModal(s) {
+    const isNew = !s; s = s || { type: 'free', from: todayIso, to: addDays(todayIso, 30), productIds: [], buy: 10, get: 1, pct: 0, perUnit: 0 };
+    const sel = new Set(s.productIds || []);
+    openModal({
+      title: isNew ? 'Add a scheme' : `Edit ${s.name}`, size: 'lg', submitLabel: isNew ? 'Add scheme' : 'Save',
+      body: `<div class="form-grid">
+          ${field('Scheme name', 'name', { value: s.name || '', required: true, attrs: 'placeholder="e.g. Lupin Diwali 10+1"' })}
+          ${field('Company / brand', 'company', { value: company(s.companyId)?.name || '', required: true, attrs: 'list="dl-companies"' })}
+          ${field('Type', 'type', { value: s.type, options: SCHEME_TYPES, full: true })}
+          ${field('Buy (qty)', 'buy', { type: 'number', value: s.buy || '', attrs: numAttrs('1') })}
+          ${field('Get free (qty)', 'get', { type: 'number', value: s.get || '', attrs: numAttrs('1') })}
+          ${field('Discount / claim %', 'pct', { type: 'number', value: s.pct || '', attrs: numAttrs() })}
+          ${field('Claim ₹ per unit sold', 'perUnit', { type: 'number', value: s.perUnit || '', attrs: numAttrs() })}
+          ${field('From', 'from', { type: 'date', value: s.from, required: true })}
+          ${field('To', 'to', { type: 'date', value: s.to, required: true })}
+          ${field('Only on bills from supplier (optional)', 'supplierId', { value: s.supplierId || '', options: [['', 'Any supplier'], ...db.suppliers.map(x => [x.id, x.name]).sort(byName)] })}
+          <div class="field full"><label for="f-pids">Products — none ticked means every product of the company</label><select id="f-pids" multiple size="8">${[...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => `<option value="${p.id}" ${sel.has(p.id) ? 'selected' : ''}>${esc(p.name)} · ${esc(company(p.companyId)?.name || '')}</option>`).join('')}</select><div class="small muted">Hold Ctrl (or Cmd) to pick several.</div></div>
+          ${field('Note', 'note', { value: s.note || '', full: true })}
+        </div>
+        <div class="small muted">Free goods and discount schemes are checked against your purchase bills. Claim schemes add up your sales of the products in the period so you can claim the amount from the company.</div>`,
+      onSubmit: (d, form) => {
+        const rec = { name: d.name.trim(), companyId: findOrCreateCompany(d.company), type: d.type, buy: Math.floor(num(d.buy)), get: Math.floor(num(d.get)), pct: num(d.pct), perUnit: num(d.perUnit), from: d.from, to: d.to, supplierId: d.supplierId || '', note: (d.note || '').trim(), productIds: [...form.querySelector('#f-pids').selectedOptions].map(o => o.value) };
+        if (rec.to < rec.from) { toast('“To” must be on or after “From”.'); return false; }
+        if (rec.type === 'free' && !(rec.buy > 0 && rec.get > 0)) { toast('Enter Buy and Get free quantities.'); return false; }
+        if (rec.type === 'discount' && !(rec.pct > 0)) { toast('Enter the discount %.'); return false; }
+        if (rec.type === 'claim' && !(rec.perUnit > 0 || rec.pct > 0)) { toast('Enter the claim ₹ per unit or %.'); return false; }
+        if (isNew) db.schemes.unshift({ id: uid(), created: todayIso, ...rec }); else Object.assign(s, rec);
+        return `${rec.name} ${isNew ? 'added' : 'saved'}.`;
+      },
+    });
+  }
+  ACTIONS['scheme-new'] = () => schemeModal(null);
+  ACTIONS['scheme-edit'] = id => { const s = schemeById(id); if (s) schemeModal(s); };
+  ACTIONS['scheme-del'] = id => { const s = schemeById(id); if (!s) return; confirmModal(`Delete ${esc(s.name)}?`, 'Saved claims for it are kept. This cannot be undone.', 'Delete', () => { db.schemes = db.schemes.filter(x => x !== s); return 'Scheme deleted.'; }); };
+  let claimState = null;
+  function claimModal(sid, approvalId) {
+    const s = schemeById(sid); if (!s) { if (approvalId) { doneApproval(approvalId, 'Scheme deleted'); refresh(); } return; }
+    const from = claimFrom(s), to = s.to < todayIso ? s.to : todayIso;
+    const rows = from <= to ? schemeClaimRows(s, from, to) : [];
+    const tot = round2(rows.reduce((a, r) => a + r.amt, 0)), q = rows.reduce((a, r) => a + r.q, 0), co = company(s.companyId);
+    claimState = { s, from, to, rows };
+    openModal({
+      title: `Scheme claim — ${s.name}`, size: 'xl', submitLabel: 'Save as claimed',
+      extraFoot: printFoot('a4', '<button type="button" class="btn" data-p4="claim-csv">CSV</button>'),
+      body: `<div class="paper-wrap"><div class="paper paper-a4"><div class="bill">
+          ${paperHead('SCHEME CLAIM', `<div class="bill-to-label">To</div><div class="strong">${esc(co?.name || 'Company')}</div><div>${esc(s.name)} · ${esc(schemeOffer(s))}</div><div class="small">Period: ${fmtDate(from)} to ${fmtDate(to)}</div>`)}
+          <table class="ledger-table"><thead><tr><th>Date</th><th>Bill</th><th>Party</th><th>Product</th><th>Batch</th><th class="r">Qty</th><th class="r">Taxable ₹</th><th class="r">Claim ₹</th></tr></thead>
+          <tbody>${rows.map(r => `<tr><td>${fmtDate(r.x.date)}</td><td>${esc(r.x.no)}</td><td>${esc(partyName(r.x))}</td><td>${esc(prod(r.l.productId)?.name || '')}</td><td>${esc(r.l.batch)}</td><td class="r num">${qty(r.q)}</td><td class="r num">${dec(r.val)}</td><td class="r num">${dec(r.amt)}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">No sales of these products in this period.</td></tr>'}</tbody>
+          <tfoot><tr><td colspan="5">Total</td><td class="r num">${qty(q)}</td><td class="r num">${dec(rows.reduce((a, r) => a + r.val, 0))}</td><td class="r num">${dec(tot)}</td></tr></tfoot></table>
+          <div class="bill-words"><span>Amount claimed</span>${money2(tot)} — ${esc(rupeesInWords(tot))}</div>
+          <div class="small">Sales returns are not deducted — adjust if the company asks.</div>
+          <div class="bill-sign"><div><span>&nbsp;</span><span class="sig-line">Company representative</span></div><div><span>For <b>${esc(db.settings.firm.name)}</b></span><span class="sig-line">Authorised signatory</span></div></div>
+        </div></div></div>`,
+      onSubmit: () => {
+        if (!rows.length || tot <= 0) { toast('Nothing to claim in this period.'); return false; }
+        db.schemeClaims.unshift({ id: uid(), schemeId: s.id, from, to, qty: q, amount: tot, status: 'Claimed', date: todayIso });
+        if (approvalId) doneApproval(approvalId, `Claimed ₹${dec(tot)}`);
+        logAgent('schemes', `Claim ${money(tot)} saved for ${s.name}`);
+        return `Claim of ${money(tot)} saved — mark it received when the company pays or gives a credit note.`;
+      },
+    });
+  }
+  function claimCsv() {
+    const st = claimState; if (!st) return;
+    const out = [['Date', 'Bill', 'Party', 'Product', 'Batch', 'Qty', 'Taxable', 'Claim'], ...st.rows.map(r => [r.x.date, r.x.no, partyName(r.x), prod(r.l.productId)?.name || '', r.l.batch, r.q, plainNum(r.val), plainNum(r.amt)])];
+    downloadText(`claim-${st.s.name.replace(/[^\w-]+/g, '_')}-${st.from}-${st.to}.csv`, out.map(r => r.map(csvCell).join(',')).join('\r\n'));
+  }
+  ACTIONS['scheme-claim'] = id => claimModal(id, '');
+  ACTIONS['claim-received'] = id => { const c = (db.schemeClaims || []).find(x => x.id === id); if (!c) return; Object.assign(c, { status: 'Received', receivedOn: todayIso }); logAgent('manual', `Scheme claim ${money(c.amount)} received`); refresh(); toast('Marked received.'); };
+  ACTIONS['claim-del'] = id => { const c = (db.schemeClaims || []).find(x => x.id === id); if (!c) return; confirmModal('Delete this claim?', `${money(c.amount)} for ${fmtDate(c.from)} – ${fmtDate(c.to)}. Its sales can then be claimed again.`, 'Delete', () => { db.schemeClaims = db.schemeClaims.filter(x => x !== c); return 'Claim deleted.'; }); };
+  VIEWS.schemes = () => {
+    const ss = db.schemes || [], cl = db.schemeClaims || [];
+    const act = ss.filter(s => schemeStatus(s) === 'Active');
+    return `
+      <div class="grid g-4">
+        ${kpi('Active schemes', qty(act.length), `${ss.length} saved`)}
+        ${kpi('Ending within 7 days', qty(act.filter(s => daysFrom(s.to) <= 7).length), 'Stock up if needed')}
+        ${kpi('Claims waiting', compact(cl.filter(c => c.status === 'Claimed').reduce((a, c) => a + c.amount, 0)), `${cl.filter(c => c.status === 'Claimed').length} claim(s) not received`)}
+        ${kpi('Claims received', compact(cl.filter(c => c.status === 'Received').reduce((a, c) => a + c.amount, 0)), 'All time')}
+      </div>
+      ${useList({
+        key: 'schemes', title: 'Schemes',
+        actions: actBtn('scheme-new', '', icon('plus') + 'Add scheme', 'primary'),
+        tabs: [{ id: 'all', label: 'All' }, ...['Active', 'Upcoming', 'Ended'].map(t => ({ id: t, label: t, filter: s => schemeStatus(s) === t }))],
+        rows: () => [...ss].sort((a, b) => b.to.localeCompare(a.to)),
+        text: s => [s.name, company(s.companyId)?.name, s.note, ...schemeProducts(s).map(id => prod(id)?.name)].join(' '),
+        empty: 'No schemes yet. Add company schemes (10+1 free, extra discount, or claims on sales) — the Schemes & Claims agent checks your purchase bills and works out claims.',
+        columns: [
+          { h: 'Scheme', c: s => `<span class="strong">${esc(s.name)}</span><div class="small muted">${esc(company(s.companyId)?.name || '')}${s.supplierId ? ' · via ' + esc(sup(s.supplierId)?.name || '') : ''}</div>` },
+          { h: 'Offer', c: s => esc(schemeOffer(s)) },
+          { h: 'Products', c: s => { const ps = schemeProducts(s); return `<span class="small">${s.productIds?.length ? esc(ps.slice(0, 3).map(id => prod(id)?.name).join(', ')) + (ps.length > 3 ? ` +${ps.length - 3}` : '') : `All ${ps.length} of the company`}</span>`; } },
+          { h: 'Valid', c: s => `${fmtDate(s.from)} – ${fmtDate(s.to)}` },
+          { h: 'Status', c: s => pill(schemeStatus(s)) },
+          { h: '', c: s => rowActs(s.type === 'claim' && s.from <= todayIso ? actBtn('scheme-claim', s.id, 'Claim', 'ghost') : '', actBtn('scheme-edit', s.id, 'Edit', 'ghost'), actBtn('scheme-del', s.id, 'Delete', 'ghost danger')) },
+        ],
+      })}
+      ${useList({
+        key: 'claims', title: 'Claims', noSearch: true, rows: () => cl, text: c => schemeById(c.schemeId)?.name || '',
+        empty: 'No claims yet.',
+        columns: [
+          { h: 'Claimed on', c: c => fmtDate(c.date) },
+          { h: 'Scheme', c: c => `<span class="strong">${esc(schemeById(c.schemeId)?.name || 'Deleted scheme')}</span><div class="small muted">${esc(company(schemeById(c.schemeId)?.companyId)?.name || '')}</div>` },
+          { h: 'Period', c: c => `${fmtDate(c.from)} – ${fmtDate(c.to)}` },
+          { h: 'Units', r: 1, c: c => qty(c.qty) },
+          { h: 'Amount', r: 1, c: c => money(c.amount) },
+          { h: 'Status', c: c => pill(c.status) + (c.receivedOn ? `<div class="small muted">${fmtDate(c.receivedOn)}</div>` : '') },
+          { h: '', c: c => rowActs(c.status === 'Claimed' ? actBtn('claim-received', c.id, 'Mark received', 'ghost') : '', actBtn('claim-del', c.id, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
+  };
+  function runSchemesAgent() {
+    const c = agentCfg('schemes'); const keep = new Set(); let made = 0;
+    const add = (item, days) => { made += p4Add('schemes', keep, item, days); };
+    const plines = purchaseLines();
+    (db.schemes || []).forEach(s => {
+      const st = schemeStatus(s), pids = schemeProducts(s), coName = company(s.companyId)?.name || 'the company';
+      if (st === 'Active' && daysFrom(s.to) <= c.warnDays) add({ key: 'sch:end:' + s.id, kind: 'info', title: `Scheme ends ${daysFrom(s.to) === 0 ? 'today' : `in ${daysFrom(s.to)} day(s)`} — ${s.name}`, detail: [`${schemeOffer(s)} · till ${fmtDate(s.to)}`, ...pids.slice(0, 4).map(id => `${prod(id).name}: ${qty(sellableQty(id))} in stock · ~${qty(monthlySold(id))}/month`), 'Order now if you need stock at the scheme rate.'], payload: { act: ['scheme-edit', s.id] } }, 365);
+      if (s.type === 'free' || s.type === 'discount') {
+        const set = new Set(pids), short = {};
+        plines.filter(l => set.has(l.productId) && l.date >= s.from && l.date <= s.to && (!s.supplierId || l.supplierId === s.supplierId)).forEach(l => {
+          const name = prod(l.productId)?.name || l.name;
+          if (s.type === 'free') { const due = Math.floor(num(l.qty) / s.buy) * s.get; if (num(l.free) + 0.001 < due) (short[l.docNo] = short[l.docNo] || { act: l.act, lines: [] }).lines.push(`${name}: bought ${qty(l.qty)}, free ${qty(l.free)} — should be ${qty(due)}`); }
+          else if (num(l.cd) + num(l.td) + 0.01 < s.pct) (short[l.docNo] = short[l.docNo] || { act: l.act, lines: [] }).lines.push(`${name}: discount ${dec(num(l.cd) + num(l.td))}% — scheme ${dec(s.pct)}%`);
+        });
+        Object.entries(short).forEach(([doc, x]) => add({ key: `sch:short:${s.id}:${doc}`, kind: 'info', title: `Scheme not given in full on ${doc} — ${s.name}`, detail: [...x.lines.slice(0, 4), `Ask ${sup(plines.find(l => l.docNo === doc)?.supplierId)?.name || 'the supplier'} for the free goods or a credit note.`], payload: { act: [x.act, doc] } }, 365));
+      }
+      if (s.type === 'claim' && s.to < todayIso) {
+        const from = claimFrom(s);
+        if (from <= s.to) { const rows = schemeClaimRows(s, from, s.to), amt = rows.reduce((a, r) => a + r.amt, 0); if (amt > 0.5) add({ key: `sch:claim:${s.id}:${s.to}`, kind: 'schemeclaim', title: `Claim ${money(amt)} from ${coName} — ${s.name}`, detail: [`${qty(rows.reduce((a, r) => a + r.q, 0))} units sold ${fmtDate(from)} – ${fmtDate(s.to)}`, schemeOffer(s)], payload: { sid: s.id } }, 365); }
+      }
+    });
+    (db.schemeClaims || []).filter(x => x.status === 'Claimed' && daysFrom(x.date) <= -c.followDays).forEach(x => add({ key: 'sch:follow:' + x.id, kind: 'info', title: `Claim not received yet — ${money(x.amount)} from ${company(schemeById(x.schemeId)?.companyId)?.name || 'the company'}`, detail: [`Claimed on ${fmtDate(x.date)} for ${schemeById(x.schemeId)?.name || 'a scheme'} · ${fmtDate(x.from)} – ${fmtDate(x.to)}`, 'Follow up with the company representative.'], payload: { go: 'schemes' } }, 30));
+    closeStale('schemes', keep);
+    return { made, summary: `${(db.schemes || []).filter(s => schemeStatus(s) === 'Active').length} active scheme(s) · ${keep.size} item(s)` };
+  }
+
+  // ----- Route & Delivery -----
+  const DEFAULT_DELIVERY = 'Namaste {party} ji,\n{firm} se aaj aapki delivery aa rahi hai: {bills}.\n{due}Dhanyavaad';
+  function parseRoutes(text) {
+    const map = {};
+    String(text || '').split(/\r?\n/).forEach(line => {
+      const m = /^\s*([A-Za-z]+)\s*[:\-–]\s*(.+)$/.exec(line); if (!m) return;
+      const d = DAYS_EN.findIndex(x => x.slice(0, 3).toLowerCase() === m[1].slice(0, 3).toLowerCase()); if (d < 0) return;
+      map[d] = (map[d] || []).concat(m[2].split(/[,;]/).map(s => s.trim()).filter(Boolean));
+    });
+    return map;
+  }
+  const inArea = (ch, areas) => !!ch && areas.some(a => [ch.tehsil, ch.subTehsil, ch.locality, ch.city, ch.district].some(v => v && norm(v) === norm(a)));
+  const pendingDeliveries = () => db.sales.filter(s => s.party.type === 'chemist' && !s.delivered);
+  function dispatchFor(day) {
+    const routes = parseRoutes(agentCfg('route').routes), areas = routes[day] || null, any = Object.keys(routes).length > 0;
+    const pend = pendingDeliveries();
+    const bills = !any ? pend : areas ? pend.filter(s => inArea(chem(s.party.chemistId), areas)) : [];
+    const byChem = {}; bills.forEach(s => (byChem[s.party.chemistId] = byChem[s.party.chemistId] || []).push(s));
+    const orders = chemOrders.filter(o => ['New', 'Accepted', 'Arranging'].includes(o.status) && (!any || (areas && inArea(chem(o.chemistId), areas))));
+    return { any, areas, bills, byChem, orders };
+  }
+  function runRouteAgent() {
+    const c = agentCfg('route'); const keep = new Set(); let made = 0;
+    const day = TODAY.getDay(), D = dispatchFor(day), n = Object.keys(D.byChem).length;
+    if (!D.any) made += p4Add('route', keep, { key: 'route:setup', kind: 'info', title: 'Set your delivery routes', detail: ['Agents → Route & Delivery → Settings: one line per day, e.g. “Monday: Ghumarwin, Jhandutta”. Until then the dispatch list has every bill not yet delivered.'], payload: { act: ['agent-config', 'route'] } }, 30);
+    if (D.bills.length || D.orders.length) made += p4Add('route', keep, { key: 'route:' + todayIso, kind: 'dispatch', title: `Today’s dispatch${D.areas ? ` — ${D.areas.join(', ')}` : ''}: ${D.bills.length} bill(s) for ${n} chemist(s)`, detail: [`Bills worth ${money(D.bills.reduce((a, s) => a + s.total, 0))}${D.orders.length ? ` · ${D.orders.length} chemist order(s) on this route still to bill` : ''}`, ...Object.entries(D.byChem).slice(0, 4).map(([cid, bs]) => `${chem(cid)?.name || cid} · ${bs.map(s => s.no).join(', ')}`)], payload: { day } });
+    const late = pendingDeliveries().filter(s => -daysFrom(s.date) > c.lateDays);
+    if (late.length) made += p4Add('route', keep, { key: 'route:late', kind: 'info', title: `${late.length} bill(s) not delivered after ${c.lateDays} days`, detail: [...late.slice(0, 5).map(s => `${s.no} · ${partyName(s)} · ${fmtDate(s.date)}`), 'Deliver them, or tick them as delivered in the dispatch list.'], payload: { act: ['route-plan', ''] } }, 1);
+    closeStale('route', keep);
+    return { made, summary: D.any && !D.areas ? `No route on ${DAYS_EN[day]} · ${pendingDeliveries().length} bill(s) waiting` : `${D.bills.length} bill(s) for ${n} chemist(s) today${late.length ? ` · ${late.length} late` : ''}` };
+  }
+  let dispState = null;
+  function dispatchModal(day, approvalId) {
+    const D = dispatchFor(day); dispState = { day, approvalId, D };
+    const groups = {}; Object.keys(D.byChem).forEach(cid => { const ch = chem(cid); const g = [ch?.tehsil, ch?.district].filter(Boolean).join(', ') || 'Other'; (groups[g] = groups[g] || []).push(cid); });
+    let n = 0;
+    const body = Object.keys(groups).sort().map(g => `<tr class="ledger-open"><td colspan="8">${esc(g)}</td></tr>${groups[g].map(cid => {
+      const ch = chem(cid), bs = D.byChem[cid]; n++;
+      return `<tr><td>${n}</td><td><label class="check-line"><input type="checkbox" class="no-print" name="dl_${esc(cid)}" checked> <b>${esc(ch?.name || cid)}</b></label><div class="small">${esc(addrText(ch) || '')}</div></td><td>${esc(ch?.phone || '')}</td><td>${bs.map(s => esc(s.no)).join(', ')}<div class="small muted">${bs.reduce((a, s) => a + s.lines.length, 0)} line(s) · ${qty(bs.reduce((a, s) => a + s.lines.reduce((b, l) => b + l.qty + (l.free || 0), 0), 0))} units</div></td><td class="r num">${dec(bs.reduce((a, s) => a + s.total, 0))}</td><td class="r num">${dec(Math.max(0, chemOutstanding(cid)))}</td><td></td><td class="no-print">${ch?.phone ? `<button type="button" class="btn sm ghost" data-p4="route-wa" data-id="${esc(cid)}">${icon('chat')}</button>` : ''}</td></tr>`;
+    }).join('')}`).join('');
+    openModal({
+      title: 'Dispatch list', size: 'xl', submitLabel: 'Mark ticked as delivered',
+      extraFoot: printFoot('a4'),
+      body: `<div class="toolbar no-print"><label class="bf"><span>Route for</span><select id="dispDay">${DAYS_EN.map((d, i) => `<option value="${i}" ${i === day ? 'selected' : ''}>${d}${i === TODAY.getDay() ? ' (today)' : ''}</option>`).join('')}</select></label><span class="small muted">${D.any ? (D.areas ? `Areas: ${esc(D.areas.join(', '))}` : 'No route set for this day') : 'No routes set — showing every bill not yet delivered'}</span></div>
+        <div class="paper-wrap"><div class="paper paper-a4"><div class="bill">
+          ${paperHead('DISPATCH / LOADING SHEET', `<div class="strong">${DAYS_EN[day]}${day === TODAY.getDay() ? ', ' + fmtDate(todayIso) : ''}</div><div>${esc(D.areas ? D.areas.join(', ') : 'All areas')}</div><div>${D.bills.length} bill(s) · ${n} chemist(s)</div>`)}
+          <table class="ledger-table"><thead><tr><th>#</th><th>Chemist</th><th>Mobile</th><th>Bills</th><th class="r">Bill ₹</th><th class="r">Total due ₹</th><th>Received by</th><th class="no-print"></th></tr></thead>
+          <tbody>${body || '<tr><td colspan="8" class="muted">Nothing to deliver on this route.</td></tr>'}</tbody>
+          <tfoot><tr><td colspan="4">Total</td><td class="r num">${dec(D.bills.reduce((a, s) => a + s.total, 0))}</td><td colspan="3"></td></tr></tfoot></table>
+          ${D.orders.length ? `<div class="small"><b>Chemist orders on this route still to bill:</b> ${D.orders.map(o => `${esc(o.id)} (${esc(chem(o.chemistId)?.name || '')}, ${esc(o.status)})`).join(', ')}</div>` : ''}
+          <div class="bill-sign"><div><span>Vehicle / driver: ____________</span><span class="sig-line">Loaded by</span></div><div><span>For <b>${esc(db.settings.firm.name)}</b></span><span class="sig-line">Dispatched by</span></div></div>
+        </div></div></div>`,
+      onSubmit: v => {
+        const done = Object.keys(D.byChem).filter(cid => v['dl_' + cid]);
+        if (!done.length) { toast('Tick the chemists whose goods were delivered.'); return false; }
+        let nb = 0; done.forEach(cid => D.byChem[cid].forEach(s => { s.delivered = todayIso; nb++; }));
+        if (approvalId) doneApproval(approvalId, `${nb} bill(s) delivered`);
+        logAgent('route', `${nb} bill(s) delivered to ${done.length} chemist(s)`);
+        return `${nb} bill(s) marked delivered.`;
+      },
+    });
+  }
+  function routeWa(cid) {
+    const ch = chem(cid), bs = dispState?.D.byChem[cid] || []; if (!ch) return;
+    const due = Math.max(0, chemOutstanding(cid));
+    openWa(ch.phone, fillTpl(agentCfg('route').template, { party: ch.owner || ch.name, firm: db.settings.firm.name, bills: bs.map(s => `${s.no} (₹${dec(s.total)})`).join(', '), due: due > 0 ? `Kul baaki: ₹${dec(due)}. ${upiText(due)}\n` : '' }));
+    logAgent('route', `Delivery message → ${ch.name} (WhatsApp)`);
+  }
+  ACTIONS['route-plan'] = () => dispatchModal(TODAY.getDay(), '');
+
+  // ----- Hospital & Doctor Outreach -----
+  const DEFAULT_DOC_INTRO = 'Namaste Dr. {doctor},\n{firm}, {place} se. Hamare paas ab ye products uplabdh hain:\n{lines}\nAapke area ke chemists ko hum supply karte hain. Jaankari ya visit ke liye bataiye.';
+  const SPEC_HINTS = [
+    [/DIAB|INSULIN|METFORMIN|GLIMEPIRIDE|GLICLAZIDE|SITAGLIPTIN|VILDAGLIPTIN|TENELIGLIPTIN|DAPAGLIFLOZIN|EMPAGLIFLOZIN|VOGLIBOSE/, ['Endocrinology / Diabetes', 'General Medicine']],
+    [/CARDI|TELMISARTAN|AMLODIPINE|ATORVASTATIN|ROSUVASTATIN|METOPROLOL|CLOPIDOGREL|NICORANDIL|ISOSORBIDE|TORSEMIDE|RAMIPRIL|OLMESARTAN|BISOPROLOL/, ['Cardiology', 'General Medicine']],
+    [/DERMA|COSMETIC|SKIN|MOISTUR|ACNE|KETOCONAZOLE|LULICONAZOLE|TERBINAFINE|ITRACONAZOLE|SUNSCREEN|EMOLLIENT|LOTION/, ['Dermatology']],
+    [/ORTHO|CALCI|CHOLECALCIFEROL|VITAMIN D|ACECLOFENAC|DICLOFENAC|ETORICOXIB|GLUCOSAMINE|THIOCOLCHICOSIDE/, ['Orthopaedics']],
+    [/PAED|PEDIA|BABY|DROPS/, ['Paediatrics']],
+    [/GYNA|OBST|FOLIC|FERROUS|IRON|PROGESTERONE|DYDROGESTERONE|LETROZOLE|PREGNAN|TRANEXAMIC/, ['Obstetrics & Gynaecology']],
+    [/GASTRO|PANTOPRAZOLE|RABEPRAZOLE|OMEPRAZOLE|ESOMEPRAZOLE|DOMPERIDONE|ITOPRIDE|LACTULOSE|URSODEOXYCHOLIC|LIVER/, ['Gastroenterology', 'General Medicine']],
+    [/RESPIR|ASTHMA|MONTELUKAST|LEVOCETIRIZINE|SALBUTAMOL|BUDESONIDE|FORMOTEROL|DOXOFYLLINE|COUGH/, ['Pulmonology / Chest', 'ENT', 'General Medicine']],
+    [/NEURO|PREGABALIN|GABAPENTIN|LEVETIRACETAM|VALPROATE|METHYLCOBALAMIN|DULOXETINE/, ['Neurology', 'General Medicine']],
+    [/PSYCH|ESCITALOPRAM|SERTRALINE|CLONAZEPAM|ALPRAZOLAM|OLANZAPINE|QUETIAPINE|FLUOXETINE/, ['Psychiatry']],
+    [/OPHTH|\bEYE\b/, ['Ophthalmology']],
+    [/DENTAL|TOOTH|\bGUM\b/, ['Dental']],
+    [/TAMSULOSIN|SILODOSIN|FINASTERIDE|DUTASTERIDE|UROLOG/, ['Urology']],
+    [/AYUR|HERBAL/, ['Ayurveda']],
+  ];
+  function productSpecs(p) {
+    const s = norm([category(p.categoryId)?.name, p.name, p.salt, p.form].join(' '));
+    const out = new Set(); SPEC_HINTS.forEach(([re, sp]) => { if (re.test(s)) sp.forEach(x => out.add(x)); });
+    if (!out.size) ['General Medicine', 'Medical Officer (General)'].forEach(x => out.add(x));
+    return [...out];
+  }
+  function outreachPlan(c) {
+    const since = addDays(todayIso, -c.days), first = {};
+    purchaseLines().forEach(l => { if (!first[l.productId] || l.date < first[l.productId]) first[l.productId] = l.date; });
+    const newP = db.products.filter(p => first[p.id] && first[p.id] >= since && sellableQty(p.id) > 0);
+    const dists = new Set([db.settings.firm.district, ...db.chemists.filter(x => x.status === 'Active').map(x => x.district)].filter(Boolean));
+    const last = {}; (db.visits || []).forEach(v => { if (!last[v.doctorId] || v.date > last[v.doctorId]) last[v.doctorId] = v.date; });
+    const plan = (db.doctors || []).filter(d => (!d.district || dists.has(d.district)) && (!last[d.id] || daysFrom(last[d.id]) < -c.gapDays))
+      .map(d => ({ did: d.id, pids: newP.filter(p => productSpecs(p).includes(d.specialization)).map(p => p.id), last: last[d.id] || '' }))
+      .filter(x => x.pids.length || c.routine)
+      .sort((a, b) => b.pids.length - a.pids.length || (a.last || '').localeCompare(b.last || '') || hospRank(hospById(docById(a.did)?.hospitalId)?.type) - hospRank(hospById(docById(b.did)?.hospitalId)?.type))
+      .slice(0, c.maxPerRun);
+    return { plan, newP, dists };
+  }
+  function runOutreachAgent(auto) {
+    const c = agentCfg('outreach');
+    if (auto && TODAY.getDay() !== +c.weekday) return { made: 0, summary: `Runs on ${DAYS_EN[+c.weekday] || 'the set day'}s` };
+    const keep = new Set(); let made = 0; const add = (item, days) => { made += p4Add('outreach', keep, item, days); };
+    const { plan, newP, dists } = outreachPlan(c);
+    if (!(db.doctors || []).length) add({ key: 'out:nodoc', kind: 'info', title: 'Add doctors to get weekly visit plans', detail: ['Doctors Directory → Add doctor or Import CSV. The agent then plans visits to doctors whose speciality fits your new products.'], payload: { go: 'doctors' } }, 60);
+    else if (plan.length) add({ key: 'out:plan:' + weekKey(), kind: 'visit', title: `Visit plan — ${plan.length} doctor(s)${newP.length ? `, ${newP.length} new product(s) to introduce` : ''}`, detail: plan.slice(0, 4).map(x => { const d = docById(x.did); return `Dr. ${d.name} · ${d.specialization || '—'} · ${hospitalName(d) || '—'}${x.pids.length ? ` · ${x.pids.length} product(s)` : ''}`; }), payload: { plan } });
+    const cap = hospRank('CHC'), act = db.chemists.filter(x => x.status === 'Active');
+    const gaps = (db.hospitals || []).filter(h => dists.has(h.district) && hospRank(h.type) <= cap && !act.some(x => x.hospitalId === h.id || (h.tehsil && x.district === h.district && norm(x.tehsil) === norm(h.tehsil)))).sort(hospSort);
+    if (gaps.length) add({ key: 'out:gaps', kind: 'info', title: `${gaps.length} hospital(s) in your districts have no chemist of yours nearby`, detail: [...gaps.slice(0, 5).map(h => `${h.name} · ${h.type} · ${[h.tehsil, h.district].filter(Boolean).join(', ')}`), 'Chemists near these hospitals are new customers to look for.'], payload: { go: 'hospitals' } }, 30);
+    closeStale('outreach', keep);
+    return { made, summary: `${plan.length} doctor visit(s) planned · ${gaps.length} hospital(s) without a nearby chemist` };
+  }
+  let visitState = null;
+  function visitModal(a) {
+    const plan = (a.payload.plan || []).filter(x => docById(x.did)); visitState = { a, plan };
+    openModal({
+      title: 'Doctor visit plan', size: 'xl', submitLabel: 'Save ticked as visited',
+      extraFoot: printFoot('a4l'),
+      body: `<div class="paper-wrap"><div class="paper paper-a4l"><div class="bill">
+          ${paperHead('DOCTOR VISIT PLAN', `<div class="strong">Week of ${fmtDate(todayIso)}</div><div>${plan.length} doctor(s)</div>`)}
+          <table class="ledger-table"><thead><tr><th>#</th><th>Doctor</th><th>Hospital</th><th>Mobile</th><th>Products to introduce</th><th>Last visit</th><th>Remarks</th><th class="no-print">Visited</th></tr></thead>
+          <tbody>${plan.map((x, i) => { const d = docById(x.did); return `<tr><td>${i + 1}</td><td><b>Dr. ${esc(d.name)}</b><div class="small">${esc([d.designation, d.specialization].filter(Boolean).join(' · '))}</div></td><td>${esc(hospitalName(d) || '—')}<div class="small">${esc(d.district || '')}</div></td><td>${esc(d.mobile || '')}</td><td>${x.pids.map(pid => esc(prod(pid)?.name || '')).join(', ') || '<span class="muted">Routine visit</span>'}</td><td>${x.last ? fmtDate(x.last) : 'Never'}</td><td style="min-width:120px"></td><td class="no-print"><label class="check-line"><input type="checkbox" name="v_${i}"> Done</label>${d.mobile ? `<button type="button" class="btn sm ghost" data-p4="visit-wa" data-id="${i}">${icon('chat')}</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="8" class="muted">No doctors to visit.</td></tr>'}</tbody></table>
+        </div></div></div>
+        <div class="small muted">Only tell doctors which products are available — no gifts or claims (UCPMP rules).</div>`,
+      onSubmit: v => {
+        const done = plan.filter((x, i) => v['v_' + i]);
+        done.forEach(x => db.visits.push({ id: uid(), doctorId: x.did, date: todayIso, products: x.pids }));
+        if (done.length) logAgent('outreach', `${done.length} doctor visit(s) recorded`);
+        if (done.length && done.length === plan.length) doneApproval(a.id, `${done.length} visited`);
+        return done.length ? `${done.length} visit(s) saved.` : 'Nothing ticked — the plan is kept.';
+      },
+    });
+  }
+  function visitWa(i) {
+    const x = visitState?.plan[+i], d = x && docById(x.did); if (!d) return;
+    const f = db.settings.firm;
+    openWa(d.mobile, fillTpl(agentCfg('outreach').template, { doctor: d.name, firm: f.name, place: f.locality || f.tehsil || f.district || '', lines: x.pids.map(pid => `• ${prod(pid)?.name}`).join('\n') || '• (our full range)' }));
+    logAgent('outreach', `Intro message → Dr. ${d.name} (WhatsApp)`);
+  }
+
+  // ----- Register the Phase 4 agents -----
+  Object.assign(AGENT_DEFS, {
+    recall: { name: 'Recall & NSQ Watch', icon: 'alert', auto: true, desc: 'Checks CDSCO NSQ / spurious drug alerts, banned FDC lists and company recalls against your batches and the bills that sold them: block the batch, tell the chemists who bought it and return it to the supplier.', defaults: { enabled: true, auto: true, time: '09:05', remindDay: 25, template: DEFAULT_RECALL_MSG } },
+    ceiling: { name: 'Price Ceiling (NPPA)', icon: 'rupee', auto: true, desc: 'Every day: stock whose MRP is above the NPPA ceiling price (+ GST) of scheduled (DPCO) medicines, and scheduled products without a ceiling price. Warns in Bill Entry too. Import NPPA notifications with AI.', defaults: { enabled: true, auto: true, time: '09:15' } },
+    h1: { name: 'Schedule H1 / NDPS Register', icon: 'book', auto: true, desc: 'Keeps the sale register of Schedule H1, X and NDPS drugs (print / CSV), flags these drugs sold to chemists without a valid licence or to customers without prescription details, and unusual quantities to one chemist.', defaults: { enabled: true, auto: true, time: '09:25', days: 30, minQty: 20, spikeX: 3, watchH1: true, remindUnset: true, printDay: 1 } },
+    credit: { name: 'Chemist Credit Risk', icon: 'rupee', auto: true, desc: 'Scores every chemist (A–D) on how fast they pay, overdue amount and limit use. Suggests raising or lowering credit limits, asks before billing over the limit, and lists chemists who are buying less (win-back).', defaults: { enabled: true, auto: true, time: '10:05', blockOverLimit: true, raiseAt: 80, stepPct: 25, reviewDays: 30, winbackMin: 5000, dropPct: 50, winbackDays: 30, template: DEFAULT_WINBACK } },
+    schemes: { name: 'Schemes & Claims', icon: 'spark', auto: true, desc: 'Tracks company schemes: warns before a scheme ends, checks purchase bills for the free goods or discount promised, and works out claims on your sales for the company to pay back.', defaults: { enabled: true, auto: true, time: '09:35', warnDays: 7, followDays: 45 } },
+    route: { name: 'Route & Delivery', icon: 'truck', auto: true, desc: 'Every morning: today’s dispatch list by route (district / tehsil) with a printable loading sheet, “delivery today” WhatsApp messages, and bills not yet delivered.', defaults: { enabled: true, auto: true, time: '08:15', routes: '', lateDays: 3, template: DEFAULT_DELIVERY } },
+    outreach: { name: 'Hospital & Doctor Outreach', icon: 'doctor', auto: true, desc: 'Each week: a doctor visit plan (doctors whose speciality fits your new products, from the Doctors Directory) and hospitals in your districts with none of your chemists nearby.', defaults: { enabled: true, auto: true, time: '11:30', weekday: 3, days: 30, gapDays: 30, maxPerRun: 10, routine: true, template: DEFAULT_DOC_INTRO } },
+  });
+  { const b = AGENT_DEFS.briefing; delete AGENT_DEFS.briefing; AGENT_DEFS.briefing = b; }
+  Object.assign(AGENT_FIELDS, {
+    recall: [{ k: 'remindDay', label: 'Remind to add the monthly CDSCO list from day (1–28)', type: 'number' }, { k: 'template', label: 'Message to parties — {party} {product} {batch} {reason} {firm}', type: 'textarea' }],
+    ceiling: [],
+    h1: [{ k: 'days', label: 'Check bills of the last (days)', type: 'number' }, { k: 'minQty', label: 'Unusual quantity: at least this many units in 30 days', type: 'number' }, { k: 'spikeX', label: '…and at least this many times the usual monthly quantity', type: 'number' }, { k: 'watchH1', label: 'Also watch Schedule H1 quantities (X and NDPS are always watched)', type: 'check' }, { k: 'remindUnset', label: 'Remind me about products with no schedule set', type: 'check' }, { k: 'printDay', label: 'Remind to print last month’s register from day (1–28)', type: 'number' }],
+    credit: [{ k: 'blockOverLimit', label: 'Ask before a bill takes a chemist over the credit limit', type: 'check' }, { k: 'raiseAt', label: 'Suggest a higher limit for A-score chemists using at least (%) of it', type: 'number' }, { k: 'stepPct', label: 'Change limits by (%)', type: 'number' }, { k: 'reviewDays', label: 'Do not suggest a limit change again within (days)', type: 'number' }, { k: 'winbackMin', label: 'Win-back: only chemists who usually buy at least (₹ a month)', type: 'number' }, { k: 'dropPct', label: 'Win-back when this month is down by at least (%)', type: 'number' }, { k: 'winbackDays', label: 'Do not suggest the same chemist again within (days)', type: 'number' }, { k: 'template', label: 'Win-back message — {party} {firm}', type: 'textarea' }],
+    schemes: [{ k: 'warnDays', label: 'Warn this many days before a scheme ends', type: 'number' }, { k: 'followDays', label: 'Remind about claims not received after (days)', type: 'number' }],
+    route: [{ k: 'routes', label: 'Routes — one line per day, e.g. “Monday: Ghumarwin, Jhandutta” (tehsil, sub-tehsil, village or district names)', type: 'textarea' }, { k: 'lateDays', label: 'Warn about bills not delivered after (days)', type: 'number' }, { k: 'template', label: 'Delivery message — {party} {bills} {due} {firm}', type: 'textarea' }],
+    outreach: [{ k: 'weekday', label: 'Day of the week (0 = Sunday … 6 = Saturday)', type: 'number' }, { k: 'days', label: 'New products: first bought in the last (days)', type: 'number' }, { k: 'gapDays', label: 'Plan a doctor again after (days)', type: 'number' }, { k: 'maxPerRun', label: 'Doctors per weekly plan', type: 'number' }, { k: 'routine', label: 'Also plan routine visits when there is no new product for a doctor', type: 'check' }, { k: 'template', label: 'Intro message — {doctor} {firm} {place} {lines}', type: 'textarea' }],
+  });
+  Object.assign(AGENT_RUN, { recall: runRecallAgent, ceiling: runCeilingAgent, h1: runRegisterAgent, credit: runCreditAgent, schemes: runSchemesAgent, route: runRouteAgent, outreach: runOutreachAgent });
+  Object.assign(APPR_LABEL, { recall: 'Handle alert', creditlimit: 'Review limit', winback: 'Send message', schemeclaim: 'Prepare claim', dispatch: 'Dispatch list', visit: 'Visit plan' });
+  Object.assign(APPR_HANDLERS, {
+    recall: a => recallModal(a),
+    creditlimit: a => {
+      const ch = chem(a.payload.cid); if (!ch) { doneApproval(a.id, 'Chemist removed'); refresh(); return; }
+      const pr = creditProfile(ch.id);
+      openModal({
+        title: `Credit limit — ${ch.name}`, size: 'sm', submitLabel: 'Save new limit',
+        body: `${detailGrid([['Score', `${gradePill(pr)} ${pr.score ?? ''}`], ['Outstanding', money(pr.out)], ['Current limit', money(ch.creditLimit)], ['Pays in', `${pr.avgPay} days`]])}
+          <div class="small">${esc(pr.why.join(' · '))}</div>
+          <div class="form-grid">${field('New credit limit (₹)', 'limit', { type: 'number', value: a.payload.limit, required: true, full: true, attrs: numAttrs('1') })}</div>`,
+        onSubmit: v => { const old = ch.creditLimit; ch.creditLimit = Math.round(num(v.limit)); doneApproval(a.id, `Limit ${money(old)} → ${money(ch.creditLimit)}`); logAgent('credit', `${ch.name}: credit limit ${money(old)} → ${money(ch.creditLimit)}`); return `${ch.name}’s credit limit is now ${money(ch.creditLimit)}.`; },
+      });
+    },
+    winback: a => { const ch = chem(a.payload.cid); if (!ch) return; openSendDialog({ agent: 'credit', approvalId: a.id, title: `Win back — ${ch.name}`, name: ch.name, phone: ch.phone, email: ch.email, subject: `${db.settings.firm.name}`, text: fillTpl(agentCfg('credit').template, { party: ch.owner || ch.name, firm: db.settings.firm.name }) }); },
+    schemeclaim: a => claimModal(a.payload.sid, a.id),
+    dispatch: a => dispatchModal(a.payload.day ?? TODAY.getDay(), a.id),
+    visit: a => visitModal(a),
+  });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-p4]'); if (!b) return;
+    const id = b.dataset.id;
+    ({ 'rc-read': readRecallFile, 'rc-block': () => toggleBlock(id), 'rc-wa': () => recallWa(id), 'rc-return': recallReturn, 'reg-csv': registerCsv, 'ceil-read': readCeilingFile, 'ceil-csv': ceilingFromCsv, 'claim-csv': claimCsv, 'route-wa': () => routeWa(id), 'visit-wa': () => visitWa(id) })[b.dataset.p4]?.();
+  });
+  document.addEventListener('change', e => {
+    if (e.target.id === 'regMonth' || e.target.id === 'regSch') { regState = { month: $('#regMonth').value || regState.month, sch: $('#regSch').value }; registerModal(); }
+    if (e.target.id === 'dispDay') dispatchModal(+e.target.value, dispState?.approvalId || '');
+  });
 
   // Chemist orders
   const orderById = id => chemOrders.find(o => o.id === id);
@@ -5177,7 +6018,7 @@ Message:
   ACTIONS['export-data'] = () => { db.settings.lastBackup = todayIso; save(); downloadText(`pharma-suite-backup-${todayIso}.json`, JSON.stringify(db, null, 1), 'application/json'); if (route === 'settings') render(); };
   ACTIONS['settings-data'] = () => { settingsTab = 'data'; if (location.hash === '#settings') render(); else location.hash = 'settings'; };
   ACTIONS['reset-data'] = () => confirmModal('Reset to sample data?', 'Everything in this browser will be replaced with the sample data. Download a backup first if you need it. This cannot be undone.', 'Reset', () => {
-    db = seed(); entry = null; Object.keys(listState).forEach(k => delete listState[k]); billStore.clear().catch(() => {}); return 'Sample data restored.';
+    db = migrate(seed()); entry = null; Object.keys(listState).forEach(k => delete listState[k]); billStore.clear().catch(() => {}); return 'Sample data restored.';
   });
   ACTIONS['print'] = id => printBill(id);
 

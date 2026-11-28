@@ -147,7 +147,8 @@ function catalogue() {
   const now = new Date(); now.setHours(0, 0, 0, 0);
   const notExpired = exp => { if (!exp) return false; const [y, m] = exp.split('-').map(Number); return new Date(y, m, 0) >= now; };
   return d.products.map(p => {
-    const bs = d.batches.filter(b => b.productId === p.id && (b.qty || 0) + (b.free || 0) > 0 && notExpired(b.expiry)).sort((a, b) => a.expiry.localeCompare(b.expiry));
+    // Batches blocked after a drug alert / recall are not offered to chemists
+    const bs = d.batches.filter(b => b.productId === p.id && !b.blocked && (b.qty || 0) + (b.free || 0) > 0 && notExpired(b.expiry)).sort((a, b) => a.expiry.localeCompare(b.expiry));
     const available = bs.reduce((a, b) => a + (b.qty || 0) + (b.free || 0), 0);
     return {
       id: p.id, name: p.name, company: d.companies.find(c => c.id === p.companyId)?.name || '', category: d.categories.find(c => c.id === p.categoryId)?.name || '',
