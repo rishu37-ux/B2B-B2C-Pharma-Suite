@@ -10,8 +10,9 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 - **Enquiries** — who asked for what (chemist, customer or a new person), source, follow-up date and status (Open, Quoted, Converted, Lost); “Make bill” turns an enquiry into a sale bill. Due follow-ups show on the Overview
 - **Customers** — walk-in / retail customers with address, bills, purchases and balance; picked or created in the sale bill
 - **Party Ledger** — for any chemist, customer or supplier: bills, dated payments and returns with a running balance, opening balance for a date range, a balances summary for all parties, A4 print and CSV export
+- **GST / ITC Match** — your purchase bills against the GSTR-2B months you imported: Not in 2B, Mismatch, Not in books, Matched; hold or release a supplier's payment
 - **Profile** (click the avatar, top right) — business name, tagline, logo (shown in the sidebar and on bills), your name and designation
-- **Agents & Approvals** — nineteen assistants. Nothing is sent or ordered without you: they put items in an Approvals inbox.
+- **Agents & Approvals** — twenty-six assistants. Nothing is sent or ordered without you: they put items in an Approvals inbox.
   - *Order Desk* (AI): paste an order message; it matches items to your products and stock, then make a bill, save an enquiry or reply with availability
   - *Stock & Purchase*: draft purchase orders per supplier from sales, enquiries and chemist orders; near-expiry and slow-moving stock
   - *Collections*: overdue parties with a ready reminder (WhatsApp / SMS / email, UPI ID or Razorpay link); does not repeat within the set days
@@ -34,6 +35,14 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
   - *Schemes & Claims*: a Schemes page for company schemes (buy X get Y free, extra discount, or a claim per unit / % on your sales); warns before a scheme ends, checks purchase bills for the free goods or discount, and prepares a printable claim statement — mark claims received
   - *Route & Delivery*: set routes per weekday (“Monday: Ghumarwin, Jhandutta”); each morning a dispatch / loading sheet of bills not yet delivered on today's route, a “delivery today” WhatsApp per chemist, tick delivered, and late deliveries
   - *Hospital & Doctor Outreach*: weekly doctor visit plan from the Doctors Directory (specialities that fit your new products, or routine visits), with a printable plan and visit log, and hospitals in your districts with none of your chemists nearby
+
+  - *GSTR-2B Reconciliation*: import the GSTR-2B JSON from the GST portal (or the Excel's B2B sheet saved as CSV); every purchase bill is matched by supplier GSTIN and invoice number (or amount and date). Shows bills your suppliers have not filed (input tax credit at risk — hold their payment until they do; the hold lifts itself), amount differences, and 2B invoices missing from your books. Reminds you on the 14th
+  - *Payment Planner*: week-by-week cash plan — money expected from chemists (by their terms or usual payment days; overdue counted at a set %) against supplier bills due, from your cash and bank balance; this week's supplier payments, and a warning before a week where money may run short. Suppliers on GSTR-2B hold are left out
+  - *e-Invoice & e-Way Bill*: bills above the e-way bill limit (and, if your turnover needs it, B2B bills without an IRN) — downloads the JSON for bulk upload on the e-way bill / e-invoice portals (try one bill first) and saves the numbers you get back; they print on the bill
+  - *Near-Expiry Clearance*: stock expiring in the next months, offered at a step-up discount (10 / 15 / 20 %) to the chemists who buy those items, with a WhatsApp offer each
+  - *Cold Chain Watch*: products marked “Cold chain (2–8 °C)”, a fridge temperature log (morning and evening), alerts for missed or out-of-range readings, suggestions for products that may need cold storage, and a ❄ note on the dispatch list
+  - *Supplier Performance*: A–D score per supplier (fill rate, days late, short shelf-life stock, costlier rates); items cheaper from another supplier; optionally draft purchase orders to the cheapest supplier
+  - *Audit & Anomaly*: big discounts, sales below cost, sale bills deleted or changed later (every edit and delete is now recorded), stock below zero, repeated payments, duplicate records and wrong HSN / GST
 
   Daily agents run the first time the dashboard is open after their set time each day.
 - **Recalls & NSQ** — the drug alert lists you added, how many entries match your stock or sales, and the blocked batches (unblock from here or from Stock Details → Blocked)

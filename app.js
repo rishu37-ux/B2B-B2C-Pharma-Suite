@@ -418,6 +418,7 @@
     'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
     New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
     Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
+    Matched: 'ok', Mismatch: 'warn', 'Not in 2B': 'bad', 'Not in books': 'warn', 'e-Way bill': 'info', 'e-Invoice': 'info',
     Blocked: 'bad', Upcoming: 'info', Ended: 'neutral', Claimed: 'warn', 'Score A': 'ok', 'Score B': 'info', 'Score C': 'warn', 'Score D': 'bad',
   };
   const pill = s => `<span class="pill ${PILL[s] || (/^Short/.test(s) || / short$/.test(s) ? 'warn' : 'neutral')}">${esc(s)}</span>`;
@@ -459,7 +460,7 @@
   const NAV = [
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
     { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['returns', 'Sales Returns', 'undo'], ['inquiries', 'Enquiries', 'chat'], ['chemorders', 'Chemist Orders', 'cart'], ['customers', 'Customers', 'user'], ['chemists', 'Onboard Chemists', 'store']] },
-    { group: 'Accounts', items: [['ledger', 'Party Ledger', 'book']] },
+    { group: 'Accounts', items: [['ledger', 'Party Ledger', 'book'], ['itc', 'GST / ITC Match', 'file']] },
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill'], ['recalls', 'Recalls & NSQ', 'alert']] },
     { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
   { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file'], ['preturns', 'Purchase Returns', 'undo'], ['schemes', 'Schemes & Claims', 'spark']] },
@@ -479,6 +480,7 @@
     preturns: 'Goods sent back to suppliers — expiry claims and debit notes',
     recalls: 'CDSCO NSQ / spurious drug alerts, banned FDCs and recalls — checked against your stock and sales',
     schemes: 'Company schemes, free goods and claims on your sales',
+    itc: 'Your purchase bills matched with GSTR-2B — input tax credit at risk',
     stock: 'Batch-wise stock in bill format',
     products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
@@ -1231,7 +1233,7 @@
       filters: [...prodFilters(p => [p], ['company', 'category', 'form']), { k: 'sch', label: 'Schedule', options: [['none', 'Not set'], ...RX_SCHEDULES.filter(x => x[0])], test: (p, v) => v === 'none' ? !p.schedule : p.schedule === v }],
       select: {
         id: p => p.id,
-        fields: [GST_FIELD, { k: 'schedule', label: 'Schedule', type: 'select', options: RX_SCHEDULES.filter(x => x[0]) },{ k: 'categoryId', label: 'Category', type: 'select', options: db.categories.map(c => [c.id, c.name]) }, { k: 'form', label: 'Form', type: 'select', options: db.forms.map(f => [f.name, f.name]) }, { k: 'companyId', label: 'Company', type: 'select', options: db.companies.map(c => [c.id, c.name]).sort(byName) }],
+        fields: [GST_FIELD, { k: 'schedule', label: 'Schedule', type: 'select', options: RX_SCHEDULES.filter(x => x[0]) }, { k: 'cold', label: 'Cold chain', type: 'select', options: [['1', 'Yes (2–8 °C)'], ['0', 'No']] }, { k: 'categoryId', label: 'Category', type: 'select', options: db.categories.map(c => [c.id, c.name]) }, { k: 'form', label: 'Form', type: 'select', options: db.forms.map(f => [f.name, f.name]) }, { k: 'companyId', label: 'Company', type: 'select', options: db.companies.map(c => [c.id, c.name]).sort(byName) }],
         extra: '<label class="check-line small"><input type="checkbox" id="bulkSyncGst" checked> Also change GST on their stock</label>',
         apply: (items, v) => {
           const sync = $('#bulkSyncGst')?.checked;
@@ -1246,7 +1248,7 @@
       rows: () => [...db.products].sort((a, b) => a.name.localeCompare(b.name)),
       text: p => [p.id, p.name, p.salt, company(p.companyId)?.name, p.mfg, category(p.categoryId)?.name, p.form, p.hsn].join(' '),
       columns: [
-        { h: 'Item name', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.id)}${p.salt ? ' · ' + esc(p.salt) : ''}${p.schedule ? ` · <b>${p.schedule === 'NDPS' || p.schedule === 'OTC' ? esc(p.schedule) : 'Sch. ' + esc(p.schedule)}</b>` : ''}${p.ceiling > 0 ? ` · ceiling ₹${dec(p.ceiling)}` : ''}</div>` },
+        { h: 'Item name', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.id)}${p.salt ? ' · ' + esc(p.salt) : ''}${p.schedule ? ` · <b>${p.schedule === 'NDPS' || p.schedule === 'OTC' ? esc(p.schedule) : 'Sch. ' + esc(p.schedule)}</b>` : ''}${p.ceiling > 0 ? ` · ceiling ₹${dec(p.ceiling)}` : ''}${isCold(p) ? ' · ❄ 2–8 °C' : ''}</div>` },
         { h: 'Company', c: p => esc(company(p.companyId)?.name || '—') },
         { h: 'MFG name', c: p => esc(p.mfg || '—') },
         { h: 'Category', c: p => esc(category(p.categoryId)?.name || '—') },
@@ -2270,7 +2272,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     }
     if (!Array.isArray(d.inquiries)) d.inquiries = [];
     if (!Array.isArray(d.returns)) d.returns = [];
-    ['approvals', 'agentLog', 'reminders', 'purchaseReturns', 'recalls', 'schemes', 'schemeClaims', 'visits'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
+    ['approvals', 'agentLog', 'reminders', 'purchaseReturns', 'recalls', 'schemes', 'schemeClaims', 'visits', 'gstr2b', 'tempLog', 'auditLog'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
     // Delivery tracking (added later): bills made before it count as delivered
     if (!d.deliveryRev) { (d.sales || []).forEach(s => { if (!s.delivered) s.delivered = s.date; }); d.deliveryRev = 1; }
     if (d.settings && !d.settings.profile) d.settings.profile = {};
@@ -2572,10 +2574,11 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         }
         const paid = Math.min(t.total, round2(num(d.paid)));
         if (existing) {
-          const hadPay = payList(existing).map(x => ({ ...x }));
+          const hadPay = payList(existing).map(x => ({ ...x })), before = existing.total;
           Object.assign(existing, { date: d.date, party, lines, ...t, mode: d.mode, rx: type === 'individual' ? String(d.rx || '').trim() : '' });
           existing.payments = hadPay; existing.paid = round2(hadPay.reduce((a, x) => a + x.amount, 0));
           adjustPaid(existing, paid, 'Adjusted when the bill was edited');
+          auditNote('Sale bill edited', existing.no, { before, amount: t.total, party: partyName(existing), billDate: existing.date });
           return `${existing.no} updated — stock adjusted.`;
         }
         const no = nextNo('SMS-', db.sales);
@@ -2707,7 +2710,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     openModal({
       title: `Sale bill ${s.no}`, size: 'xl',
       extraFoot: `<div class="foot-left">${balance(s) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-sale" data-id="${s.no}">Record payment</button>` : ''}${printBtn()}<button type="button" class="btn" data-act="edit-sale" data-id="${s.no}">Edit</button></div>`,
-      body: billBody({ title: c && c.gstin ? 'TAX INVOICE' : 'SALE BILL', no: s.no, date: s.date, ...party, metaLines: [['Terms', s.mode || 'Credit'], ['Status', saleStatus(s)], ...(s.returned ? [['Returned', money2(s.returned)]] : [])], lines: s.lines, t: s, paid: s.paid, isSale: true }),
+      body: billBody({ title: c && c.gstin ? 'TAX INVOICE' : 'SALE BILL', no: s.no, date: s.date, ...party, metaLines: [['Terms', s.mode || 'Credit'], ['Status', saleStatus(s)], ...(s.returned ? [['Returned', money2(s.returned)]] : []), ...(s.ewb ? [['e-Way bill', s.ewb]] : []), ...(s.vehicle ? [['Vehicle', s.vehicle]] : []), ...(s.irn ? [['IRN', s.irn.length > 24 ? s.irn.slice(0, 12) + '…' + s.irn.slice(-8) : s.irn]] : [])], lines: s.lines, t: s, paid: s.paid, isSale: true }),
     });
   };
   ACTIONS['pay-sale'] = no => {
@@ -2728,7 +2731,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     const s = db.sales.find(x => x.no === no); if (!s) return;
     if (saleReturns(no).length) { toast(`${no} has sales returns against it. Delete or reject them first.`); return; }
     confirmModal(`Delete ${s.no}?`, `This removes the bill for <b>${esc(partyName(s))}</b> (${money(s.total)}) and puts its ${s.lines.length} item line(s) back into stock. This cannot be undone.`, 'Delete bill', () => {
-      s.lines.forEach(restoreLine); db.sales = db.sales.filter(x => x !== s); return `${no} deleted — stock returned.`;
+      s.lines.forEach(restoreLine); db.sales = db.sales.filter(x => x !== s); auditNote('Sale bill deleted', no, { amount: s.total, party: partyName(s), billDate: s.date }); return `${no} deleted — stock returned.`;
     });
   };
 
@@ -2751,13 +2754,14 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ${field('Schedule', 'schedule', { value: p.schedule || '', options: RX_SCHEDULES })}
       ${field('NPPA ceiling price per pack, before GST (₹)', 'ceiling', { type: 'number', value: p.ceiling || '', attrs: numAttrs() + ' placeholder="Only for scheduled (DPCO) medicines"' })}
       <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="dpco" ${p.dpco ? 'checked' : ''}> Scheduled formulation under DPCO (NLEM)</label></div>
+      <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="cold" ${isCold(p) ? 'checked' : ''}> Cold chain — store at 2–8 °C</label></div>
     </div>`;
   }
   function readProduct(d, p) {
     Object.assign(p, {
       name: norm(d.name), companyId: findOrCreateCompany(d.company), mfg: d.mfg.trim(), categoryId: d.categoryId, form: d.form, pack: d.pack.trim(), hsn: d.hsn.trim(), salt: (d.salt || '').trim(),
       gst: num(d.gst), mrp: round2(num(d.mrp)), ptr: round2(num(d.ptr)), pts: round2(num(d.pts)), reorder: Math.floor(num(d.reorder)),
-      schedule: d.schedule || '', ceiling: round2(num(d.ceiling)) || 0, dpco: !!d.dpco || num(d.ceiling) > 0,
+      schedule: d.schedule || '', ceiling: round2(num(d.ceiling)) || 0, dpco: !!d.dpco || num(d.ceiling) > 0, cold: !!d.cold,
     });
   }
   const productCheck = (d, self) => {
@@ -3684,7 +3688,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   ACTIONS['hook-del'] = hid => { const c = intCfg('custom'); const h = (c.hooks || []).find(x => x.id === hid); if (!h) return; confirmModal(`Delete ${h.name}?`, 'This cannot be undone.', 'Delete', () => { c.hooks = c.hooks.filter(x => x !== h); if (SERVER) api('PUT', `api/secrets/${encodeURIComponent('custom:' + h.id)}`, { fields: { key: null } }).then(loadSecretMask).catch(() => {}); return `${h.name} deleted.`; }); };
   ACTIONS['hook-test'] = async hid => { save(); try { const r = await api('POST', `api/int/test/${encodeURIComponent('custom:' + hid)}`, {}); toast(r.msg || (r.ok ? 'OK' : 'Failed')); } catch (err) { toast(err.message); } };
   ACTIONS['empty-data'] = () => confirmModal('Start with empty data?', 'All products, stock, chemists, customers, suppliers, bills, orders, returns, enquiries and doctors are removed. Your business details, profile, settings, integrations and the hospital directory are kept. Download a backup first if you may need the sample data. This cannot be undone.', 'Start empty', () => {
-    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [], purchaseReturns: [], recalls: [], schemes: [], schemeClaims: [], visits: [] });
+    Object.assign(db, { products: [], batches: [], chemists: [], suppliers: [], sales: [], pos: [], grns: [], pinvoices: [], customers: [], inquiries: [], returns: [], doctors: [], approvals: [], agentLog: [], reminders: [], purchaseReturns: [], recalls: [], schemes: [], schemeClaims: [], visits: [], gstr2b: [], tempLog: [], auditLog: [] });
     db.settings.demo = false; entry = null; Object.keys(listState).forEach(k => delete listState[k]);
     return 'Data cleared — you are starting fresh.';
   });
@@ -3787,7 +3791,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       chemOrders.filter(o => ['New', 'Accepted', 'Arranging'].includes(o.status)).forEach(o => o.lines.forEach(l => { if (l.productId) asked[l.productId] = (asked[l.productId] || 0) + l.qty; }));
     }
     const plines = purchaseLines();
-    const lastSup = pid => plines.find(x => x.productId === pid)?.supplierId || [...db.batches].reverse().find(b => b.productId === pid && b.supplierId)?.supplierId || '';
+    const sc = agentCfg('supplier'), best = sc.enabled && sc.preferBest ? bestSupplierMap() : {};
+    const lastSup = pid => best[pid] || plines.find(x => x.productId === pid)?.supplierId || [...db.batches].reverse().find(b => b.productId === pid && b.supplierId)?.supplierId || '';
     const groups = {};
     db.products.forEach(p => {
       const daily = (sold[p.id] || 0) / c.lookbackDays, have = sellableQty(p.id), want = asked[p.id] || 0;
@@ -4509,6 +4514,13 @@ Message:
       credit: actBtn('credit-report', '', 'Credit scores', 'ghost'),
       schemes: '<button type="button" class="btn sm ghost" data-nav="schemes">Schemes</button>',
       route: actBtn('route-plan', '', 'Dispatch list', 'ghost'),
+      gstr2b: actBtn('gstr2b-import', '', 'Import GSTR-2B', 'ghost') + '<button type="button" class="btn sm ghost" data-nav="itc">ITC match</button>',
+      payplan: actBtn('payplan-view', '', 'Payment plan', 'ghost'),
+      gstdocs: actBtn('gstdocs-open', '', 'Documents', 'ghost'),
+      clearance: actBtn('clearance-open', '', 'Clearance list', 'ghost'),
+      coldchain: actBtn('temp-log', '', 'Temperature log', 'ghost'),
+      supplier: actBtn('supplier-report', '', 'Supplier scores', 'ghost'),
+      audit: actBtn('audit-log', '', 'Bill changes', 'ghost'),
     })[id] || '';
   }
   const APPR_LABEL = { po: 'Review PO', reminder: 'Send reminder', briefing: 'Share', price: 'Apply new rate', returnadvice: 'Approve return', claim: 'Review claim', followup: 'Send message', lost: 'Mark lost', statement: 'Send statement', bankmatch: 'Record payment', info: 'Open' };
@@ -5337,7 +5349,7 @@ Only include confident matches. A brand name alone is not enough: the ingredient
     let n = 0;
     const body = Object.keys(groups).sort().map(g => `<tr class="ledger-open"><td colspan="8">${esc(g)}</td></tr>${groups[g].map(cid => {
       const ch = chem(cid), bs = D.byChem[cid]; n++;
-      return `<tr><td>${n}</td><td><label class="check-line"><input type="checkbox" class="no-print" name="dl_${esc(cid)}" checked> <b>${esc(ch?.name || cid)}</b></label><div class="small">${esc(addrText(ch) || '')}</div></td><td>${esc(ch?.phone || '')}</td><td>${bs.map(s => esc(s.no)).join(', ')}<div class="small muted">${bs.reduce((a, s) => a + s.lines.length, 0)} line(s) · ${qty(bs.reduce((a, s) => a + s.lines.reduce((b, l) => b + l.qty + (l.free || 0), 0), 0))} units</div></td><td class="r num">${dec(bs.reduce((a, s) => a + s.total, 0))}</td><td class="r num">${dec(Math.max(0, chemOutstanding(cid)))}</td><td></td><td class="no-print">${ch?.phone ? `<button type="button" class="btn sm ghost" data-p4="route-wa" data-id="${esc(cid)}">${icon('chat')}</button>` : ''}</td></tr>`;
+      return `<tr><td>${n}</td><td><label class="check-line"><input type="checkbox" class="no-print" name="dl_${esc(cid)}" checked> <b>${esc(ch?.name || cid)}</b></label><div class="small">${esc(addrText(ch) || '')}</div></td><td>${esc(ch?.phone || '')}</td><td>${bs.map(s => esc(s.no)).join(', ')}${bs.some(s => s.lines.some(l => isCold(prod(l.productId)))) ? '<div class="small bad-text">❄ Cold items — pack with ice packs, deliver first</div>' : ''}<div class="small muted">${bs.reduce((a, s) => a + s.lines.length, 0)} line(s) · ${qty(bs.reduce((a, s) => a + s.lines.reduce((b, l) => b + l.qty + (l.free || 0), 0), 0))} units</div></td><td class="r num">${dec(bs.reduce((a, s) => a + s.total, 0))}</td><td class="r num">${dec(Math.max(0, chemOutstanding(cid)))}</td><td></td><td class="no-print">${ch?.phone ? `<button type="button" class="btn sm ghost" data-p4="route-wa" data-id="${esc(cid)}">${icon('chat')}</button>` : ''}</td></tr>`;
     }).join('')}`).join('');
     openModal({
       title: 'Dispatch list', size: 'xl', submitLabel: 'Mark ticked as delivered',
@@ -5495,6 +5507,552 @@ Only include confident matches. A brand name alone is not enough: the ingredient
   document.addEventListener('change', e => {
     if (e.target.id === 'regMonth' || e.target.id === 'regSch') { regState = { month: $('#regMonth').value || regState.month, sch: $('#regSch').value }; registerModal(); }
     if (e.target.id === 'dispDay') dispatchModal(+e.target.value, dispState?.approvalId || '');
+  });
+
+  // =====================================================================
+  // Phase 5 agents: GSTR-2B / ITC match, Payment Planner, e-Invoice & e-Way Bill,
+  // Near-Expiry Clearance, Cold Chain Watch, Supplier Performance, Audit & Anomaly
+  // =====================================================================
+  const stateOf = g => /^\d{2}/.test(String(g || '')) ? String(g).slice(0, 2) : '';
+  const firmState = () => stateOf(db.settings.firm.gstin) || '02';
+  const ddmmyyyy = s => s ? `${s.slice(8, 10)}/${s.slice(5, 7)}/${s.slice(0, 4)}` : '';
+  const isCold = p => !!p && (p.cold === true || p.cold === '1');
+  const prevMonth = () => iso(new Date(TODAY.getFullYear(), TODAY.getMonth() - 1, 1)).slice(0, 7);
+  const monthName = m => new Date(m + '-01T00:00').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const cleanNum = v => num(String(v ?? '').replace(/[,₹\s]/g, ''));
+  const dayDiff = (a, b) => Math.round((parse(a) - parse(b)) / DAY);
+  const fmtD = s => s ? fmtDate(s) : '—';
+  // Record of changes to bills, for the Audit agent
+  function auditNote(what, ref, extra = {}) {
+    if (!Array.isArray(db.auditLog)) db.auditLog = [];
+    db.auditLog.unshift({ at: new Date().toISOString(), date: todayIso, what, ref, by: (db.settings.profile || {}).name || '', ...extra });
+    if (db.auditLog.length > 500) db.auditLog.length = 500;
+  }
+
+  // ----- GSTR-2B reconciliation (input tax credit) -----
+  // GSTR-2B JSON from the GST portal (data.docdata.b2b[].inv[]); also reads the older 2A layout (itms[].itm_det)
+  function parse2bJson(obj) {
+    const data = obj?.data || obj;
+    const d = data?.docdata || data;
+    const rows = [];
+    (d?.b2b || []).forEach(s => (s.inv || []).forEach(v => {
+      const items = v.items || v.itms || [];
+      const sum = (...ks) => round2(items.reduce((a, i) => a + ks.reduce((x, k) => x || num(i[k] ?? i.itm_det?.[k]), 0), 0));
+      rows.push({ gstin: String(s.ctin || '').toUpperCase(), name: s.trdnm || '', invNo: String(v.inum || ''), date: parseAnyDate(v.dt || v.idt || ''), taxable: sum('txval'), igst: sum('igst', 'iamt'), cgst: sum('cgst', 'camt'), sgst: sum('sgst', 'samt'), total: num(v.val), itc: (v.itcavl || 'Y') !== 'N', rev: v.rev === 'Y' });
+    }));
+    const rp = String(data?.rtnprd || obj?.rtnprd || obj?.fp || '');
+    return { rows, period: /^\d{6}$/.test(rp) ? `${rp.slice(2)}-${rp.slice(0, 2)}` : '' };
+  }
+  // CSV saved from the B2B sheet of the GSTR-2B Excel (the header is two rows there)
+  function parse2bCsv(text) {
+    const rows = parseCsv(text.replace(/^﻿/, ''));
+    const hi = rows.findIndex(r => r.some(c => /gstin/i.test(c)));
+    if (hi < 0) throw new Error('No “GSTIN of supplier” column found. Open the GSTR-2B Excel, go to the B2B sheet and save it as CSV.');
+    const h = rows[hi].map((c, i) => `${c} ${rows[hi + 1]?.[i] || ''}`.toLowerCase());
+    const col = (...res) => { for (const re of res) { const i = h.findIndex(c => re.test(c)); if (i >= 0) return i; } return -1; };
+    const iG = col(/gstin/), iN = col(/trade|legal|name/), iI = col(/invoice\s*(number|no)/, /inv.*no/), iD = col(/invoice\s*date/, /\bdate\b/), iV = col(/invoice\s*value/, /value/), iT = col(/taxable/), iIg = col(/integrated/), iC = col(/central/), iS = col(/state\s*\/\s*ut|state.*tax|ut tax/), iA = col(/itc\s*avail/);
+    if (iI < 0) throw new Error('No “Invoice number” column found in the CSV.');
+    const cell = (r, i) => i >= 0 ? String(r[i] ?? '').trim() : '';
+    return rows.filter(r => /^\d{2}[A-Z0-9]{13}$/i.test(cell(r, iG))).map(r => ({ gstin: cell(r, iG).toUpperCase(), name: cell(r, iN), invNo: cell(r, iI), date: parseAnyDate(cell(r, iD)), taxable: cleanNum(cell(r, iT)), igst: cleanNum(cell(r, iIg)), cgst: cleanNum(cell(r, iC)), sgst: cleanNum(cell(r, iS)), total: cleanNum(cell(r, iV)), itc: !/^no/i.test(cell(r, iA)), rev: false }));
+  }
+  const invKey = s => bkey(s).replace(/^0+/, '');
+  // Every GSTR-2B invoice matched to a purchase bill, plus our bills of the imported months that are not in 2B
+  function itcRows() {
+    const bills = db.pinvoices.map(p => { const s = sup(p.supplierId); return { p, s, gstin: String(s?.gstin || '').toUpperCase(), key: invKey(p.supplierInvNo), taxable: round2(p.taxable), tax: round2(p.gst ?? (p.total - p.taxable)) }; }).filter(x => x.gstin);
+    const used = new Set(), out = [];
+    (db.gstr2b || []).forEach(imp => imp.rows.forEach(r => {
+      const tax = round2(r.igst + r.cgst + r.sgst);
+      let b = bills.find(x => !used.has(x.p.no) && x.gstin === r.gstin && x.key && x.key === invKey(r.invNo));
+      if (!b) b = bills.find(x => !used.has(x.p.no) && x.gstin === r.gstin && Math.abs(x.p.total - r.total) <= 1 && r.date && Math.abs(dayDiff(x.p.date, r.date)) <= 3);
+      if (!b) { out.push({ status: 'Not in books', r, tax, period: imp.period }); return; }
+      used.add(b.p.no);
+      const diff = round2(Math.max(Math.abs(b.taxable - r.taxable), Math.abs(b.tax - tax)));
+      out.push({ status: diff > 1 ? 'Mismatch' : 'Matched', r, tax, b, diff, period: imp.period });
+    }));
+    const periods = new Set((db.gstr2b || []).map(x => x.period));
+    bills.filter(x => periods.has(x.p.date.slice(0, 7)) && !used.has(x.p.no)).forEach(b => out.push({ status: 'Not in 2B', b, tax: b.tax, period: b.p.date.slice(0, 7) }));
+    return out;
+  }
+  ACTIONS['gstr2b-import'] = () => openModal({
+    title: 'Import GSTR-2B', size: 'lg', submitLabel: 'Import and match',
+    body: `<div class="form-grid">
+        ${field('Return period (month)', 'period', { type: 'month', value: prevMonth(), required: true })}
+        <div class="field"><label for="g2File">GSTR-2B file — JSON, or CSV *</label><input type="file" id="g2File" accept=".json,.csv,application/json,text/csv"></div>
+      </div>
+      <div class="small muted">On the GST portal: Returns Dashboard → choose the month → GSTR-2B → Download → “Generate JSON file to download” (best), or the Excel file — open its B2B sheet and save it as CSV. GSTR-2B for a month is ready on the 14th of the next month. B2B invoices are matched to your purchase bills by the supplier’s GSTIN and invoice number (or amount and date). Credit notes in 2B are not checked yet. The file stays only in your data.</div>`,
+    onSubmit: v => {
+      const f = $('#g2File')?.files?.[0]; if (!f) { toast('Choose the GSTR-2B file.'); return false; }
+      f.text().then(txt => {
+        let rows, period = v.period;
+        try {
+          if (/\.json$/i.test(f.name) || txt.trim().startsWith('{')) { const x = parse2bJson(JSON.parse(txt)); rows = x.rows; if (x.period) period = x.period; }
+          else rows = parse2bCsv(txt);
+        } catch (err) { toast(err instanceof SyntaxError ? 'The JSON file could not be read — download it again from the GST portal.' : err.message); return; }
+        if (!rows.length) { toast('No B2B invoices found in the file.'); return; }
+        db.gstr2b = (db.gstr2b || []).filter(x => x.period !== period);
+        db.gstr2b.unshift({ id: uid(), period, created: todayIso, file: f.name, rows });
+        db.gstr2b.sort((a, b) => b.period.localeCompare(a.period));
+        logAgent('gstr2b', `GSTR-2B ${period} imported: ${rows.length} invoice(s)`);
+        closeModal(false); runAgent('gstr2b', false);
+        if (location.hash !== '#itc') location.hash = 'itc'; refresh();
+        toast(`${rows.length} invoice(s) from GSTR-2B ${monthName(period)} imported. ${agentCfg('gstr2b').lastResult}.`);
+      }).catch(() => toast('The file could not be opened.'));
+      return false;
+    },
+  });
+  ACTIONS['gstr2b-del'] = id => { const x = (db.gstr2b || []).find(g => g.id === id); if (!x) return; confirmModal(`Remove GSTR-2B ${monthName(x.period)}?`, `${x.rows.length} invoice(s) from ${esc(x.file || 'the file')}. You can import it again.`, 'Remove', () => { db.gstr2b = db.gstr2b.filter(g => g !== x); runAgent('gstr2b', false); return 'GSTR-2B removed.'; }); };
+  ACTIONS['itc-hold'] = sid => { const s = sup(sid); if (!s) return; s.itcHold = !s.itcHold; logAgent('manual', `${s.name}: payment ${s.itcHold ? 'put on hold (GSTR-2B)' : 'hold removed'}`); refresh(); toast(`${s.name}: payment ${s.itcHold ? 'on hold until their bills appear in GSTR-2B' : 'hold removed'}.`); };
+  VIEWS.itc = () => {
+    const imps = db.gstr2b || [], rows = itcRows();
+    const by = st => rows.filter(x => x.status === st);
+    const itcIn2b = rows.filter(x => x.r && x.r.itc !== false).reduce((a, x) => a + x.tax, 0);
+    return `
+      <div class="grid g-4">
+        ${kpi('ITC in GSTR-2B', compact(itcIn2b), imps.length ? `${imps.length} month(s) · latest ${monthName(imps[0].period)}` : 'Import a GSTR-2B to start')}
+        ${kpi('Matched bills', qty(by('Matched').length), `${by('Mismatch').length} with a difference`)}
+        ${kpi('ITC at risk', compact(by('Not in 2B').reduce((a, x) => a + x.tax, 0)), `${by('Not in 2B').length} of your bills not filed by suppliers`)}
+        ${kpi('In 2B, not in your books', qty(by('Not in books').length), 'Enter the bill, or check with the supplier')}
+      </div>
+      ${useList({
+        key: 'itc', title: 'Purchase bills vs GSTR-2B',
+        actions: actBtn('gstr2b-import', '', icon('upload') + 'Import GSTR-2B', 'primary'),
+        tabs: [{ id: 'all', label: 'All' }, ...['Not in 2B', 'Mismatch', 'Not in books', 'Matched'].map(s => ({ id: s, label: s, filter: x => x.status === s }))],
+        filters: [{ k: 'period', label: 'Month', options: [...new Set(rows.map(x => x.period))].sort().reverse().map(m => [m, monthName(m)]), test: (x, v) => x.period === v }],
+        rows: () => rows.sort((a, b) => ['Not in 2B', 'Mismatch', 'Not in books', 'Matched'].indexOf(a.status) - ['Not in 2B', 'Mismatch', 'Not in books', 'Matched'].indexOf(b.status)),
+        text: x => [x.status, x.r?.gstin, x.r?.name, x.r?.invNo, x.b?.p.no, x.b?.p.supplierInvNo, x.b?.s?.name].join(' '),
+        empty: 'Import the GSTR-2B of a month to match it with your purchase bills.',
+        columns: [
+          { h: 'Status', c: x => pill(x.status) },
+          { h: 'Supplier', c: x => `<span class="strong">${esc(x.b?.s?.name || x.r?.name || '')}</span><div class="small muted">${esc(x.b?.gstin || x.r?.gstin || '')}${x.b?.s?.itcHold ? ' · ' + pill('On hold') : ''}</div>` },
+          { h: 'Invoice', c: x => `${esc(x.r?.invNo || x.b?.p.supplierInvNo || '')}<div class="small muted">${fmtD(x.r?.date || x.b?.p.date)}</div>` },
+          { h: 'Our bill', c: x => x.b ? `<a href="#" data-act="view-pi" data-id="${esc(x.b.p.no)}" class="strong">${esc(x.b.p.no)}</a>` : '—' },
+          { h: 'Taxable ours / 2B', r: 1, c: x => `${x.b ? dec(x.b.taxable) : '—'}<div class="small muted">${x.r ? dec(x.r.taxable) : '—'}</div>` },
+          { h: 'Tax ours / 2B', r: 1, c: x => `${x.b ? dec(x.b.tax) : '—'}<div class="small muted">${x.r ? dec(x.tax) : '—'}</div>` },
+          { h: '', c: x => x.status === 'Not in 2B' && x.b?.s ? actBtn('itc-hold', x.b.s.id, x.b.s.itcHold ? 'Release hold' : 'Hold payment', 'ghost') : '' },
+        ],
+      })}
+      ${useList({
+        key: 'gstr2b', title: 'Imported GSTR-2B', noSearch: true, rows: () => imps, text: x => x.period,
+        empty: 'Nothing imported yet.',
+        columns: [
+          { h: 'Month', c: x => `<span class="strong">${monthName(x.period)}</span>` },
+          { h: 'File', c: x => `<span class="small">${esc(x.file || '')}</span>` },
+          { h: 'Invoices', r: 1, c: x => qty(x.rows.length) },
+          { h: 'Imported', c: x => fmtD(x.created) },
+          { h: '', c: x => actBtn('gstr2b-del', x.id, 'Remove', 'ghost danger') },
+        ],
+      })}`;
+  };
+  function runItcAgent() {
+    const c = agentCfg('gstr2b'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('gstr2b', keep, it, days); };
+    const pm = prevMonth();
+    if (TODAY.getDate() >= c.remindDay && !(db.gstr2b || []).some(x => x.period === pm)) add({ key: 'itc:import:' + pm, kind: 'info', title: `Import GSTR-2B for ${monthName(pm)}`, detail: ['GST portal → Returns Dashboard → GSTR-2B → Download (JSON, or the Excel B2B sheet saved as CSV). It is ready on the 14th.', 'The agent then checks every purchase bill against what your suppliers filed.'], payload: { act: ['gstr2b-import', ''] } }, 20);
+    const rows = itcRows();
+    const miss = rows.filter(x => x.status === 'Not in 2B'), bySup = {};
+    miss.forEach(x => { (bySup[x.b.p.supplierId] = bySup[x.b.p.supplierId] || []).push(x); });
+    Object.entries(bySup).forEach(([sid, xs]) => {
+      const s = sup(sid), tax = round2(xs.reduce((a, x) => a + x.tax, 0)); if (tax < c.minTax) return;
+      add({ key: 'itc:miss:' + sid, kind: 'itchold', title: `${s?.name || sid} has not filed ${xs.length} bill(s) — ${money(tax)} ITC at risk`, detail: [xs.slice(0, 5).map(x => `${x.b.p.supplierInvNo || x.b.p.no} (${fmtD(x.b.p.date)})`).join(', '), s?.itcHold ? 'Payment is on hold.' : 'Ask them to file GSTR-1, and hold their payment until the bills show in your GSTR-2B.'], payload: { sid } }, 7);
+    });
+    const mis = rows.filter(x => x.status === 'Mismatch');
+    if (mis.length) add({ key: 'itc:mismatch', kind: 'info', title: `${mis.length} bill(s) differ from GSTR-2B`, detail: mis.slice(0, 4).map(x => `${x.b.p.no} · ${x.b.s?.name || ''}: our tax ₹${dec(x.b.tax)}, 2B ₹${dec(x.tax)}`).concat('Check the bill entry, or ask the supplier to amend their return.'), payload: { go: 'itc' } }, 7);
+    const nib = rows.filter(x => x.status === 'Not in books');
+    if (nib.length) add({ key: 'itc:books', kind: 'info', title: `${nib.length} invoice(s) in GSTR-2B are not in your purchase bills`, detail: [...nib.slice(0, 4).map(x => `${x.r.name || x.r.gstin} · ${x.r.invNo} · ${fmtD(x.r.date)} · ₹${dec(x.r.total)}`), 'Enter the bill if you received the goods; if not, ask the supplier — your GSTIN may have been used by mistake.'], payload: { go: 'itc' } }, 7);
+    db.suppliers.forEach(s => { if (s.itcHold && !bySup[s.id]) { s.itcHold = false; logAgent('gstr2b', `${s.name}: all bills now in GSTR-2B — payment hold removed`); } });
+    closeStale('gstr2b', keep);
+    return { made, summary: (db.gstr2b || []).length ? `${rows.filter(x => x.status === 'Matched').length} matched, ${mis.length} differ, ${miss.length} not in 2B, ${nib.length} not in books` : 'No GSTR-2B imported yet' };
+  }
+
+  // ----- Payment Planner -----
+  function cashPlan(c) {
+    const nW = Math.max(1, Math.ceil(c.days / 7)), weeks = [];
+    for (let i = 0; i < nW; i++) weeks.push({ from: addDays(todayIso, i * 7), to: addDays(todayIso, i * 7 + 6), inn: 0, out: 0, ins: [], outs: [] });
+    const wk = date => { const i = Math.floor(Math.max(0, daysFrom(date)) / 7); return i < nW ? weeks[i] : null; };
+    const pays = {};
+    db.sales.filter(s => balance(s) > 0.5).forEach(s => {
+      let due, sure = 1;
+      if (s.party.type === 'chemist') { const ch = chem(s.party.chemistId); const pr = pays[s.party.chemistId] || (pays[s.party.chemistId] = creditProfile(s.party.chemistId)); due = addDays(s.date, Math.max(ch?.terms ?? 30, pr?.avgPay || 0)); }
+      else due = addDays(s.date, db.settings.individualTerms || 0);
+      if (due < todayIso) sure = c.overduePct / 100;
+      const w = wk(due); if (!w) return;
+      const amt = round2(balance(s) * sure); w.inn += amt; w.ins.push({ s, amt, due, late: due < todayIso });
+    });
+    const held = [];
+    db.pinvoices.filter(p => balance(p) > 0.5).forEach(p => {
+      if (sup(p.supplierId)?.itcHold) { held.push(p); return; }
+      const w = wk(p.due || p.date); if (!w) return;
+      w.out += balance(p); w.outs.push(p);
+    });
+    let bal = num(c.cash);
+    weeks.forEach(w => { w.inn = round2(w.inn); w.out = round2(w.out); bal = round2(bal + w.inn - w.out); w.bal = bal; });
+    return { weeks, held };
+  }
+  ACTIONS['payplan-view'] = () => {
+    const c = agentCfg('payplan'), { weeks, held } = cashPlan(c);
+    const payNow = weeks[0].outs.slice().sort((a, b) => (a.due || '').localeCompare(b.due || ''));
+    const chase = weeks[0].ins.filter(x => x.late).sort((a, b) => balance(b.s) - balance(a.s)).slice(0, 8);
+    openModal({
+      title: 'Payment plan', size: 'xl',
+      extraFoot: '<div class="foot-left"><button type="button" class="btn" data-act="agent-config" data-id="payplan">Settings</button></div>',
+      body: `<div class="small muted">Money in: open sale bills, expected on the chemist’s usual payment day (terms or their average); overdue bills are counted at ${c.overduePct}%. Money out: supplier bills by due date${held.length ? ', except suppliers on hold' : ''}. Starting balance ${money(c.cash)} (set it in Settings).</div>
+        ${miniTable([
+          { h: 'Week', c: w => `${fmtDate(w.from)} – ${fmtDate(w.to)}` },
+          { h: 'Money in', r: 1, c: w => money(w.inn) },
+          { h: 'Money out', r: 1, c: w => money(w.out) },
+          { h: 'Net', r: 1, c: w => `<span class="${w.inn - w.out < 0 ? 'bad-text' : 'ok-text'}">${money(w.inn - w.out)}</span>` },
+          { h: 'Balance', r: 1, c: w => `<span class="strong ${w.bal < 0 ? 'bad-text' : ''}">${money(w.bal)}</span>` },
+        ], weeks)}
+        <div class="card-title" style="font-size:15px">To pay this week (due or overdue)</div>
+        ${miniTable([
+          { h: 'Bill', c: p => `<span class="strong">${esc(p.no)}</span><div class="small muted">${esc(p.supplierInvNo || '')}</div>` },
+          { h: 'Supplier', c: p => esc(sup(p.supplierId)?.name || '') },
+          { h: 'Due', c: p => `<span class="${daysFrom(p.due) < 0 ? 'bad-text' : ''}">${fmtD(p.due)}</span>` },
+          { h: 'Balance', r: 1, c: p => money2(balance(p)) },
+          { h: '', c: p => actBtn('pay-pi', p.no, 'Record payment', 'ghost') },
+        ], payNow)}
+        ${held.length ? `<div class="small"><b>On hold (bills not in GSTR-2B):</b> ${held.map(p => `${esc(p.no)} · ${esc(sup(p.supplierId)?.name || '')} · ${money(balance(p))}`).join('; ')}</div>` : ''}
+        <div class="card-title" style="font-size:15px">Collect first (overdue)</div>
+        ${miniTable([
+          { h: 'Bill', c: x => esc(x.s.no) }, { h: 'Party', c: x => esc(partyName(x.s)) }, { h: 'Bill date', c: x => fmtD(x.s.date) }, { h: 'Balance', r: 1, c: x => money2(balance(x.s)) },
+        ], chase)}`,
+    });
+  };
+  function runPayplanAgent() {
+    const c = agentCfg('payplan'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('payplan', keep, it, days); };
+    const { weeks, held } = cashPlan(c);
+    const due = weeks[0].outs;
+    if (due.length) add({ key: 'pay:' + weekKey(), kind: 'paylist', title: `Supplier payments due this week — ${money(weeks[0].out)} (${due.length} bill${due.length === 1 ? '' : 's'})`, detail: [...due.slice(0, 4).map(p => `${p.no} · ${sup(p.supplierId)?.name || ''} · ${money(balance(p))} · due ${fmtD(p.due)}`), `Expected in this week: ${money(weeks[0].inn)}${held.length ? ` · ${held.length} bill(s) on hold (GSTR-2B)` : ''}`], payload: {} });
+    if (num(c.cash) > 0) {
+      const short = weeks.find(w => w.bal < 0);
+      if (short) add({ key: 'pay:short:' + short.from, kind: 'info', title: `Cash may run short by ${money(-short.bal)} in the week of ${fmtDate(short.from)}`, detail: [`In ${money(short.inn)} · out ${money(short.out)} that week`, 'Collect overdue bills first, or move some supplier payments — see the payment plan.'], payload: { act: ['payplan-view', ''] } }, 3);
+    } else add({ key: 'pay:setcash', kind: 'info', title: 'Set your cash and bank balance for the payment plan', detail: ['Agents → Payment Planner → Settings → “Cash and bank balance today”. Then the agent warns before a week where money may run short.'], payload: { act: ['agent-config', 'payplan'] } }, 30);
+    closeStale('payplan', keep);
+    return { made, summary: `${money(weeks[0].out)} to pay this week · ${money(weeks[0].inn)} expected in` };
+  }
+
+  // ----- e-Invoice & e-Way Bill -----
+  const gstDocNeeds = (s, c) => { const n = []; if (s.total >= c.ewayLimit && !s.ewb) n.push('e-Way bill'); if (c.einvoice && s.party.type === 'chemist' && chem(s.party.chemistId)?.gstin && !s.irn) n.push('e-Invoice'); return n; };
+  const gstDocBills = c => db.sales.filter(s => s.date >= addDays(todayIso, -c.days) && gstDocNeeds(s, c).length).sort((a, b) => b.date.localeCompare(a.date));
+  function ewbJson(sales, veh, km) {
+    const f = db.settings.firm, fs = firmState();
+    return { version: '1.0.0621', billLists: sales.map(s => {
+      const pt = partyOf(s), toG = s.party.type === 'chemist' && pt?.gstin ? pt.gstin.toUpperCase() : 'URP', ts = stateOf(toG) || fs, inter = ts !== fs;
+      const itemList = s.lines.map(l => { const c = calcLine(l), p = prod(l.productId); return { productName: p?.name || '', productDesc: p?.name || '', hsnCode: Number(p?.hsn) || 0, quantity: l.qty + (l.free || 0), qtyUnit: 'NOS', taxableAmount: round2(c.taxable), sgstRate: inter ? 0 : num(l.gst) / 2, cgstRate: inter ? 0 : num(l.gst) / 2, igstRate: inter ? num(l.gst) : 0, cessRate: 0, cessNonAdvol: 0 }; });
+      const tax = round2(s.gst ?? (s.total - s.taxable));
+      return { userGstin: f.gstin, supplyType: 'O', subSupplyType: 1, subSupplyDesc: '', docType: 'INV', docNo: s.no, docDate: ddmmyyyy(s.date), fromGstin: f.gstin, fromTrdName: f.name, fromAddr1: (f.address || f.locality || f.name || '').slice(0, 120), fromAddr2: [f.tehsil, f.district].filter(Boolean).join(', '), fromPlace: f.locality || f.city || f.tehsil || '', fromPincode: Number(f.pincode) || 0, fromStateCode: Number(fs), actFromStateCode: Number(fs),
+        toGstin: toG, toTrdName: pt?.name || s.party.name || '', toAddr1: (pt?.address || pt?.locality || '').slice(0, 120), toAddr2: [pt?.tehsil, pt?.district].filter(Boolean).join(', '), toPlace: pt?.locality || pt?.city || pt?.tehsil || '', toPincode: Number(pt?.pincode) || 0, toStateCode: Number(ts), actToStateCode: Number(ts), transactionType: 1,
+        totalValue: round2(s.taxable), cgstValue: inter ? 0 : round2(tax / 2), sgstValue: inter ? 0 : round2(tax / 2), igstValue: inter ? tax : 0, cessValue: 0, cessNonAdvolValue: 0, otherValue: round2(s.roundOff || 0), totInvValue: round2(s.total),
+        transMode: 1, transDistance: String(Math.round(num(km)) || 0), transporterId: '', transporterName: '', transDocNo: '', transDocDate: '', vehicleNo: String(veh || '').replace(/[\s-]/g, '').toUpperCase(), vehicleType: 'R', itemList };
+    }) };
+  }
+  function einvJson(sales) {
+    const f = db.settings.firm, fs = firmState();
+    return sales.filter(s => s.party.type === 'chemist').map(s => {
+      const pt = chem(s.party.chemistId), ts = stateOf(pt?.gstin) || fs, inter = ts !== fs;
+      const ItemList = s.lines.map((l, i) => { const c = calcLine(l), p = prod(l.productId), gr = num(l.gst), tax = c.taxable * gr / 100; return { SlNo: String(i + 1), PrdDesc: p?.name || '', IsServc: 'N', HsnCd: String(p?.hsn || ''), Qty: l.qty, FreeQty: l.free || 0, Unit: 'NOS', UnitPrice: round2(num(l.rate)), TotAmt: round2(c.amount), Discount: round2(c.cdA + c.tdA), AssAmt: round2(c.taxable), GstRt: gr, IgstAmt: inter ? round2(tax) : 0, CgstAmt: inter ? 0 : round2(tax / 2), SgstAmt: inter ? 0 : round2(tax / 2), CesRt: 0, CesAmt: 0, CesNonAdvlAmt: 0, StateCesRt: 0, StateCesAmt: 0, StateCesNonAdvlAmt: 0, OthChrg: 0, TotItemVal: round2(c.taxable + tax) }; });
+      const sumK = k => round2(ItemList.reduce((a, x) => a + x[k], 0));
+      return { Version: '1.1', TranDtls: { TaxSch: 'GST', SupTyp: 'B2B', RegRev: 'N', IgstOnIntra: 'N' }, DocDtls: { Typ: 'INV', No: s.no, Dt: ddmmyyyy(s.date) },
+        SellerDtls: { Gstin: f.gstin, LglNm: f.name, Addr1: (addrText(f) || f.name).slice(0, 100), Loc: f.locality || f.tehsil || f.district || 'NA', Pin: Number(f.pincode) || 0, Stcd: fs },
+        BuyerDtls: { Gstin: (pt?.gstin || '').toUpperCase(), LglNm: pt?.name || '', Pos: ts, Addr1: (addrText(pt) || pt?.name || '').slice(0, 100), Loc: pt?.locality || pt?.tehsil || pt?.district || 'NA', Pin: Number(pt?.pincode) || 0, Stcd: ts },
+        ItemList, ValDtls: { AssVal: sumK('AssAmt'), CgstVal: sumK('CgstAmt'), SgstVal: sumK('SgstAmt'), IgstVal: sumK('IgstAmt'), CesVal: 0, StCesVal: 0, Discount: 0, OthChrg: 0, RndOffAmt: round2(s.total - sumK('TotItemVal')), TotInvVal: round2(s.total) } };
+    });
+  }
+  let gdState = null;
+  function gstDocsModal(approvalId) {
+    const c = agentCfg('gstdocs'), bills = gstDocBills(c); gdState = { bills, approvalId };
+    openModal({
+      title: 'e-Way bills and e-Invoices', size: 'xl', submitLabel: 'Save numbers',
+      extraFoot: '<div class="foot-left"><button type="button" class="btn" data-p5="ewb-json">e-Way bill JSON</button>' + (c.einvoice ? '<button type="button" class="btn" data-p5="einv-json">e-Invoice JSON</button>' : '') + '</div>',
+      body: `<div class="small muted">An e-way bill is needed when goods worth more than ${money(c.ewayLimit)} are moved${c.einvoice ? '; e-invoices (IRN) for every B2B bill because your turnover crossed the e-invoice limit' : ''}. Tick bills, download the JSON and upload it on ewaybillgst.gov.in (Generate Bulk)${c.einvoice ? ' or einvoice1.gst.gov.in' : ''} — try one bill first. Then type the numbers you got back and save. Distance 0 lets the portal work it out from the PIN codes, so keep the PIN codes of your firm and chemists filled.</div>
+        <div class="form-grid g4">${field('Vehicle number', 'veh', { value: c.vehicle || '', attrs: 'placeholder="HP24A1234"' })}${field('Distance (km)', 'km', { type: 'number', value: 0, attrs: numAttrs('1') })}</div>
+        ${miniTable([
+          { h: '', c: s => `<input type="checkbox" class="cb" name="gd_${esc(s.no)}" checked aria-label="Tick bill">` },
+          { h: 'Bill', c: s => `<span class="strong">${esc(s.no)}</span><div class="small muted">${fmtD(s.date)}</div>` },
+          { h: 'Party', c: s => `${esc(partyName(s))}<div class="small muted">${esc((partyOf(s)?.gstin) || 'Unregistered')}${partyOf(s)?.pincode ? '' : ' · <span class="bad-text">no PIN</span>'}</div>` },
+          { h: 'Amount', r: 1, c: s => money2(s.total) },
+          { h: 'Needs', c: s => gstDocNeeds(s, c).map(pill).join(' ') },
+          { h: 'e-Way bill no.', c: s => `<input name="ewb_${esc(s.no)}" value="${esc(s.ewb || '')}" style="width:130px" inputmode="numeric">` },
+          ...(c.einvoice ? [{ h: 'IRN', c: s => `<input name="irn_${esc(s.no)}" value="${esc(s.irn || '')}" style="width:160px">` }] : []),
+        ], bills)}`,
+      onSubmit: v => {
+        let n = 0;
+        bills.forEach(s => { const e = String(v['ewb_' + s.no] || '').trim(), r = String(v['irn_' + s.no] || '').trim(); if (e && e !== s.ewb) { s.ewb = e; n++; } if (r && r !== s.irn) { s.irn = r; n++; } if ((e || r) && v.veh) s.vehicle = v.veh.trim().toUpperCase(); });
+        if (v.veh) c.vehicle = v.veh.trim().toUpperCase();
+        if (n) logAgent('gstdocs', `${n} e-way bill / IRN number(s) saved`);
+        if (approvalId && !gstDocBills(c).length) doneApproval(approvalId, 'All documents made');
+        return n ? `${n} number(s) saved.` : 'Nothing changed.';
+      },
+    });
+  }
+  function gstDocsDownload(kind) {
+    const st = gdState; if (!st) return;
+    const pick = st.bills.filter(s => $(`#mform [name="gd_${CSS.escape(s.no)}"]`)?.checked);
+    if (!pick.length) { toast('Tick at least one bill.'); return; }
+    const f = db.settings.firm;
+    if (!f.gstin) { toast('Add your firm’s GSTIN in Settings first.'); return; }
+    if (kind === 'ewb') {
+      const veh = $('#f-veh')?.value || '', km = $('#f-km')?.value || 0;
+      if (!veh.trim()) { toast('Enter the vehicle number (Part B of the e-way bill).'); return; }
+      downloadText(`ewaybill-${todayIso}.json`, JSON.stringify(ewbJson(pick, veh, km), null, 1), 'application/json');
+      logAgent('gstdocs', `e-Way bill JSON for ${pick.length} bill(s) downloaded`);
+    } else {
+      const j = einvJson(pick); if (!j.length) { toast('e-Invoices are only for bills to registered chemists.'); return; }
+      downloadText(`einvoice-${todayIso}.json`, JSON.stringify(j, null, 1), 'application/json');
+      logAgent('gstdocs', `e-Invoice JSON for ${j.length} bill(s) downloaded`);
+    }
+  }
+  ACTIONS['gstdocs-open'] = () => gstDocsModal('');
+  function runGstDocsAgent() {
+    const c = agentCfg('gstdocs'); const keep = new Set(); let made = 0;
+    const bills = gstDocBills(c);
+    if (bills.length) made += p4Add('gstdocs', keep, { key: 'gstdocs', kind: 'gstdocs', title: `${bills.length} bill(s) need an e-way bill${c.einvoice ? ' or e-invoice' : ''}`, detail: bills.slice(0, 5).map(s => `${s.no} · ${partyName(s)} · ${money(s.total)} · ${gstDocNeeds(s, c).join(', ')}`), payload: {} });
+    closeStale('gstdocs', keep);
+    return { made, summary: `${bills.length} bill(s) need documents` };
+  }
+
+  // ----- Near-Expiry Clearance -----
+  const DEFAULT_CLEAR = 'Namaste {party} ji,\n{firm} — short expiry stock par special rate:\n{lines}\nStock limited hai. Order ke liye reply karein.';
+  const clearDisc = (c, d) => d <= 60 ? c.disc60 : d <= 120 ? c.disc120 : c.disc180;
+  function clearancePlan(c) {
+    const batches = db.batches.filter(b => avail(b) > 0 && !b.blocked && expDays(b.expiry) >= c.minDays && expDays(b.expiry) <= c.maxDays).sort((a, b) => a.expiry.localeCompare(b.expiry));
+    const pids = new Set(batches.map(b => b.productId)), since = addDays(todayIso, -c.buyerDays), buyers = {};
+    db.sales.filter(s => s.date >= since && s.party.type === 'chemist').forEach(s => s.lines.forEach(l => { if (pids.has(l.productId)) (buyers[s.party.chemistId] = buyers[s.party.chemistId] || new Set()).add(l.productId); }));
+    const offered = cid => db.reminders.filter(r => r.key === 'clear:' + cid).map(r => r.date).sort().pop();
+    const chems = Object.entries(buyers).map(([cid, set]) => ({ ch: chem(cid), pids: [...set], last: offered(cid) })).filter(x => x.ch && x.ch.status === 'Active').sort((a, b) => b.pids.length - a.pids.length);
+    return { batches, chems };
+  }
+  const offerRate = (c, b) => { const p = prod(b.productId); return round2(num(p?.ptr) * (1 - clearDisc(c, expDays(b.expiry)) / 100)); };
+  let clearState = null;
+  function clearanceModal(approvalId) {
+    const c = agentCfg('clearance'), plan = clearancePlan(c); clearState = { ...plan, approvalId };
+    openModal({
+      title: 'Near-expiry clearance', size: 'xl', submitLabel: 'Done for now',
+      body: `<div class="small muted">Stock expiring in ${c.minDays}–${c.maxDays} days, offered to chemists who bought those items in the last ${c.buyerDays} days. Offer: ${c.disc180}% off up to ${c.maxDays} days, ${c.disc120}% within 120 days, ${c.disc60}% within 60 days (from your sale rate) — give it as CD% on the bill. What does not sell goes to Returns & Expiry Claims.</div>
+        ${miniTable([
+          { h: 'Item', c: b => `<span class="strong">${esc(prod(b.productId)?.name || '')}</span><div class="small muted">Batch ${esc(b.batch)}</div>` },
+          { h: 'Expiry', c: b => `${isoToExp(b.expiry)}<div class="small muted">${expDays(b.expiry)} days</div>` },
+          { h: 'Stock', r: 1, c: b => qty(avail(b)) },
+          { h: 'At cost', r: 1, c: b => money(batchAmount(b)) },
+          { h: 'Offer', r: 1, c: b => `₹${dec(offerRate(c, b))}<div class="small muted">${clearDisc(c, expDays(b.expiry))}% off</div>` },
+        ], plan.batches)}
+        <div class="card-title" style="font-size:15px">Offer to chemists</div>
+        ${miniTable([
+          { h: 'Chemist', c: x => `<span class="strong">${esc(x.ch.name)}</span><div class="small muted">${esc(x.ch.phone || 'No mobile')}${x.last ? ` · offered ${fmtD(x.last)}` : ''}</div>` },
+          { h: 'Buys', c: x => `<span class="small">${esc(x.pids.map(id => prod(id)?.name).join(', '))}</span>` },
+          { h: '', c: x => x.ch.phone ? `<button type="button" class="btn sm ${x.last ? 'ghost' : 'primary'}" data-p5="clr-wa" data-id="${esc(x.ch.id)}">${icon('chat')}WhatsApp offer</button>` : '' },
+        ], plan.chems)}`,
+      onSubmit: () => { if (approvalId) doneApproval(approvalId, 'Offers sent'); return 'Clearance offers done.'; },
+    });
+  }
+  function clearanceWa(cid) {
+    const st = clearState, c = agentCfg('clearance'), x = st?.chems.find(y => y.ch.id === cid); if (!x) return;
+    const lines = st.batches.filter(b => x.pids.includes(b.productId)).map(b => `• ${prod(b.productId)?.name} (exp ${isoToExp(b.expiry)}) — ₹${dec(offerRate(c, b))} (${clearDisc(c, expDays(b.expiry))}% off) · ${qty(avail(b))} available`).join('\n');
+    openWa(x.ch.phone, fillTpl(c.template, { party: x.ch.owner || x.ch.name, firm: db.settings.firm.name, lines }));
+    db.reminders.push({ date: todayIso, key: 'clear:' + cid, channel: 'WhatsApp' });
+    logAgent('clearance', `Clearance offer → ${x.ch.name} (WhatsApp)`); save();
+    x.last = todayIso;
+  }
+  ACTIONS['clearance-open'] = () => clearanceModal('');
+  function runClearanceAgent() {
+    const c = agentCfg('clearance'); const keep = new Set(); let made = 0;
+    const { batches, chems } = clearancePlan(c);
+    const fresh = chems.filter(x => x.ch.phone && (!x.last || x.last < addDays(todayIso, -c.repeatDays)));
+    if (batches.length) made += p4Add('clearance', keep, { key: 'clear:' + weekKey(), kind: 'clearance', title: `${batches.length} near-expiry batch(es) worth ${money(batches.reduce((a, b) => a + batchAmount(b), 0))} to clear — ${fresh.length} chemist(s) to offer`, detail: batches.slice(0, 4).map(b => `${prod(b.productId)?.name} · ${b.batch} · exp ${isoToExp(b.expiry)} · ${qty(avail(b))}`), payload: {} });
+    closeStale('clearance', keep);
+    return { made, summary: `${batches.length} batch(es) to clear · ${fresh.length} chemist(s) to offer` };
+  }
+
+  // ----- Cold Chain Watch -----
+  const COLD_HINT = /INSULIN|SULIN|VACCIN|\bPEN\b|GLARGINE|ASPART|LISPRO|DEGLUDEC|LIRAGLUTIDE|ERYTHROPOIETIN|OXYTOCIN|BIOSIM|RABIES|TETANUS/;
+  const fridges = () => String(agentCfg('coldchain').fridges || 'Fridge 1').split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+  const coldStock = () => db.products.filter(p => isCold(p) && sellableQty(p.id) > 0);
+  ACTIONS['temp-log'] = () => {
+    const c = agentCfg('coldchain'), last = (db.tempLog || []).slice(0, 20);
+    const slot = new Date().getHours() < 13 ? 'Morning' : 'Evening';
+    openModal({
+      title: 'Fridge temperature log', size: 'lg', submitLabel: 'Save reading',
+      body: `<div class="form-grid g4">
+          ${field('Fridge', 'fridge', { options: fridges() })}
+          ${field('Time', 'slot', { value: slot, options: ['Morning', 'Evening', 'Other'] })}
+          ${field('Temperature (°C)', 'temp', { type: 'number', required: true, attrs: 'step="0.1" inputmode="decimal"' })}
+          ${field('Note', 'note', {})}
+        </div>
+        <div class="small muted">Safe range ${c.min}–${c.max} °C for insulin, vaccines and other cold-chain items. ${coldStock().length} cold-chain product(s) in stock.</div>
+        ${miniTable([
+          { h: 'When', c: t => `${fmtD(t.date)} · ${esc(t.slot)}` }, { h: 'Fridge', c: t => esc(t.fridge) },
+          { h: '°C', r: 1, c: t => `<span class="${t.temp < c.min || t.temp > c.max ? 'bad-text strong' : ''}">${dec(t.temp)}</span>` },
+          { h: 'Note', c: t => `<span class="small">${esc(t.note || '')}${t.by ? ' · ' + esc(t.by) : ''}</span>` },
+        ], last)}`,
+      onSubmit: v => {
+        const t = num(v.temp); if (!Number.isFinite(t) || String(v.temp).trim() === '' || t < -30 || t > 60) { toast('Enter the temperature in °C.'); return false; }
+        if (!Array.isArray(db.tempLog)) db.tempLog = [];
+        db.tempLog.unshift({ id: uid(), at: new Date().toISOString(), date: todayIso, slot: v.slot, fridge: v.fridge, temp: round2(t), note: (v.note || '').trim(), by: (db.settings.profile || {}).name || '' });
+        if (db.tempLog.length > 2000) db.tempLog.length = 2000;
+        const bad = t < c.min || t > c.max;
+        if (bad) runAgent('coldchain', false);
+        return bad ? `${v.fridge} is at ${dec(t)} °C — outside ${c.min}–${c.max} °C. Check the fridge and the cold-chain stock.` : 'Reading saved.';
+      },
+    });
+  };
+  function runColdAgent() {
+    const c = agentCfg('coldchain'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('coldchain', keep, it, days); };
+    const cold = coldStock(), log = db.tempLog || [], yday = addDays(todayIso, -1);
+    if (cold.length || log.length) fridges().forEach(fr => {
+      const n = log.filter(t => t.fridge === fr && t.date === yday).length;
+      if (n < c.readingsPerDay) add({ key: `cold:miss:${fr}:${yday}`, kind: 'info', title: `${fr}: ${n ? 'only ' + n : 'no'} temperature reading${n === 1 ? '' : 's'} yesterday`, detail: [`Record ${c.readingsPerDay} readings a day (morning and evening) — the Drug Inspector asks for this log.`], payload: { act: ['temp-log', ''] } }, 2);
+      const bad = log.filter(t => t.fridge === fr && t.date >= yday && (t.temp < c.min || t.temp > c.max));
+      if (bad.length) add({ key: `cold:range:${fr}:${bad[0].date}`, kind: 'info', title: `${fr} was at ${dec(bad[0].temp)} °C (${bad[0].slot}, ${fmtD(bad[0].date)}) — outside ${c.min}–${c.max} °C`, detail: [`${cold.length} cold-chain product(s) in stock: ${cold.slice(0, 5).map(p => p.name).join(', ')}`, 'Check the fridge and move the stock if needed. Stock kept warm for long may have to be returned or destroyed — ask the supplier.'], payload: { act: ['temp-log', ''] } }, 3);
+    });
+    // Name / salt / form only — a category such as “Diabetes & Insulin” also holds tablets; tablets, capsules and syrups are left out
+    if (c.suggest) { const sug = db.products.filter(p => !isCold(p) && !/TABLET|CAPSULE|SYRUP|CREAM|LOTION|POWDER|SACHET/i.test(p.form || '') && COLD_HINT.test(norm([p.name, p.salt, p.form].join(' ')))); if (sug.length) add({ key: 'cold:suggest', kind: 'info', title: `${sug.length} product(s) may need cold storage (2–8 °C)`, detail: [sug.slice(0, 6).map(p => p.name).join(', '), 'Products & Masters → Edit → tick “Cold chain”, or tick several and set Cold chain.'], payload: { go: 'products' } }, 30); }
+    closeStale('coldchain', keep);
+    return { made, summary: `${cold.length} cold-chain product(s) in stock · ${log.filter(t => t.date >= yday).length} reading(s) since yesterday` };
+  }
+
+  // ----- Supplier Performance -----
+  const netRate = l => round2(num(l.rate) * (1 - num(l.cd) / 100) * (1 - num(l.td) / 100));
+  const shelfDays = (exp, from) => { if (!exp) return 9999; const [y, m] = exp.split('-').map(Number); return Math.round((new Date(y, m, 0) - parse(from)) / DAY); };
+  // Latest net purchase rate of each product from each supplier, in the look-back period
+  function latestRates(c) {
+    const since = addDays(todayIso, -c.days), m = {};
+    purchaseLines().filter(l => l.date >= since && l.supplierId && num(l.rate) > 0).forEach(l => { const k = l.productId; m[k] = m[k] || {}; if (!m[k][l.supplierId]) m[k][l.supplierId] = { rate: netRate(l), date: l.date }; });
+    return m; // purchaseLines() is newest first, so the first line seen is the latest
+  }
+  function supplierStats(sid, c, rates) {
+    const since = addDays(todayIso, -c.days);
+    const pos = db.pos.filter(p => p.supplierId === sid && p.date >= since && p.date <= addDays(todayIso, -7) && p.status !== 'Cancelled');
+    let ord = 0, got = 0; pos.forEach(p => p.lines.forEach(l => { ord += l.qty; got += Math.min(l.qty, receivedQty(p.no, l.productId)); }));
+    const fill = ord ? got / ord : null;
+    const lates = db.grns.filter(g => g.supplierId === sid && g.poNo && g.date >= since).map(g => { const p = db.pos.find(x => x.no === g.poNo); return p?.expected ? Math.max(0, dayDiff(g.date, p.expected)) : null; }).filter(x => x != null);
+    const late = lates.length ? Math.round(lates.reduce((a, x) => a + x, 0) / lates.length) : null;
+    const lines = purchaseLines(sid).filter(l => l.date >= since);
+    const short = lines.filter(l => shelfDays(l.expiry, l.date) < c.minShelfDays).length;
+    const mine = Object.entries(rates).filter(([, s]) => s[sid]);
+    const costlier = mine.filter(([, s]) => { const best = Math.min(...Object.values(s).map(x => x.rate)); return s[sid].rate > best * (1 + c.savePct / 100); }).length;
+    const why = []; let score = 100;
+    if (fill != null) { const p = Math.min(30, Math.round(Math.max(0, 0.95 - fill) * 100)); score -= p; why.push(`Supplied ${Math.round(fill * 100)}% of ordered qty`); }
+    if (late != null) { const p = Math.min(20, late * 3); score -= p; why.push(late ? `${late} day(s) late on average` : 'Delivers on time'); }
+    if (lines.length) { const pct = Math.round(short / lines.length * 100); score -= Math.min(20, Math.round(pct / 2)); if (short) why.push(`${pct}% of lines with less than ${c.minShelfDays} days of shelf life`); }
+    if (mine.length) { const pct = Math.round(costlier / mine.length * 100); score -= Math.min(20, Math.round(pct / 5)); if (costlier) why.push(`Costlier than others on ${costlier} of ${mine.length} item(s)`); }
+    const has = fill != null || late != null || lines.length;
+    return { sid, fill, late, lines: lines.length, short, costlier, items: mine.length, score: has ? score : null, grade: !has ? '—' : score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D', why };
+  }
+  // Supplier with the lowest recent net rate for each product (ties: better score); used for draft purchase orders
+  function bestSupplierMap() {
+    const c = agentCfg('supplier'), rates = latestRates(c), score = {}, out = {};
+    db.suppliers.forEach(s => { score[s.id] = supplierStats(s.id, c, rates).score ?? 50; });
+    Object.entries(rates).forEach(([pid, s]) => { const best = Object.entries(s).sort((a, b) => a[1].rate - b[1].rate || (score[b[0]] - score[a[0]]))[0]; if (best && sup(best[0])) out[pid] = best[0]; });
+    return out;
+  }
+  ACTIONS['supplier-report'] = () => {
+    const c = agentCfg('supplier'), rates = latestRates(c);
+    const rows = db.suppliers.map(s => ({ s, st: supplierStats(s.id, c, rates) })).sort((a, b) => (a.st.score ?? 101) - (b.st.score ?? 101));
+    openModal({
+      title: `Supplier performance — last ${c.days} days`, size: 'xl',
+      body: `<div class="small muted">Fill rate = ordered qty received (POs older than a week); late = days after the PO’s expected date; short shelf life = lines with less than ${c.minShelfDays} days to expiry when bought; costlier = more than ${c.savePct}% above the cheapest supplier’s latest rate for the same item.</div>
+        ${miniTable([
+          { h: 'Supplier', c: x => `<span class="strong">${esc(x.s.name)}</span>${x.s.itcHold ? ' ' + pill('On hold') : ''}` },
+          { h: 'Score', c: x => x.st.score == null ? '<span class="muted small">—</span>' : `${pill('Score ' + x.st.grade)} <span class="small">${x.st.score}</span>` },
+          { h: 'Fill', r: 1, c: x => x.st.fill == null ? '—' : `${Math.round(x.st.fill * 100)}%` },
+          { h: 'Late', r: 1, c: x => x.st.late == null ? '—' : `${x.st.late} d` },
+          { h: 'Short expiry', r: 1, c: x => x.st.lines ? `${x.st.short}/${x.st.lines}` : '—' },
+          { h: 'Costlier', r: 1, c: x => x.st.items ? `${x.st.costlier}/${x.st.items}` : '—' },
+          { h: 'Why', c: x => `<span class="small">${esc(x.st.why.join(' · '))}</span>` },
+        ], rows)}`,
+    });
+  };
+  function runSupplierAgent() {
+    const c = agentCfg('supplier'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('supplier', keep, it, days); };
+    const rates = latestRates(c);
+    db.suppliers.forEach(s => { const st = supplierStats(s.id, c, rates); if (st.grade === 'D') add({ key: 'sup:poor:' + s.id, kind: 'info', title: `${s.name} scores D (${st.score}/100) as a supplier`, detail: [...st.why, 'Talk to them, or buy these items elsewhere.'], payload: { act: ['supplier-report', ''] } }, 30); });
+    const lastBuy = {}; purchaseLines().forEach(l => { if (!lastBuy[l.productId] && l.supplierId) lastBuy[l.productId] = l; });
+    const cheaper = [];
+    Object.entries(rates).forEach(([pid, s]) => {
+      const l = lastBuy[pid]; if (!l || !s[l.supplierId]) return;
+      const [bsid, b] = Object.entries(s).sort((x, y) => x[1].rate - y[1].rate)[0];
+      const mine = s[l.supplierId].rate; if (bsid === l.supplierId || mine <= b.rate * (1 + c.savePct / 100)) return;
+      cheaper.push(`${prod(pid)?.name}: last from ${sup(l.supplierId)?.name} at ₹${dec(mine)}, ${sup(bsid)?.name} ₹${dec(b.rate)} (−${Math.round((1 - b.rate / mine) * 100)}%)`);
+    });
+    if (cheaper.length) add({ key: 'sup:cheaper', kind: 'info', title: `${cheaper.length} item(s) are cheaper from another supplier`, detail: [...cheaper.slice(0, 5), c.preferBest ? 'Draft purchase orders already use the cheaper supplier.' : 'Turn on “Draft purchase orders from the cheapest supplier” in Supplier Performance settings.'], payload: { act: ['supplier-report', ''] } }, 14);
+    closeStale('supplier', keep);
+    return { made, summary: `${db.suppliers.length} supplier(s) scored · ${cheaper.length} item(s) cheaper elsewhere` };
+  }
+
+  // ----- Audit & Anomaly -----
+  function runAuditAgent() {
+    const c = agentCfg('audit'); const keep = new Set(); let made = 0;
+    const add = (it, days) => { made += p4Add('audit', keep, it, days); };
+    const since = addDays(todayIso, -c.days), recent = db.sales.filter(s => s.date >= since);
+    const disc = recent.filter(s => s.lines.some(l => num(l.cd) + num(l.td) > c.maxDisc));
+    if (disc.length) add({ key: 'aud:disc', kind: 'info', title: `${disc.length} bill(s) with discount above ${c.maxDisc}%`, detail: disc.slice(0, 5).map(s => `${s.no} · ${partyName(s)} · up to ${dec(Math.max(...s.lines.map(l => num(l.cd) + num(l.td))))}%`), payload: { go: 'sales' } }, 7);
+    const loss = [];
+    recent.forEach(s => s.lines.forEach(l => { const b = batchById(l.batchId), p = prod(l.productId); if (!b || !l.qty) return; const sell = calcLine(l).taxable / l.qty, cost = netRate(b); if (cost > 0 && sell < cost - 0.01) loss.push(`${s.no} · ${p?.name}: sold at ₹${dec(sell)}, cost ₹${dec(cost)}`); }));
+    if (loss.length) add({ key: 'aud:loss', kind: 'info', title: `${loss.length} bill line(s) sold below purchase cost`, detail: loss.slice(0, 5), payload: { go: 'sales' } }, 7);
+    const ch = (db.auditLog || []).filter(x => x.date >= since && (x.what === 'Sale bill deleted' || (x.what === 'Sale bill edited' && x.billDate && dayDiff(x.date, x.billDate) > c.editDays)));
+    if (ch.length) add({ key: 'aud:edits', kind: 'info', title: `${ch.length} sale bill(s) deleted or changed later`, detail: ch.slice(0, 5).map(x => `${fmtD(x.date)} · ${x.what} · ${x.ref}${x.party ? ' · ' + x.party : ''}${x.before != null ? ` · ₹${dec(x.before)} → ₹${dec(x.amount)}` : x.amount ? ` · ₹${dec(x.amount)}` : ''}`), payload: { act: ['audit-log', ''] } }, 7);
+    const neg = db.batches.filter(b => (b.qty || 0) < 0 || (b.free || 0) < 0);
+    if (neg.length) add({ key: 'aud:neg', kind: 'info', title: `${neg.length} stock line(s) below zero`, detail: neg.slice(0, 5).map(b => `${prod(b.productId)?.name} · ${b.batch} · qty ${b.qty} free ${b.free || 0}`), payload: { go: 'stock' } }, 7);
+    const pay = db.sales.filter(s => (s.paid || 0) > s.total + 0.5 || payList(s).some((p, i, a) => a.findIndex(q => q.date === p.date && Math.abs(q.amount - p.amount) < 0.01) !== i));
+    if (pay.length) add({ key: 'aud:pay', kind: 'info', title: `${pay.length} bill(s) with a repeated payment or paid more than the total`, detail: pay.slice(0, 5).map(s => `${s.no} · ${partyName(s)} · total ₹${dec(s.total)}, paid ₹${dec(s.paid || 0)}`), payload: { go: 'sales' } }, 7);
+    const dup = [], seen = (arr, f, label) => { const m = {}; arr.forEach(x => { const k = f(x); if (!k) return; if (m[k]) dup.push(`${label}: ${m[k].name} = ${x.name}`); else m[k] = x; }); };
+    seen(db.products, p => bkey(p.name), 'Product'); seen(db.chemists, x => phone10(x.phone), 'Chemist (same mobile)'); seen(db.chemists, x => String(x.gstin || '').toUpperCase(), 'Chemist (same GSTIN)'); seen(db.suppliers, x => String(x.gstin || '').toUpperCase(), 'Supplier (same GSTIN)');
+    if (dup.length) add({ key: 'aud:dup', kind: 'info', title: `${dup.length} possible duplicate record(s)`, detail: dup.slice(0, 6), payload: { go: 'products' } }, 14);
+    const bad = db.products.filter(p => !/^\d{4,8}$/.test(String(p.hsn || '').trim()) || ![0, 5, 12, 18, 28].includes(num(p.gst)));
+    if (bad.length) add({ key: 'aud:master', kind: 'info', title: `${bad.length} product(s) with a missing HSN or unusual GST rate`, detail: bad.slice(0, 6).map(p => `${p.name} · HSN ${p.hsn || '—'} · GST ${dec(p.gst)}%`), payload: { go: 'products' } }, 14);
+    closeStale('audit', keep);
+    return { made, summary: `${keep.size} thing(s) to check` };
+  }
+  ACTIONS['audit-log'] = () => openModal({
+    title: 'Bill changes', size: 'lg',
+    body: `<div class="small muted">Sale bills edited or deleted (newest first). Kept in your data.</div>${miniTable([
+      { h: 'When', c: x => new Date(x.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) },
+      { h: 'What', c: x => `<span class="strong">${esc(x.what)}</span> ${esc(x.ref)}<div class="small muted">${esc(x.party || '')}${x.billDate ? ' · bill of ' + fmtD(x.billDate) : ''}</div>` },
+      { h: 'Amount', r: 1, c: x => x.before != null ? `₹${dec(x.before)} → ₹${dec(x.amount)}` : x.amount != null ? `₹${dec(x.amount)}` : '' },
+      { h: 'By', c: x => esc(x.by || '—') },
+    ], (db.auditLog || []).slice(0, 200))}`,
+  });
+
+  // ----- Register the Phase 5 agents -----
+  Object.assign(AGENT_DEFS, {
+    gstr2b: { name: 'GSTR-2B Reconciliation', icon: 'file', auto: true, desc: 'Matches the GSTR-2B you download from the GST portal with your purchase bills: bills your suppliers have not filed (input tax credit at risk — hold their payment), amount differences, and invoices in 2B that are not in your books.', defaults: { enabled: true, auto: true, time: '10:40', remindDay: 14, minTax: 100 } },
+    payplan: { name: 'Payment Planner', icon: 'rupee', auto: true, desc: 'Cash plan for the coming weeks: money expected from chemists (by their usual payment days) against supplier bills due. Lists this week’s supplier payments and warns before a week where money may run short.', defaults: { enabled: true, auto: true, time: '10:20', days: 35, cash: 0, overduePct: 50 } },
+    gstdocs: { name: 'e-Invoice & e-Way Bill', icon: 'truck', auto: true, desc: 'Finds bills that need an e-way bill (above the limit) or an e-invoice (IRN, when your turnover requires it), and makes the JSON files to upload on the government portals. Saves the numbers you get back; they print on the bill.', defaults: { enabled: true, auto: true, time: '09:45', ewayLimit: 50000, einvoice: false, days: 7, vehicle: '' } },
+    clearance: { name: 'Near-Expiry Clearance', icon: 'clock', auto: true, desc: 'Each week: stock expiring in the next months, offered at a step-up discount to the chemists who buy those items — a WhatsApp offer for each. What does not sell goes to expiry claims.', defaults: { enabled: true, auto: true, time: '11:15', minDays: 30, maxDays: 180, disc180: 10, disc120: 15, disc60: 20, buyerDays: 180, repeatDays: 14, template: DEFAULT_CLEAR } },
+    coldchain: { name: 'Cold Chain Watch', icon: 'alert', auto: true, desc: 'Fridge temperature log (morning and evening) for insulin, vaccines and other 2–8 °C items: missed readings, readings out of range, and products that may need cold storage. Cold items are marked on the dispatch list.', defaults: { enabled: true, auto: true, time: '10:50', fridges: 'Fridge 1', min: 2, max: 8, readingsPerDay: 2, suggest: true } },
+    supplier: { name: 'Supplier Performance', icon: 'truck', auto: true, desc: 'Scores suppliers on fill rate, delivery delay, short-expiry stock and rates; points out items that are cheaper from another supplier, and can draft purchase orders to the cheapest supplier.', defaults: { enabled: true, auto: true, time: '11:20', days: 180, minShelfDays: 365, savePct: 3, preferBest: false } },
+    audit: { name: 'Audit & Anomaly', icon: 'search', auto: true, desc: 'Every day: big discounts, sales below cost, bills deleted or changed later, stock below zero, repeated payments, duplicate products / chemists / suppliers and products with a wrong HSN or GST rate.', defaults: { enabled: true, auto: true, time: '18:30', days: 7, maxDisc: 10, editDays: 2 } },
+  });
+  { const b = AGENT_DEFS.briefing; delete AGENT_DEFS.briefing; AGENT_DEFS.briefing = b; }
+  Object.assign(AGENT_FIELDS, {
+    gstr2b: [{ k: 'remindDay', label: 'Remind to import last month’s GSTR-2B from day (1–28)', type: 'number' }, { k: 'minTax', label: 'Flag a supplier only if the ITC at risk is at least (₹)', type: 'number' }],
+    payplan: [{ k: 'cash', label: 'Cash and bank balance today (₹)', type: 'number' }, { k: 'days', label: 'Plan for the next (days)', type: 'number' }, { k: 'overduePct', label: 'Count overdue chemist bills at (%) — they may not all come in', type: 'number' }],
+    gstdocs: [{ k: 'ewayLimit', label: 'e-Way bill needed above (₹)', type: 'number' }, { k: 'einvoice', label: 'My turnover needs e-invoices (IRN) for B2B bills', type: 'check' }, { k: 'days', label: 'Check bills of the last (days)', type: 'number' }],
+    clearance: [{ k: 'minDays', label: 'Offer stock expiring in at least (days)', type: 'number' }, { k: 'maxDays', label: '…and at most (days)', type: 'number' }, { k: 'disc180', label: 'Discount (%) — up to the maximum days', type: 'number' }, { k: 'disc120', label: 'Discount (%) — within 120 days', type: 'number' }, { k: 'disc60', label: 'Discount (%) — within 60 days', type: 'number' }, { k: 'buyerDays', label: 'Offer to chemists who bought the item in the last (days)', type: 'number' }, { k: 'repeatDays', label: 'Do not offer the same chemist again within (days)', type: 'number' }, { k: 'template', label: 'Offer message — {party} {lines} {firm}', type: 'textarea' }],
+    coldchain: [{ k: 'fridges', label: 'Fridges (comma separated)', type: 'textarea' }, { k: 'min', label: 'Lowest safe temperature (°C)', type: 'number' }, { k: 'max', label: 'Highest safe temperature (°C)', type: 'number' }, { k: 'readingsPerDay', label: 'Readings a day per fridge', type: 'number' }, { k: 'suggest', label: 'Suggest products that may need cold storage', type: 'check' }],
+    supplier: [{ k: 'days', label: 'Look at the last (days)', type: 'number' }, { k: 'minShelfDays', label: 'Short shelf life: less than (days) to expiry when bought', type: 'number' }, { k: 'savePct', label: 'Cheaper elsewhere: at least (%) lower rate', type: 'number' }, { k: 'preferBest', label: 'Draft purchase orders from the cheapest supplier (Stock & Purchase agent)', type: 'check' }],
+    audit: [{ k: 'days', label: 'Check bills of the last (days)', type: 'number' }, { k: 'maxDisc', label: 'Flag discounts (CD + TD) above (%)', type: 'number' }, { k: 'editDays', label: 'Flag bills edited more than (days) after the bill date', type: 'number' }],
+  });
+  Object.assign(AGENT_RUN, { gstr2b: runItcAgent, payplan: runPayplanAgent, gstdocs: runGstDocsAgent, clearance: runClearanceAgent, coldchain: runColdAgent, supplier: runSupplierAgent, audit: runAuditAgent });
+  Object.assign(APPR_LABEL, { itchold: 'Hold payment', paylist: 'Payment plan', gstdocs: 'Make documents', clearance: 'Send offers' });
+  Object.assign(APPR_HANDLERS, {
+    itchold: a => {
+      const s = sup(a.payload.sid); if (!s) { doneApproval(a.id, 'Supplier removed'); refresh(); return; }
+      if (s.itcHold) { doneApproval(a.id, 'Already on hold'); refresh(); toast(`${s.name} is already on hold.`); return; }
+      confirmModal(`Hold payments to ${esc(s.name)}?`, `Their bills are not in your GSTR-2B yet, so you cannot claim the input tax credit. The Payment Planner leaves them out and the payment screen warns you. The hold is removed by itself when their bills show up in a later GSTR-2B.`, 'Hold payments', () => { s.itcHold = true; doneApproval(a.id, 'Payment on hold'); logAgent('gstr2b', `${s.name}: payment put on hold`); return `${s.name}: payment on hold.`; });
+      $('#modalFoot [data-submit]')?.classList.remove('danger-solid');
+    },
+    paylist: a => { doneApproval(a.id, 'Seen'); save(); ACTIONS['payplan-view'](); },
+    gstdocs: a => gstDocsModal(a.id),
+    clearance: a => clearanceModal(a.id),
+  });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-p5]'); if (!b) return;
+    const id = b.dataset.id;
+    ({ 'ewb-json': () => gstDocsDownload('ewb'), 'einv-json': () => gstDocsDownload('einv'), 'clr-wa': () => clearanceWa(id) })[b.dataset.p5]?.();
   });
 
   // Chemist orders
@@ -5891,6 +6449,7 @@ Only include confident matches. A brand name alone is not enough: the ingredient
     openModal({
       title: `Pay supplier · ${p.no}`, submitLabel: 'Save payment', size: 'sm',
       body: `${detailGrid([['Supplier', esc(sup(p.supplierId)?.name)], ['Bill total', money2(p.total)], ['Balance', money2(balance(p))]])}
+        ${sup(p.supplierId)?.itcHold ? '<div class="small bad-text">Payment is on hold: this supplier’s bills are not in your GSTR-2B yet, so the input tax credit is at risk. See GST / ITC Match.</div>' : ''}
         <div class="form-grid">
           ${field('Amount (₹)', 'amount', { type: 'number', value: balance(p), required: true, attrs: `min="0.01" max="${balance(p)}" step="0.01"` })}
           ${field('Date', 'date', { type: 'date', value: todayIso, required: true, attrs: `max="${todayIso}"` })}
