@@ -6,6 +6,11 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 
 - **Overview** — sales vs purchases, receivables, stock value, alerts (including licences about to expire and new chemist orders)
 - **Sales** — bills to chemists and individual customers (stock is deducted earliest-expiry first)
+- **Sales Returns** — pick the chemist or customer, tick the lines supplied to them (from all their bills) and enter how much is coming back; the return starts as a request. Approving puts the stock back into the same batch, credits the bill(s) and gives a printable credit note. Returns can be rejected, edited while requested, or deleted (an approved one is reversed)
+- **Enquiries** — who asked for what (chemist, customer or a new person), source, follow-up date and status (Open, Quoted, Converted, Lost); “Make bill” turns an enquiry into a sale bill. Due follow-ups show on the Overview
+- **Customers** — walk-in / retail customers with address, bills, purchases and balance; picked or created in the sale bill
+- **Party Ledger** — for any chemist, customer or supplier: bills, dated payments and returns with a running balance, opening balance for a date range, a balances summary for all parties, A4 print and CSV export
+- **Profile** (click the avatar, top right) — business name, tagline, logo (shown in the sidebar and on bills), your name and designation
 - **Chemist Orders** — orders placed on the chemist portal; turn them into a sale bill, or a purchase order for items that are short
 - **Onboard Chemists** — drug licence 1 & 2, GSTIN, licence validity, credit limit, status and portal login
 - **Stock Details** — batch-wise stock, near-expiry and expired batches, reorder list
@@ -21,6 +26,8 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 - **Doctors Directory** — medical officers and doctors with designation, specialization, qualification, mobile and the hospital they work at (picked from the hospital directory, filtered by district and tehsil). Filter by district, specialization, designation and hospital; import/export CSV (name, designation, specialization, qualification, mobile, email, hospital, district, notes). Each hospital page lists its doctors. It starts empty.
 
   The starting hospital list (`hospitals-data.js`, 541 entries) was taken from the HP State Pollution Control Board's list of health care facilities, with districts and blocks filled from India Post PIN data where the list did not print them. The medical colleges, AIIMS, the medical university and zonal/regional hospitals were added by hand and are marked "please verify". The list may not include every health centre: add missing ones in the app, or import an official list as CSV (name, type, district, tehsil, locality, pincode, phone).
+
+Bills (sale bills, purchase bills and goods receipts) print in **A4**, **A4 landscape**, **A5 (half sheet, landscape)**, **thermal 80 mm** or **thermal 58 mm**: pick the size above the bill preview and press Print. The choice is remembered. A4/A5 bills show the firm's licences, GST summary, amount in words, bank details and terms (set in Settings) and signature lines; thermal receipts are a compact roll layout — in the print window choose the thermal printer and its roll paper size.
 
 Lists have filters for company/brand, category, type/form, item, supplier and month. Stock, products and chemists can be ticked to set the same CD%, TD% or GST% on many rows at once; the bill entry grid and the sale bill editor have the same option for their lines.
 

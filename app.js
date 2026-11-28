@@ -187,6 +187,7 @@
     chemists[9].joined = iso(TODAY.getTime() - 3 * DAY);
 
     const people = [['Ramesh Chand', 'Ghumarwin'], ['Sunita Devi', 'Bilaspur'], ['Mohan Lal', 'Bajoha'], ['Kiran Bala', 'Ghumarwin']];
+    const customers = people.map(([name, town], i) => ({ id: 'U' + String(i + 1).padStart(3, '0'), name, phone: phone(), ...seedAddr(town), joined: iso(TODAY.getTime() - 200 * DAY) }));
 
     // Sales (historical — stock above is already net of these)
     const sales = [];
@@ -210,7 +211,8 @@
       else if (age > 45) paid = x < 0.93 ? t.total : Math.round(t.total * 0.5);
       else if (age > 15) paid = x < 0.6 ? t.total : x < 0.8 ? Math.round(t.total * 0.5) : 0;
       else paid = x < 0.3 ? t.total : x < 0.5 ? Math.round(t.total * 0.4) : 0;
-      const party = individual ? { type: 'individual', name: pick(people)[0], phone: phone() } : { type: 'chemist', chemistId: c.id };
+      const cu = individual ? pick(customers) : null;
+      const party = individual ? { type: 'individual', customerId: cu.id, name: cu.name, phone: cu.phone } : { type: 'chemist', chemistId: c.id };
       sales.push({ no: 'SMS-' + (4001 + i), date: d, party, lines, ...t, paid, mode: individual ? 'Cash' : 'Credit' });
     });
 
@@ -257,7 +259,7 @@
       const h = hospitals.filter(x => x.district === c.district && norm(x.tehsil) === norm(c.tehsil)).sort(hospSort)[0];
       if (h) { c.hospitalId = h.id; c.hospital = h.name; }
     });
-    return { version: 2, settings, companies, categories, forms, products, batches, chemists, suppliers, sales, pos, grns, pinvoices, hospitals };
+    return { version: 2, settings, companies, categories, forms, products, batches, chemists, suppliers, sales, pos, grns, pinvoices, hospitals, customers, inquiries: [], returns: [] };
   }
 
   function load() {
@@ -339,9 +341,25 @@
   const sellableQty = pid => sellableBatches(pid).reduce((a, b) => a + avail(b), 0);
   const batchAmount = b => round2((b.qty || 0) * (b.rate || 0));
   const stockValue = () => db.batches.filter(b => expDays(b.expiry) >= 0).reduce((a, b) => a + batchAmount(b), 0);
-  const balance = d => Math.max(0, round2(d.total - (d.paid || 0)));
-  const partyName = s => s.party.type === 'chemist' ? (chem(s.party.chemistId)?.name || 'Unknown chemist') : (s.party.name || 'Individual');
-  const partyCity = s => s.party.type === 'chemist' ? (chem(s.party.chemistId)?.city || '') : (s.party.phone || '');
+  // Balance of a bill: total less payments and (for sale bills) approved returns credited to it
+  const balance = d => Math.max(0, round2(d.total - (d.paid || 0) - (d.returned || 0)));
+  const custById = id => (db.customers || []).find(c => c.id === id);
+  const partyName = s => s.party.type === 'chemist' ? (chem(s.party.chemistId)?.name || 'Unknown chemist') : (custById(s.party.customerId)?.name || s.party.name || 'Individual');
+  const partyCity = s => s.party.type === 'chemist' ? (chem(s.party.chemistId)?.city || '') : (custById(s.party.customerId)?.phone || s.party.phone || '');
+  // Dated payments of a bill. Older bills only have a total "paid", shown as paid on the bill date.
+  const payList = d => d.payments?.length ? d.payments : (d.paid > 0 ? [{ date: d.date, amount: d.paid, mode: d.mode && d.mode !== 'Credit' ? d.mode : 'Payment' }] : []);
+  function addPayment(d, amount, date, mode) {
+    d.payments = payList(d).map(x => ({ ...x }));
+    d.payments.push({ date, amount: round2(amount), mode });
+    d.paid = round2(d.payments.reduce((a, x) => a + x.amount, 0));
+  }
+  // Keep the payment history in step when a bill's "paid" figure is edited directly
+  function adjustPaid(d, newPaid, label) {
+    const diff = round2(newPaid - (d.paid || 0));
+    if (Math.abs(diff) < 0.005) return;
+    addPayment(d, diff, todayIso, label);
+  }
+  const nextNum = (prefix, arr, start) => arr.length ? nextNo(prefix, arr) : prefix + start;
   const saleStatus = s => {
     if (balance(s) <= 0.5) return 'Paid';
     const terms = s.party.type === 'chemist' ? (chem(s.party.chemistId)?.terms ?? 30) : (db.settings.individualTerms ?? 0);
@@ -355,7 +373,9 @@
   };
   const batchStatus = b => { const d = expDays(b.expiry); return d < 0 ? 'Expired' : d <= 90 ? 'Near expiry' : 'Good'; };
   const receivedQty = (poNo, pid) => db.grns.filter(g => g.poNo === poNo).flatMap(g => g.lines).filter(l => l.productId === pid).reduce((a, l) => a + l.qty, 0);
-  const chemOutstanding = cid => db.sales.filter(s => s.party.chemistId === cid).reduce((a, s) => a + balance(s), 0);
+  // Party balance = all bills − all payments − approved returns (same as the ledger; a credit shows as a negative amount)
+  const partyDue = bills => round2(bills.reduce((a, s) => a + s.total - (s.paid || 0) - (s.returned || 0), 0));
+  const chemOutstanding = cid => partyDue(db.sales.filter(s => s.party.chemistId === cid));
   const supPayable = sid => db.pinvoices.filter(p => p.supplierId === sid).reduce((a, p) => a + balance(p), 0);
   const lowStock = () => db.products.filter(p => sellableQty(p.id) < p.reorder);
   const sumBy = (arr, pred, f = x => x.total) => arr.filter(pred).reduce((a, x) => a + f(x), 0);
@@ -391,6 +411,7 @@
     Active: 'ok', 'Pending verification': 'warn', 'On hold': 'bad',
     Good: 'ok', 'Near expiry': 'warn', Expired: 'bad', 'Low stock': 'warn', 'Out of stock': 'bad', 'In stock': 'ok',
     PO: 'info', GRN: 'ok', Invoice: 'neutral', Chemist: 'info', Individual: 'neutral',
+    Requested: 'warn', Approved: 'ok', Quoted: 'info', Converted: 'ok', Lost: 'neutral', 'Follow-up due': 'warn', Customer: 'neutral', 'New person': 'neutral',
     'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
     New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
     Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
@@ -412,6 +433,10 @@
     upload: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     tick: '<path d="M20 6 9 17l-5-5"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
+    chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/><path d="M8 11h8M8 14h5"/>',
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    book: '<path d="M4 4h11a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z"/><path d="M4 17a3 3 0 0 1 3-3h11"/><path d="M8 8h6"/>',
     filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
     doctor: '<circle cx="12" cy="7" r="4"/><path d="M5 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2"/><path d="M12 14v4M10 16h4"/>',
     hospital: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 7v6M9 10h6"/><path d="M9 21v-4h6v4"/>',
@@ -429,7 +454,8 @@
   // ---------- Navigation ----------
   const NAV = [
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
-    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemorders', 'Chemist Orders', 'cart'], ['chemists', 'Onboard Chemists', 'store']] },
+    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['returns', 'Sales Returns', 'undo'], ['inquiries', 'Enquiries', 'chat'], ['chemorders', 'Chemist Orders', 'cart'], ['customers', 'Customers', 'user'], ['chemists', 'Onboard Chemists', 'store']] },
+    { group: 'Accounts', items: [['ledger', 'Party Ledger', 'book']] },
     { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
     { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
   { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
@@ -439,6 +465,10 @@
     sales: 'Bills to chemists and individual customers — stock is deducted automatically',
     chemists: 'Retail chemists onboarded for B2B supply, with their portal logins',
     chemorders: 'Orders placed by chemists on their portal',
+    customers: 'Walk-in and retail customers (B2C)',
+    inquiries: 'Who asked for what — follow up and turn enquiries into bills',
+    returns: 'Goods returned against sale bills — request, approve, credit',
+    ledger: 'Party-wise account: bills, payments and returns with running balance',
     stock: 'Batch-wise stock in bill format',
     products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
@@ -467,9 +497,15 @@
       <div class="nav">${g.items.filter(([id]) => SERVER || id !== 'chemorders').map(([id, label, ic]) => `
         <button type="button" data-nav="${id}" class="${route === id ? 'active' : ''}">${icon(ic)}<span>${label}</span>${badges[id] ? `<span class="badge-n">${badges[id]}</span>` : ''}</button>`).join('')}
       </div>`).join('');
-    $('#brandName').textContent = db.settings.firm.name || 'Pharma Suite';
-    $('.brand-home').title = `${db.settings.firm.name || 'Pharma Suite'} — Home (Overview)`;
-    $('#brandMark').textContent = (db.settings.firm.name || 'P').trim().charAt(0).toUpperCase();
+    const f = db.settings.firm, pr = db.settings.profile || {};
+    $('#brandName').textContent = f.name || 'Pharma Suite';
+    $('#brandSub').textContent = f.tagline ?? 'Pharma Suite';
+    $('.brand-home').title = `${f.name || 'Pharma Suite'} — Home (Overview)`;
+    $('#brandMark').classList.toggle('has-logo', !!f.logo);
+    $('#brandMark').innerHTML = f.logo ? `<img src="${esc(f.logo)}" alt="">` : esc((f.name || 'P').trim().charAt(0).toUpperCase());
+    const who = (pr.name || f.name || 'Pharma Suite').trim();
+    $('#avatarBtn').textContent = who.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+    $('#avatarBtn').title = `${pr.name ? pr.name + (pr.role ? ' · ' + pr.role : '') : 'Set up your profile'} — Profile`;
   }
 
   // ---------- Building blocks ----------
@@ -659,6 +695,10 @@
     if (dueSoon.length) alerts.push(['warn', 'file', `${dueSoon.length} supplier bills due within 7 days`, `${compact(dueSoon.reduce((a, p) => a + balance(p), 0))} payable`, 'invoices']);
     const lic = [[db.settings.firm.name + ' (your firm)', db.settings.firm], ...db.chemists.map(c => [c.name, c]), ...db.suppliers.map(s => [s.name, s])].filter(([, x]) => soon(x.dlValid) || soon(x.fssaiValid));
     if (lic.length) alerts.push(['warn', 'file', `${lic.length} drug/FSSAI licence${lic.length === 1 ? '' : 's'} expired or expiring within 60 days`, lic.map(x => x[0]).join(', '), 'chemists']);
+    const fu = (db.inquiries || []).filter(inqDue);
+    if (fu.length) alerts.unshift(['warn', 'chat', `${fu.length} enquiry follow-up${fu.length === 1 ? '' : 's'} due`, fu.map(inqPartyName).slice(0, 4).join(', '), 'inquiries']);
+    const rq = (db.returns || []).filter(r => r.status === 'Requested');
+    if (rq.length) alerts.unshift(['info', 'undo', `${rq.length} sales return request${rq.length === 1 ? '' : 's'} to approve`, `Worth ${money2(rq.reduce((a, r) => a + r.total, 0))}`, 'returns']);
     const newOrders = chemOrders.filter(o => o.status === 'New');
     if (newOrders.length) alerts.unshift(['info', 'cart', `${newOrders.length} new order${newOrders.length === 1 ? '' : 's'} from chemists`, newOrders.map(o => chem(o.chemistId)?.name || o.chemistId).join(', '), 'chemorders']);
     const pend = db.chemists.filter(c => c.status === 'Pending verification');
@@ -889,6 +929,194 @@
           { h: '', c: d => rowActs(actBtn('edit-doctor', d.id, 'Edit', 'ghost'), actBtn('del-doctor', d.id, 'Delete', 'ghost danger')) },
         ],
       })}`;
+  };
+
+  // ---------- Customers (walk-in / retail) ----------
+  const custSales = id => db.sales.filter(s => s.party.customerId === id);
+  VIEWS.customers = () => {
+    const cs = db.customers || [];
+    const ind = db.sales.filter(s => s.party.type === 'individual');
+    const due = cs.reduce((a, c) => a + Math.max(0, partyDue(custSales(c.id))), 0);
+    return `
+      <div class="grid g-4">
+        ${kpi('Customers', qty(cs.length), `${cs.filter(c => custSales(c.id).length).length} have bought`)}
+        ${kpi('Retail sales this month', compact(sumBy(ind, s => monthKey(s.date) === thisM)), `${ind.filter(s => monthKey(s.date) === thisM).length} bills`)}
+        ${kpi('Retail sales (all time)', compact(sumBy(ind, () => true)), `${ind.length} bills`)}
+        ${kpi('Due from customers', compact(due), 'Unpaid retail bills')}
+      </div>
+      ${useList({
+        key: 'customers', title: 'Customers',
+        actions: actBtn('new-customer', '', icon('plus') + 'Add customer', 'primary'),
+        filters: [{ k: 'district', label: 'District', options: [...new Set(cs.map(c => c.district).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => c.district === v }],
+        rows: () => [...(db.customers || [])].sort((a, b) => a.name.localeCompare(b.name)),
+        text: c => [c.id, c.name, c.phone, c.email, addrText(c), hospitalName(c)].join(' '),
+        empty: 'No customers yet. They are added here when you bill an individual, or with “Add customer”.',
+        columns: [
+          { h: 'Customer', c: c => `<a href="#" data-act="view-customer" data-id="${esc(c.id)}" class="strong">${esc(c.name)}</a><div class="small muted">${esc(c.id)}</div>` },
+          { h: 'Mobile', c: c => telLink(c.phone) },
+          { h: 'Area', c: c => esc([c.locality || c.city, c.district].filter(Boolean).join(', ') || '—') },
+          { h: 'Bills', r: 1, c: c => custSales(c.id).length },
+          { h: 'Purchases', r: 1, c: c => money(custSales(c.id).reduce((a, s) => a + s.total, 0)) },
+          { h: 'Last purchase', c: c => { const d = custSales(c.id).map(s => s.date).sort().pop(); return d ? fmtDate(d) : '—'; } },
+          { h: 'Balance', r: 1, c: c => { const b = partyDue(custSales(c.id)); return b < -0.5 ? `<span class="ok-text">${money(-b)} credit</span>` : `<span class="${b > 0.5 ? 'strong' : 'muted'}">${money(b)}</span>`; } },
+          { h: '', c: c => rowActs(actBtn('sale-for-customer', c.id, 'New sale', 'ghost'), actBtn('open-ledger', 'customer|' + c.id, 'Ledger', 'ghost'), actBtn('edit-customer', c.id, 'Edit', 'ghost'), actBtn('del-customer', c.id, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
+  };
+
+  // ---------- Enquiries ----------
+  const INQ_SOURCES = ['Walk-in', 'Phone call', 'WhatsApp', 'Field visit', 'Chemist portal', 'Other'];
+  const INQ_STATUS = ['Open', 'Quoted', 'Converted', 'Lost'];
+  const inqOpen = q => q.status === 'Open' || q.status === 'Quoted';
+  const inqDue = q => inqOpen(q) && q.followUp && q.followUp <= todayIso;
+  const inqPartyName = q => q.party.type === 'chemist' ? (chem(q.party.chemistId)?.name || 'Unknown chemist') : q.party.type === 'customer' ? (custById(q.party.customerId)?.name || 'Customer') : (q.party.name || 'New person');
+  const inqPartyPhone = q => q.party.type === 'chemist' ? chem(q.party.chemistId)?.phone : q.party.type === 'customer' ? custById(q.party.customerId)?.phone : q.party.phone;
+  VIEWS.inquiries = () => {
+    const qs = db.inquiries || [];
+    const conv = qs.filter(q => q.status === 'Converted'), lost = qs.filter(q => q.status === 'Lost');
+    return `
+      <div class="grid g-4">
+        ${kpi('Open enquiries', qty(qs.filter(inqOpen).length), `${qs.filter(q => q.status === 'Quoted').length} quoted`)}
+        ${kpi('Follow-ups due', qty(qs.filter(inqDue).length), 'Today or earlier')}
+        ${kpi('Converted this month', qty(conv.filter(q => monthKey(q.closedOn || q.date) === thisM).length), 'Turned into sale bills')}
+        ${kpi('Conversion rate', conv.length + lost.length ? Math.round(conv.length / (conv.length + lost.length) * 100) + '%' : '—', 'Converted out of closed enquiries')}
+      </div>
+      ${useList({
+        key: 'inquiries', title: 'Enquiries',
+        actions: actBtn('new-inquiry', '', icon('plus') + 'New enquiry', 'primary'),
+        tabs: [{ id: 'open', label: 'Open', filter: inqOpen }, { id: 'due', label: 'Follow-up due', filter: inqDue }, { id: 'Converted', label: 'Converted', filter: q => q.status === 'Converted' }, { id: 'Lost', label: 'Lost', filter: q => q.status === 'Lost' }, { id: 'all', label: 'All' }],
+        filters: [{ k: 'source', label: 'Source', options: INQ_SOURCES.map(v => [v, v]), test: (q, v) => q.source === v }, { k: 'ptype', label: 'Party', options: [['chemist', 'Chemists'], ['customer', 'Customers'], ['new', 'New people']], test: (q, v) => q.party.type === v }, ...prodFilters(q => q.items.map(i => prod(i.productId)), ['company', 'item'])],
+        rows: () => [...(db.inquiries || [])].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
+        text: q => [q.no, inqPartyName(q), inqPartyPhone(q), q.notes, q.source, ...q.items.map(i => i.name)].join(' '),
+        empty: 'No enquiries here. Use “New enquiry” when someone asks for an item, a rate or availability.',
+        columns: [
+          { h: 'Enquiry', c: q => `<a href="#" data-act="view-inquiry" data-id="${esc(q.no)}" class="strong">${esc(q.no)}</a><div class="small muted">${fmtDate(q.date)}</div>` },
+          { h: 'From', c: q => `${esc(inqPartyName(q))} ${pill(q.party.type === 'chemist' ? 'Chemist' : q.party.type === 'customer' ? 'Customer' : 'New person')}<div class="small">${telLink(inqPartyPhone(q))}</div>` },
+          { h: 'Asked for', c: q => `<span class="small ellipsis" style="display:block;max-width:300px">${esc(q.items.map(i => `${i.name} × ${i.qty}`).join(', ') || q.notes || '—')}</span>` },
+          { h: 'Source', c: q => esc(q.source || '—') },
+          { h: 'Follow-up', c: q => q.followUp ? `<span class="${inqDue(q) ? 'bad-text strong' : ''}">${fmtDate(q.followUp)}</span>` : '—' },
+          { h: 'Status', c: q => pill(q.status) + (q.saleNo ? `<div class="small muted">${esc(q.saleNo)}</div>` : '') },
+          { h: '', c: q => rowActs(inqOpen(q) && actBtn('inq-convert', q.no, 'Make bill', 'primary'), actBtn('edit-inquiry', q.no, 'Edit', 'ghost'), actBtn('del-inquiry', q.no, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
+  };
+
+  // ---------- Sales returns ----------
+  const RETURN_REASONS = ['Expired / near expiry', 'Damaged / broken', 'Wrong item supplied', 'Excess stock', 'Short expiry on delivery', 'Rate difference', 'Other'];
+  const retPartyName = r => r.party.type === 'chemist' ? (chem(r.party.chemistId)?.name || 'Unknown chemist') : (custById(r.party.customerId)?.name || 'Customer');
+  VIEWS.returns = () => {
+    const rs = db.returns || [];
+    const appr = rs.filter(r => r.status === 'Approved');
+    return `
+      <div class="grid g-4">
+        ${kpi('Return requests', qty(rs.filter(r => r.status === 'Requested').length), 'Waiting for approval')}
+        ${kpi('Returned this month', compact(sumBy(appr, r => monthKey(r.approvedOn || r.date) === thisM)), `${appr.filter(r => monthKey(r.approvedOn || r.date) === thisM).length} credit notes`)}
+        ${kpi('Total credit given', compact(sumBy(appr, () => true)), `${appr.length} approved returns`)}
+        ${kpi('Units back in stock', qty(appr.reduce((a, r) => a + r.lines.reduce((x, l) => x + l.qty + (l.free || 0), 0), 0)), 'From approved returns')}
+      </div>
+      ${useList({
+        key: 'returns', title: 'Sales returns',
+        actions: actBtn('new-return', '', icon('plus') + 'New return', 'primary'),
+        tabs: [{ id: 'req', label: 'Requested', filter: r => r.status === 'Requested' }, { id: 'Approved', label: 'Approved', filter: r => r.status === 'Approved' }, { id: 'Rejected', label: 'Rejected', filter: r => r.status === 'Rejected' }, { id: 'all', label: 'All' }],
+        filters: [{ k: 'reason', label: 'Reason', options: RETURN_REASONS.map(v => [v, v]), test: (r, v) => r.reason === v }, { k: 'ptype', label: 'Party', options: [['chemist', 'Chemists'], ['customer', 'Customers']], test: (r, v) => r.party.type === v }, ...prodFilters(r => r.lines.map(l => prod(l.productId)), ['company', 'item'])],
+        rows: () => [...(db.returns || [])].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
+        text: r => [r.no, retPartyName(r), r.reason, r.note, ...r.lines.map(l => `${prod(l.productId)?.name} ${l.batch} ${l.saleNo}`)].join(' '),
+        empty: 'No returns here. Use “New return”, pick the party and tick the items coming back.',
+        columns: [
+          { h: 'Return', c: r => `<a href="#" data-act="view-return" data-id="${esc(r.no)}" class="strong">${esc(r.no)}</a><div class="small muted">${fmtDate(r.date)}</div>` },
+          { h: 'Party', c: r => esc(retPartyName(r)) },
+          { h: 'Against bills', c: r => esc([...new Set(r.lines.map(l => l.saleNo))].join(', ')) },
+          { h: 'Items', c: r => `<span class="small ellipsis" style="display:block;max-width:260px">${esc(r.lines.map(l => `${prod(l.productId)?.name || ''} × ${l.qty}${l.free ? '+' + l.free : ''}`).join(', '))}</span>` },
+          { h: 'Reason', c: r => esc(r.reason || '—') },
+          { h: 'Credit', r: 1, c: r => money2(r.total) },
+          { h: 'Status', c: r => pill(r.status) },
+          { h: '', c: r => rowActs(r.status === 'Requested' && actBtn('approve-return', r.no, 'Approve', 'primary'), r.status === 'Requested' && actBtn('reject-return', r.no, 'Reject', 'ghost'), r.status === 'Requested' && actBtn('edit-return', r.no, 'Edit', 'ghost'), actBtn('del-return', r.no, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
+  };
+
+  // ---------- Party ledger ----------
+  const ledgerState = { type: 'chemist', id: '', from: '', to: '' };
+  const LEDGER_TYPES = { chemist: 'Chemists', customer: 'Customers', supplier: 'Suppliers' };
+  const ledgerParties = type => (type === 'chemist' ? db.chemists.map(c => [c.id, `${c.name}${c.city ? ' — ' + c.city : ''}`]) : type === 'customer' ? (db.customers || []).map(c => [c.id, `${c.name}${c.phone ? ' — ' + c.phone : ''}`]) : db.suppliers.map(x => [x.id, x.name])).sort(byName);
+  const ledgerPartyName = (type, id) => type === 'chemist' ? chem(id)?.name : type === 'customer' ? custById(id)?.name : sup(id)?.name;
+  function ledgerEntries(type, id) {
+    const out = [];
+    if (type === 'supplier') {
+      db.pinvoices.filter(p => p.supplierId === id).forEach(p => {
+        out.push({ date: p.date, kind: 'Purchase bill', ref: p.no, note: p.supplierInvNo ? `Supplier bill ${p.supplierInvNo}` : '', dr: 0, cr: p.total, act: 'view-pi', ord: 0 });
+        payList(p).forEach(x => out.push({ date: x.date, kind: x.amount < 0 ? 'Payment adjusted' : 'Payment made', ref: p.no, note: x.mode || '', dr: x.amount, cr: 0, act: 'view-pi', ord: 1 }));
+      });
+    } else {
+      const mine = x => type === 'chemist' ? x.party.chemistId === id : x.party.customerId === id;
+      db.sales.filter(mine).forEach(x => {
+        out.push({ date: x.date, kind: 'Sale bill', ref: x.no, note: `${x.lines.length} item${x.lines.length === 1 ? '' : 's'}`, dr: x.total, cr: 0, act: 'view-sale', ord: 0 });
+        payList(x).forEach(y => out.push({ date: y.date, kind: y.amount < 0 ? 'Payment adjusted' : 'Payment received', ref: x.no, note: y.mode || '', dr: 0, cr: y.amount, act: 'view-sale', ord: 1 }));
+      });
+      (db.returns || []).filter(r => r.status === 'Approved' && mine(r)).forEach(r => out.push({ date: r.approvedOn || r.date, kind: 'Sales return (credit note)', ref: r.no, note: r.reason || '', dr: 0, cr: r.total, act: 'view-return', ord: 2 }));
+    }
+    return out.sort((a, b) => a.date.localeCompare(b.date) || a.ord - b.ord || a.ref.localeCompare(b.ref));
+  }
+  // Receivable parties: Dr − Cr; suppliers (payable): Cr − Dr. Positive = normal side.
+  function ledgerCalc(type, id, from = '', to = '') {
+    const sign = type === 'supplier' ? -1 : 1;
+    let open = 0; const rows = [];
+    ledgerEntries(type, id).forEach(e => { const v = sign * (e.dr - e.cr); if (from && e.date < from) open += v; else if (!to || e.date <= to) rows.push({ ...e }); });
+    let bal = open;
+    rows.forEach(e => { bal += sign * (e.dr - e.cr); e.bal = round2(bal); });
+    return { open: round2(open), rows, dr: round2(rows.reduce((a, e) => a + e.dr, 0)), cr: round2(rows.reduce((a, e) => a + e.cr, 0)), close: round2(bal) };
+  }
+  const balSide = (v, type) => Math.abs(v) < 0.005 ? '' : type === 'supplier' ? (v > 0 ? 'Cr' : 'Dr') : (v > 0 ? 'Dr' : 'Cr');
+  const balTxt = (v, type) => `${dec(Math.abs(v))} ${balSide(v, type)}`.trim();
+  const ledgerTable = (L, type, printing = false) => `<table class="ledger-table">
+      <thead><tr><th>Date</th><th>Particulars</th><th>Voucher</th><th class="r">Debit</th><th class="r">Credit</th><th class="r">Balance</th></tr></thead>
+      <tbody>
+        <tr class="ledger-open"><td></td><td colspan="4">Opening balance</td><td class="r">${balTxt(L.open, type)}</td></tr>
+        ${L.rows.map(e => `<tr><td>${fmtDate(e.date)}</td><td>${esc(e.kind)}${e.note ? `<div class="small muted">${esc(e.note)}</div>` : ''}</td><td>${printing ? esc(e.ref) : `<a href="#" data-act="${e.act}" data-id="${esc(e.ref)}">${esc(e.ref)}</a>`}</td><td class="r">${e.dr ? dec(e.dr) : ''}</td><td class="r">${e.cr ? dec(e.cr) : ''}</td><td class="r">${balTxt(e.bal, type)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No entries in this period.</td></tr>'}
+      </tbody>
+      <tfoot><tr><td colspan="3">Total for the period</td><td class="r">${dec(L.dr)}</td><td class="r">${dec(L.cr)}</td><td class="r">${balTxt(L.close, type)}</td></tr></tfoot>
+    </table>`;
+  VIEWS.ledger = () => {
+    const st = ledgerState;
+    const parties = ledgerParties(st.type);
+    if (!parties.some(x => x[0] === st.id)) st.id = '';
+    const head = `<section class="card"><div class="card-body ledger-pick">
+        <div class="seg">${Object.entries(LEDGER_TYPES).map(([k, l]) => `<label><input type="radio" name="ledgerType" value="${k}" ${st.type === k ? 'checked' : ''}> ${l}</label>`).join('')}</div>
+        <label class="filter ledger-party"><span>Party</span><select id="ledgerParty"><option value="">All ${LEDGER_TYPES[st.type].toLowerCase()} — summary</option>${parties.map(([v, l]) => `<option value="${esc(v)}" ${v === st.id ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+        <label class="filter"><span>From</span><input type="date" id="ledgerFrom" value="${esc(st.from)}"></label>
+        <label class="filter"><span>To</span><input type="date" id="ledgerTo" value="${esc(st.to)}"></label>
+        ${st.from || st.to ? `<button type="button" class="btn sm ghost" data-act="ledger-clear-dates" data-id="">All dates</button>` : ''}
+        ${st.id ? `<span class="spacer"></span>${actBtn('ledger-print', '', icon('file') + 'Print')}${actBtn('ledger-csv', '', 'Export CSV', 'ghost')}` : ''}
+      </div></section>`;
+    if (!st.id) {
+      const isSup = st.type === 'supplier';
+      return head + useList({
+        key: 'ledgerall', title: `${LEDGER_TYPES[st.type]} — balances`,
+        rows: () => ledgerParties(st.type).map(([id, label]) => ({ id, label, ...ledgerCalc(st.type, id, st.from, st.to) })).filter(x => x.rows.length || Math.abs(x.open) > 0.005),
+        text: x => x.label,
+        empty: 'No entries for these parties yet.',
+        columns: [
+          { h: 'Party', c: x => `<a href="#" data-act="open-ledger" data-id="${st.type}|${esc(x.id)}" class="strong">${esc(x.label)}</a>` },
+          { h: 'Opening', r: 1, c: x => balTxt(x.open, st.type) },
+          { h: isSup ? 'Paid (Dr)' : 'Billed (Dr)', r: 1, c: x => dec(x.dr) },
+          { h: isSup ? 'Billed (Cr)' : 'Received & returns (Cr)', r: 1, c: x => dec(x.cr) },
+          { h: 'Closing', r: 1, c: x => `<span class="strong">${balTxt(x.close, st.type)}</span>` },
+          { h: '', c: x => actBtn('open-ledger', `${st.type}|${x.id}`, 'Open ledger', 'ghost') },
+        ],
+        foot: rows => rows.length ? `<tfoot><tr><td class="strong">Total</td><td></td><td class="r num">${dec(rows.reduce((a, x) => a + x.dr, 0))}</td><td class="r num">${dec(rows.reduce((a, x) => a + x.cr, 0))}</td><td class="r num strong">${balTxt(rows.reduce((a, x) => a + x.close, 0), st.type)}</td><td></td></tr></tfoot>` : '',
+      });
+    }
+    const L = ledgerCalc(st.type, st.id, st.from, st.to);
+    const isSup = st.type === 'supplier';
+    return head + `
+      <div class="grid g-4">
+        ${kpi('Opening balance', balTxt(L.open, st.type), st.from ? `Before ${fmtDate(st.from)}` : 'Start of account')}
+        ${kpi(isSup ? 'Paid / debits' : 'Billed / debits', dec(L.dr), `${L.rows.filter(e => e.dr).length} entries`)}
+        ${kpi(isSup ? 'Billed / credits' : 'Received & returns', dec(L.cr), `${L.rows.filter(e => e.cr).length} entries`)}
+        ${kpi(isSup ? 'Closing — payable' : 'Closing — receivable', balTxt(L.close, st.type), L.close < -0.005 ? (isSup ? 'Advance paid to supplier' : 'Party has a credit with you') : st.to ? `As on ${fmtDate(st.to)}` : 'As on today')}
+      </div>
+      <section class="card"><div class="card-head"><h2 class="card-title">Ledger · ${esc(ledgerPartyName(st.type, st.id))}</h2><span class="hint">${L.rows.length} entries${st.from || st.to ? ` · ${st.from ? fmtDate(st.from) : 'start'} to ${st.to ? fmtDate(st.to) : 'today'}` : ''}</span></div>
+        <div class="table-wrap">${ledgerTable(L, st.type)}</div></section>`;
   };
 
   const stockText = b => { const p = prod(b.productId); return [p?.name, company(p?.companyId)?.name, p?.mfg, p?.pack, p?.hsn, b.batch, b.source, sup(b.supplierId)?.name].join(' '); };
@@ -1140,7 +1368,7 @@
     return `
       <section class="card">
         <div class="card-head"><button type="button" class="btn sm ghost" data-nav="suppliers">← Suppliers</button><div class="folder-ic sm">${icon('folder')}</div><h2 class="card-title">${esc(s.name)}</h2><span class="hint">${esc(s.id)}</span><div class="spacer"></div>
-          <div class="toolbar">${actBtn('edit-supplier', s.id, 'Edit supplier', 'ghost')}${actBtn('new-po', '', icon('plus') + 'Purchase order')}<button type="button" class="btn sm primary" data-act="upload-for" data-id="${esc(s.id)}">${icon('upload')}Upload bill</button></div></div>
+          <div class="toolbar">${actBtn('open-ledger', 'supplier|' + s.id, 'Ledger', 'ghost')}${actBtn('edit-supplier', s.id, 'Edit supplier', 'ghost')}${actBtn('new-po', '', icon('plus') + 'Purchase order')}<button type="button" class="btn sm primary" data-act="upload-for" data-id="${esc(s.id)}">${icon('upload')}Upload bill</button></div></div>
         <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['Address', esc(addrText(s) || '—')], ['Nearby hospital', esc(s.hospital || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence 1', esc(s.dl1 || '—')], ['Drug licence 2', esc(s.dl2 || '—')], ['Drug licence valid upto', licValid(s)], ['FSSAI no.', esc(s.fssai || '—')], ['FSSAI valid upto', fssaiValid(s)], ['Terms', (s.terms ?? 30) + ' days'], ['Licence copies', licDocsBtn('supplier', s.id)]])}</div>
       </section>
       <div class="grid g-4">
@@ -1637,6 +1865,9 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       ['Stock batches', db.batches.filter(b => avail(b) > 0 && has(b.batch, prod(b.productId)?.name)), b => `${esc(prod(b.productId)?.name)} <span class="muted small">Batch ${esc(b.batch)} · ${isoToExp(b.expiry)} · ${qty(avail(b))}</span>`, 'edit-batch', b => b.id],
       ['Chemists', db.chemists.filter(c => has(c.name, c.owner, c.city, c.id, c.gstin)), c => `${esc(c.name)} <span class="muted small">${esc(c.city)}</span>`, 'view-chemist', c => c.id],
       ['Suppliers', db.suppliers.filter(s => has(s.name, s.contact, s.city, s.id)), s => esc(s.name), 'view-supplier', s => s.id],
+      ['Customers', (db.customers || []).filter(c => has(c.name, c.phone, c.id, c.locality)), c => `${esc(c.name)} <span class="muted small">${esc(c.phone || '')}</span>`, 'view-customer', c => c.id],
+      ['Enquiries', (db.inquiries || []).filter(q => has(q.no, inqPartyName(q), ...q.items.map(i => i.name))).slice(0, 20), q => `${esc(q.no)} <span class="muted small">${esc(inqPartyName(q))} · ${esc(q.status)}</span>`, 'view-inquiry', q => q.no],
+      ['Sales returns', (db.returns || []).filter(r => has(r.no, retPartyName(r))).slice(0, 20), r => `${esc(r.no)} <span class="muted small">${esc(retPartyName(r))} · ${money2(r.total)}</span>`, 'view-return', r => r.no],
       ['Doctors', (db.doctors || []).filter(d => has(d.name, d.specialization, d.designation, d.mobile, docHosp(d)?.name || d.hospital)).slice(0, 20), d => `${esc(d.name)} <span class="muted small">${esc([d.specialization, docHosp(d)?.name || d.hospital].filter(Boolean).join(' · '))}</span>`, 'view-doctor', d => d.id],
       ['Hospitals', (db.hospitals || []).filter(h => has(h.name, h.locality, h.tehsil, h.headName, h.pharmName)).slice(0, 20), h => `${esc(h.name)} <span class="muted small">${esc([h.tehsil, h.district].filter(Boolean).join(', '))}</span>`, 'view-hospital', h => h.id],
       ['Sale bills', db.sales.filter(s => has(s.no, partyName(s))).slice(0, 20), s => `${s.no} <span class="muted small">${esc(partyName(s))} · ${money(s.total)}</span>`, 'view-sale', s => s.no],
@@ -2003,6 +2234,18 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       d.hospitalsRev = 2;
     }
     if (!Array.isArray(d.doctors)) d.doctors = [];
+    if (!Array.isArray(d.customers)) {
+      d.customers = [];
+      (d.sales || []).filter(s => s.party?.type === 'individual').sort((a, b) => a.date.localeCompare(b.date)).forEach(s => {
+        const ph = String(s.party.phone || '').trim(), nm = String(s.party.name || 'Customer').trim();
+        let c = d.customers.find(x => ph ? x.phone === ph : !x.phone && norm(x.name) === norm(nm));
+        if (!c) { c = { id: 'U' + String(d.customers.length + 1).padStart(3, '0'), name: nm, phone: ph, joined: s.date }; d.customers.push(c); }
+        s.party.customerId = c.id;
+      });
+    }
+    if (!Array.isArray(d.inquiries)) d.inquiries = [];
+    if (!Array.isArray(d.returns)) d.returns = [];
+    if (d.settings && !d.settings.profile) d.settings.profile = {};
     [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(x => {
       if (!x || x.hospitalId || !x.hospital) return;
       const h = d.hospitals.find(h => norm(h.name) === norm(x.hospital));
@@ -2011,38 +2254,137 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     return d;
   }
 
-  // Printable bill (same layout as the paper bill)
-  function billDoc({ title, no, date, partyHtml, extraHead = '', lines, t, paid, showBank = false }) {
+  // ---------- Printable bills: A4, A4 landscape, A5 and thermal receipts ----------
+  const PRINT_SIZES = {
+    a4: { label: 'A4', page: 'A4 portrait', margin: '10mm', hint: 'Full page — all columns' },
+    a4l: { label: 'A4 landscape', page: 'A4 landscape', margin: '8mm', hint: 'Wide page — roomy columns' },
+    a5: { label: 'A5 (half sheet)', page: 'A5 landscape', margin: '6mm', hint: 'Half an A4 sheet, landscape — common for chemist bills' },
+    t80: { label: 'Thermal 80 mm', thermal: true, hint: '3-inch receipt roll — choose the thermal printer and its 80 mm paper in the print window' },
+    t58: { label: 'Thermal 58 mm', thermal: true, hint: '2-inch receipt roll — choose the thermal printer and its 58 mm paper in the print window' },
+  };
+  const printSize = () => PRINT_SIZES[db.settings.printSize] ? db.settings.printSize : 'a4';
+  // Amount in words, Indian system (lakh, crore)
+  function inWords(num) {
+    let n = Math.round(Math.abs(num || 0));
+    if (!n) return 'Zero';
+    const a = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+    const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+    const two = x => x < 20 ? a[x] : b[Math.floor(x / 10)] + (x % 10 ? ' ' + a[x % 10] : '');
+    const three = x => [x >= 100 ? a[Math.floor(x / 100)] + ' Hundred' : '', x % 100 ? two(x % 100) : ''].filter(Boolean).join(' ');
+    const cr = Math.floor(n / 1e7); n %= 1e7;
+    const lk = Math.floor(n / 1e5); n %= 1e5;
+    const th = Math.floor(n / 1e3); n %= 1e3;
+    return [cr && (cr > 999 ? inWords(cr) : three(cr)) + ' Crore', lk && two(lk) + ' Lakh', th && two(th) + ' Thousand', n && three(n)].filter(Boolean).join(' ');
+  }
+  const rupeesInWords = v => `Rupees ${inWords(v)} Only`;
+  const firmLines = f => [addrText(f), f.phone && `Ph: ${f.phone}`, f.gstin && `GSTIN: ${f.gstin}`, (f.dl1 || f.dl2) && `DL No: ${[f.dl1, f.dl2].filter(Boolean).join(', ')}`, f.fssai && `FSSAI: ${f.fssai}`].filter(Boolean);
+
+  // A4 / A5 bill in the layout of a printed pharma bill
+  function billDoc({ title, no, date, partyTitle = '', partyLines = [], metaLines = [], lines, t, paid, isSale = false }) {
     const f = db.settings.firm;
     const slabs = Object.entries(t.slabs || {}).filter(([, s]) => s.taxable).sort((a, b) => b[0] - a[0]);
+    const qtyTotal = lines.reduce((x, l) => x + (+l.qty || 0), 0), freeTotal = lines.reduce((x, l) => x + (+l.free || 0), 0);
     return `<div class="bill">
-      <div class="bill-title">${title}</div>
+      <div class="bill-top"><span class="bill-title">${esc(title)}</span>${isSale ? '<span class="bill-copy">Original for recipient</span>' : ''}</div>
       <div class="bill-head">
-        <div><div class="bill-firm">${esc(f.name)}</div><div>${esc(addrText(f))}</div><div>Ph: ${esc(f.phone)}</div><div>GST NO: ${esc(f.gstin)}</div><div>DL NO: ${esc(f.dl1)}${f.dl2 ? ', ' + esc(f.dl2) : ''}</div>${f.fssai ? `<div>FSSAI NO: ${esc(f.fssai)}</div>` : ''}</div>
-        <div><div><b>Bill no:</b> ${esc(no)}</div><div><b>Date:</b> ${fmtDate(date)}</div>${extraHead}</div>
-        <div>${partyHtml}</div>
+        <div class="bill-from">${f.logo ? `<img class="bill-logo" src="${esc(f.logo)}" alt="">` : ''}<div><div class="bill-firm">${esc(f.name)}</div>${firmLines(f).map(x => `<div>${esc(x)}</div>`).join('')}</div></div>
+        <div class="bill-meta"><div><span>Bill no.</span><b>${esc(no)}</b></div><div><span>Date</span><b>${fmtDate(date)}</b></div>${metaLines.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>
+        <div class="bill-to"><div class="bill-to-label">${isSale ? 'Billed to' : 'Supplier'}</div><div class="strong">${esc(partyTitle)}</div>${partyLines.filter(Boolean).map(x => `<div>${esc(x)}</div>`).join('')}</div>
       </div>
       <div class="table-wrap"><table class="bill-table">
-        <thead><tr><th>SN</th><th>Item name</th><th>Company</th><th>MFG</th><th>Pack</th><th>HSN</th><th>Batch</th><th>Exp</th><th class="r">Qty</th><th class="r">Free</th><th class="r">Rate</th><th class="r">MRP</th><th class="r">CD%</th><th class="r">TD%</th><th class="r">GST%</th><th class="r">Amount</th></tr></thead>
-        <tbody>${lines.map((l, i) => { const p = prod(l.productId); return `<tr><td>${i + 1}</td><td class="strong">${esc(p?.name || l.name)}</td><td>${esc(company(p?.companyId)?.name || '')}</td><td>${esc(p?.mfg || '')}</td><td>${esc(p?.pack || '')}</td><td>${esc(p?.hsn || '')}</td><td>${esc(l.batch || '')}</td><td>${l.expiry ? isoToExp(l.expiry) : ''}</td><td class="r">${dec(l.qty)}</td><td class="r">${dec(l.free)}</td><td class="r">${dec(l.rate)}</td><td class="r">${dec(l.mrp)}</td><td class="r">${dec(l.cd)}</td><td class="r">${dec(l.td)}</td><td class="r">${dec(l.gst)}</td><td class="r">${dec(calcLine(l).amount)}</td></tr>`; }).join('')}</tbody>
+        <thead><tr><th>SN</th><th>Item name</th><th>Company</th><th class="c-mfg">MFG</th><th>Pack</th><th>HSN</th><th>Batch</th><th>Exp</th><th class="r">Qty</th><th class="r">Free</th><th class="r">Rate</th><th class="r">MRP</th><th class="r">CD%</th><th class="r">TD%</th><th class="r">GST%</th><th class="r">Amount</th></tr></thead>
+        <tbody>${lines.map((l, i) => { const p = prod(l.productId); return `<tr><td>${i + 1}</td><td class="strong">${esc(p?.name || l.name)}</td><td>${esc(company(p?.companyId)?.name || '')}</td><td class="c-mfg">${esc(p?.mfg || '')}</td><td>${esc(p?.pack || '')}</td><td>${esc(p?.hsn || '')}</td><td>${esc(l.batch || '')}</td><td>${l.expiry ? isoToExp(l.expiry) : ''}</td><td class="r">${qty(l.qty)}</td><td class="r">${l.free ? qty(l.free) : ''}</td><td class="r">${dec(l.rate)}</td><td class="r">${dec(l.mrp)}</td><td class="r">${l.cd ? dec(l.cd) : ''}</td><td class="r">${l.td ? dec(l.td) : ''}</td><td class="r">${dec(l.gst)}</td><td class="r">${dec(calcLine(l).amount)}</td></tr>`; }).join('')}</tbody>
+        <tfoot><tr><td colspan="3">${lines.length} item${lines.length === 1 ? '' : 's'}</td><td class="c-mfg"></td><td colspan="4"></td><td class="r">${qty(qtyTotal)}</td><td class="r">${freeTotal ? qty(freeTotal) : ''}</td><td colspan="5"></td><td class="r">${dec(t.gross)}</td></tr></tfoot>
       </table></div>
       <div class="bill-foot">
-        <table class="bill-slabs"><thead><tr><th>GST%</th><th class="r">Taxable</th><th class="r">CGST</th><th class="r">SGST</th></tr></thead>
-          <tbody>${slabs.map(([k, s]) => `<tr><td>${k}%</td><td class="r">${dec(s.taxable)}</td><td class="r">${dec(s.gst / 2)}</td><td class="r">${dec(s.gst / 2)}</td></tr>`).join('')}</tbody></table>
+        <div class="bill-left">
+          <table class="bill-slabs"><thead><tr><th>GST%</th><th class="r">Taxable</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Total GST</th></tr></thead>
+            <tbody>${slabs.map(([k, s]) => `<tr><td>${k}%</td><td class="r">${dec(s.taxable)}</td><td class="r">${dec(s.gst / 2)}</td><td class="r">${dec(s.gst / 2)}</td><td class="r">${dec(s.gst)}</td></tr>`).join('')}</tbody></table>
+          <div class="bill-words"><span>Amount in words</span>${esc(rupeesInWords(t.total))}</div>
+          ${isSale && f.bank ? `<div class="bill-note"><span>Bank details</span>${esc(f.bank)}</div>` : ''}
+          ${isSale ? `<div class="bill-note"><span>Terms</span>${esc(f.terms || 'E. & O.E. Goods once sold will be taken back only as per terms. Subject to local jurisdiction.')}</div>` : ''}
+        </div>
         <table class="bill-totals"><tbody>
           <tr><td>Gross amount</td><td class="r">${dec(t.gross)}</td></tr>
-          <tr><td>Less CD</td><td class="r">-${dec(t.cd)}</td></tr>
-          <tr><td>Less TD</td><td class="r">-${dec(t.td)}</td></tr>
+          ${t.cd ? `<tr><td>Less CD</td><td class="r">-${dec(t.cd)}</td></tr>` : ''}
+          ${t.td ? `<tr><td>Less TD</td><td class="r">-${dec(t.td)}</td></tr>` : ''}
+          <tr><td>Taxable value</td><td class="r">${dec(t.taxable)}</td></tr>
           <tr><td>CGST</td><td class="r">${dec(t.cgst)}</td></tr>
           <tr><td>SGST</td><td class="r">${dec(t.sgst)}</td></tr>
-          <tr><td>Round off</td><td class="r">${dec(t.roundOff)}</td></tr>
-          <tr class="net"><td>Net amount</td><td class="r">${dec(t.total)}</td></tr>
+          ${t.roundOff ? `<tr><td>Round off</td><td class="r">${dec(t.roundOff)}</td></tr>` : ''}
+          <tr class="net"><td>Net amount</td><td class="r">₹ ${dec(t.total)}</td></tr>
           ${paid != null ? `<tr><td>Received / paid</td><td class="r">${dec(paid)}</td></tr><tr><td>Balance</td><td class="r">${dec(Math.max(0, t.total - paid))}</td></tr>` : ''}
         </tbody></table>
       </div>
-      ${showBank ? `<div class="small muted">E. &amp; O.E. · Goods once sold will be taken back only as per terms.</div>` : ''}
+      <div class="bill-sign"><div><span>&nbsp;</span><span class="sig-line">${isSale ? "Receiver's signature" : 'Checked by'}</span></div><div><span>For <b>${esc(f.name)}</b></span><span class="sig-line">Authorised signatory</span></div></div>
     </div>`;
   }
+
+  // Thermal receipt (80 mm or 58 mm roll)
+  function billThermal({ title, no, date, partyTitle = '', partyLines = [], metaLines = [], lines, t, paid, isSale = false }) {
+    const f = db.settings.firm;
+    const slabs = Object.entries(t.slabs || {}).filter(([, s]) => s.taxable).sort((a, b) => b[0] - a[0]);
+    const row = (k, v, cls = '') => `<div class="t-row ${cls}"><span>${k}</span><span>${v}</span></div>`;
+    return `<div class="bill-t">
+      <div class="t-c"><div class="t-firm">${esc(f.name)}</div>${firmLines(f).map(x => `<div>${esc(x)}</div>`).join('')}</div>
+      <div class="t-hr"></div>
+      <div class="t-c t-title">${esc(title)}</div>
+      ${row(`No: ${esc(no)}`, fmtDate(date))}
+      ${metaLines.map(([k, v]) => row(esc(k), esc(v))).join('')}
+      ${partyTitle ? `<div class="t-party"><b>${esc(partyTitle)}</b>${partyLines.filter(Boolean).map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
+      <div class="t-hr"></div>
+      ${row('<b>Item</b>', '<b>Amount</b>')}
+      ${lines.map((l, i) => { const p = prod(l.productId); return `<div class="t-item">
+        <div class="t-name">${i + 1}. ${esc(p?.name || l.name)}</div>
+        ${row(`${qty(l.qty)}${l.free ? ` + ${qty(l.free)} free` : ''} × ${dec(l.rate)}`, dec(calcLine(l).amount))}
+        <div class="t-sub">${[l.batch && `B: ${esc(l.batch)}`, l.expiry && `Exp ${isoToExp(l.expiry)}`, l.mrp && `MRP ${dec(l.mrp)}`, l.cd && `CD ${dec(l.cd)}%`, `GST ${dec(l.gst)}%`].filter(Boolean).join(' · ')}</div>
+      </div>`; }).join('')}
+      <div class="t-hr"></div>
+      ${row('Gross', dec(t.gross))}
+      ${t.cd ? row('Less CD', '-' + dec(t.cd)) : ''}
+      ${t.td ? row('Less TD', '-' + dec(t.td)) : ''}
+      ${row('CGST', dec(t.cgst))}
+      ${row('SGST', dec(t.sgst))}
+      ${t.roundOff ? row('Round off', dec(t.roundOff)) : ''}
+      ${row('NET', '₹ ' + dec(t.total), 't-net')}
+      <div class="t-words">${esc(rupeesInWords(t.total))}</div>
+      ${paid != null ? row('Paid', dec(paid)) + row('Balance', dec(Math.max(0, t.total - paid))) : ''}
+      ${slabs.length ? `<div class="t-hr"></div><div class="t-sub">GST summary</div>${slabs.map(([k, s]) => row(`${k}%  on ${dec(s.taxable)}`, dec(s.gst), 't-small')).join('')}` : ''}
+      <div class="t-hr"></div>
+      <div class="t-c t-small">${isSale ? esc(f.terms || 'Goods once sold will be taken back only as per terms.') : ''}</div>
+      <div class="t-c">${isSale ? 'Thank you! Get well soon.' : esc(f.name)}</div>
+    </div>`;
+  }
+
+  // Bill preview with a paper size picker; Print uses the chosen size
+  let currentBill = null;
+  const renderBill = (args, size) => PRINT_SIZES[size].thermal ? billThermal(args) : billDoc(args);
+  function billBody(args) {
+    currentBill = args;
+    const size = printSize();
+    return `<div class="paper-bar no-print">
+        <div class="seg paper-seg">${Object.entries(PRINT_SIZES).map(([k, v]) => `<label><input type="radio" name="paperSize" value="${k}" ${k === size ? 'checked' : ''}> ${v.label}</label>`).join('')}</div>
+        <span class="small muted" id="paperHint">${esc(PRINT_SIZES[size].hint)}</span>
+      </div>
+      <div class="paper-wrap"><div class="paper paper-${size}" id="billPaper">${renderBill(args, size)}</div></div>`;
+  }
+  function setPaperSize(size) {
+    if (!PRINT_SIZES[size] || !currentBill) return;
+    db.settings.printSize = size; save();
+    const el = $('#billPaper'); if (!el) return;
+    el.className = `paper paper-${size}`; el.innerHTML = renderBill(currentBill, size);
+    $('#paperHint').textContent = PRINT_SIZES[size].hint;
+  }
+  function printBill(sizeOverride) {
+    const size = PRINT_SIZES[sizeOverride] ? sizeOverride : printSize(), cfg = PRINT_SIZES[size];
+    let st = $('#pageRule');
+    if (!st) { st = document.createElement('style'); st.id = 'pageRule'; document.head.appendChild(st); }
+    // Thermal: no fixed page size, so the printer's own roll paper is used and the receipt is not padded to a full page
+    st.textContent = cfg.thermal ? '@page { margin: 2mm; }' : `@page { size: ${cfg.page}; margin: ${cfg.margin}; }`;
+    document.body.dataset.print = size;
+    window.print();
+  }
+  const printBtn = () => `<button type="button" class="btn" data-act="print" data-id="">${icon('file')}Print</button>`;
 
   // ---------- Sale editor ----------
   function saleRowHtml(l = {}) {
@@ -2132,17 +2474,19 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   function saleModal(existing, preset = {}) {
     // When editing, put the bill's stock back first; it is taken again on save (or re-applied on cancel).
     if (existing) existing.lines.forEach(restoreLine);
-    const s = existing || { party: { type: 'chemist', chemistId: preset.chemistId || '' }, date: todayIso, lines: preset.lines || [], paid: 0, mode: 'Credit' };
+    const s = existing || { party: preset.customerId ? { type: 'individual', customerId: preset.customerId } : { type: 'chemist', chemistId: preset.chemistId || '' }, date: todayIso, lines: preset.lines || [], paid: 0, mode: preset.customerId ? 'Cash' : 'Credit' };
+    const custOpts = [['', '+ New customer'], ...[...(db.customers || [])].sort((a, b) => a.name.localeCompare(b.name)).map(c => [c.id, `${c.name}${c.phone ? ' — ' + c.phone : ''}`])];
     const chemOpts = [['', 'Select chemist'], ...db.chemists.filter(c => c.status === 'Active' || c.id === s.party.chemistId).map(c => [c.id, `${c.name} — ${c.city}`])];
     const isChem = s.party.type === 'chemist';
     openModal({
-      title: existing ? `Edit sale bill ${existing.no}` : preset.orderId ? `Sale bill for order ${preset.orderId}` : 'New sale bill', size: 'xl', submitLabel: existing ? 'Save changes' : 'Create bill',
+      title: existing ? `Edit sale bill ${existing.no}` : preset.orderId ? `Sale bill for order ${preset.orderId}` : preset.inquiryNo ? `Sale bill for enquiry ${preset.inquiryNo}` : 'New sale bill', size: 'xl', submitLabel: existing ? 'Save changes' : 'Create bill',
       body: `
         <div class="seg"><label><input type="radio" name="ptype" value="chemist" ${isChem ? 'checked' : ''}> Chemist (B2B)</label><label><input type="radio" name="ptype" value="individual" ${!isChem ? 'checked' : ''}> Individual / walk-in (B2C)</label></div>
         <div class="form-grid g4">
           <div class="field ${isChem ? '' : 'hidden'}" data-pt="chemist"><label for="f-chemistId">Chemist</label><select id="f-chemistId" name="chemistId">${chemOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === (s.party.chemistId || '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
-          <div class="field ${isChem ? 'hidden' : ''}" data-pt="individual"><label for="f-cname">Customer name</label><input id="f-cname" name="cname" value="${esc(s.party.name || '')}"></div>
-          <div class="field ${isChem ? 'hidden' : ''}" data-pt="individual"><label for="f-cphone">Mobile</label><input id="f-cphone" name="cphone" type="tel" value="${esc(s.party.phone || '')}"></div>
+          <div class="field ${isChem ? 'hidden' : ''}" data-pt="individual"><label for="f-customerId">Customer</label><select id="f-customerId" name="customerId">${custOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === (s.party.customerId || '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="field ${isChem || s.party.customerId ? 'hidden' : ''}" data-pt="individual" data-newcust><label for="f-cname">New customer name</label><input id="f-cname" name="cname" value=""></div>
+          <div class="field ${isChem || s.party.customerId ? 'hidden' : ''}" data-pt="individual" data-newcust><label for="f-cphone">Mobile</label><input id="f-cphone" name="cphone" type="tel" inputmode="numeric" maxlength="10" value=""></div>
           ${field('Bill date', 'date', { type: 'date', value: s.date, required: true, attrs: `max="${todayIso}"` })}
           ${field('Term', 'mode', { value: s.mode || 'Credit', options: ['Credit', 'Cash', 'UPI', 'Card'] })}
         </div>
@@ -2165,7 +2509,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         if (!lines.length) { toast('Add at least one item with a quantity.'); return false; }
         const type = d.ptype;
         if (type === 'chemist' && !d.chemistId) { toast('Choose a chemist, or switch to Individual.'); return false; }
-        if (type === 'individual' && !String(d.cname || '').trim()) { toast('Enter the customer’s name.'); return false; }
+        if (type === 'individual' && !d.customerId && !String(d.cname || '').trim()) { toast('Choose the customer, or enter the new customer’s name.'); return false; }
+        if (type === 'individual' && !d.customerId && d.cphone && !/^[6-9]\d{9}$/.test(d.cphone.trim())) { toast('Mobile must be a 10-digit number.'); return false; }
         const need = {};
         lines.forEach(l => { need[l.batchId] = (need[l.batchId] || 0) + l.qty + l.free; });
         for (const bid in need) {
@@ -2174,15 +2519,29 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         }
         lines.forEach(deductLine);
         const t = billCalc(lines);
-        const party = type === 'chemist' ? { type, chemistId: d.chemistId } : { type, name: d.cname.trim(), phone: (d.cphone || '').trim() };
+        let party;
+        if (type === 'chemist') party = { type, chemistId: d.chemistId };
+        else {
+          let cu = custById(d.customerId);
+          if (!cu) {
+            const ph = String(d.cphone || '').trim();
+            cu = (ph && db.customers.find(x => x.phone === ph)) || null;
+            if (!cu) { cu = { id: nextId('U', db.customers), name: d.cname.trim(), phone: ph, joined: d.date }; db.customers.push(cu); }
+          }
+          party = { type, customerId: cu.id, name: cu.name, phone: cu.phone };
+        }
         const paid = Math.min(t.total, round2(num(d.paid)));
         if (existing) {
-          Object.assign(existing, { date: d.date, party, lines, ...t, paid, mode: d.mode });
+          const hadPay = payList(existing).map(x => ({ ...x }));
+          Object.assign(existing, { date: d.date, party, lines, ...t, mode: d.mode });
+          existing.payments = hadPay; existing.paid = round2(hadPay.reduce((a, x) => a + x.amount, 0));
+          adjustPaid(existing, paid, 'Adjusted when the bill was edited');
           return `${existing.no} updated — stock adjusted.`;
         }
         const no = nextNo('SMS-', db.sales);
-        db.sales.push({ no, date: d.date, party, lines, ...t, paid, mode: d.mode, ...(preset.orderId ? { orderId: preset.orderId } : {}) });
+        db.sales.push({ no, date: d.date, party, lines, ...t, paid, payments: paid > 0 ? [{ date: d.date, amount: paid, mode: d.mode === 'Credit' ? 'Cash' : d.mode }] : [], mode: d.mode, ...(preset.orderId ? { orderId: preset.orderId } : {}), ...(preset.inquiryNo ? { inquiryNo: preset.inquiryNo } : {}) });
         if (preset.orderId) setOrder(preset.orderId, { status: 'Billed', saleNo: no });
+        if (preset.inquiryNo) { const q = db.inquiries.find(x => x.no === preset.inquiryNo); if (q) Object.assign(q, { status: 'Converted', saleNo: no, closedOn: todayIso }); }
         const c = type === 'chemist' ? chem(d.chemistId) : null;
         return c && chemOutstanding(c.id) > c.creditLimit ? `${no} created. Note: ${c.name} is now above their credit limit.` : `${no} created for ${money(t.total)} — stock deducted.`;
       },
@@ -2199,11 +2558,14 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       $$('#lineBody tr[data-line]').forEach(tr => { if ($('[data-f=productId]', tr).value) { $('[data-f=cd]', tr).value = d.cd; $('[data-f=td]', tr).value = d.td; } });
       recalcSale();
     });
+    const syncNewCust = () => { const ind = $('#mform [name=ptype]:checked').value === 'individual'; $$('#mform [data-newcust]').forEach(el => el.classList.toggle('hidden', !ind || !!$('#f-customerId').value)); };
     $$('#mform [name=ptype]').forEach(r => r.addEventListener('change', () => {
       const t = $('#mform [name=ptype]:checked').value;
       $$('#mform [data-pt]').forEach(el => el.classList.toggle('hidden', el.dataset.pt !== t));
       $('#f-mode').value = t === 'individual' ? 'Cash' : 'Credit';
+      syncNewCust();
     }));
+    $('#f-customerId').addEventListener('change', syncNewCust);
     showInfo();
   }
 
@@ -2288,17 +2650,23 @@ Copy text exactly as printed. Use an empty string for anything that is not print
 
   // Sales
   ACTIONS['new-sale'] = () => saleModal(null);
-  ACTIONS['edit-sale'] = no => { const s = db.sales.find(x => x.no === no); if (s) saleModal(s); };
+  const saleReturns = no => (db.returns || []).filter(r => r.status !== 'Rejected' && r.lines.some(l => l.saleNo === no));
+  ACTIONS['edit-sale'] = no => {
+    const s = db.sales.find(x => x.no === no); if (!s) return;
+    const rs = saleReturns(no);
+    if (rs.length) { toast(`${no} has sales return ${rs.map(r => r.no).join(', ')}. Delete or reject the return before editing the bill.`); return; }
+    saleModal(s);
+  };
   ACTIONS['view-sale'] = no => {
     const s = db.sales.find(x => x.no === no); if (!s) return;
     const c = s.party.type === 'chemist' ? chem(s.party.chemistId) : null;
-    const partyHtml = c
-      ? `<div class="strong">M/S: ${esc(c.name)}</div><div>${esc(addrText(c))}</div><div>DL NO: ${esc(dlText(c) || '—')}</div>${c.fssai ? `<div>FSSAI NO: ${esc(c.fssai)}</div>` : ''}<div>GST NO: ${esc(c.gstin || '—')}</div><div>Mob: ${esc(c.phone)}</div>`
-      : `<div class="strong">${esc(s.party.name)}</div><div>Mob: ${esc(s.party.phone || '—')}</div><div class="small muted">Individual customer</div>`;
+    const party = c
+      ? { partyTitle: `M/S ${c.name}`, partyLines: [addrText(c), `DL No: ${dlText(c) || '—'}`, c.fssai && `FSSAI: ${c.fssai}`, `GSTIN: ${c.gstin || '—'}`, `Mob: ${c.phone}`] }
+      : (() => { const cu = custById(s.party.customerId); return { partyTitle: cu?.name || s.party.name, partyLines: [cu && addrText(cu), `Mob: ${cu?.phone || s.party.phone || '—'}`] }; })();
     openModal({
       title: `Sale bill ${s.no}`, size: 'xl',
-      extraFoot: `<div class="foot-left">${balance(s) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-sale" data-id="${s.no}">Record payment</button>` : ''}<button type="button" class="btn" data-act="print" data-id="">Print</button><button type="button" class="btn" data-act="edit-sale" data-id="${s.no}">Edit</button></div>`,
-      body: billDoc({ title: 'SALE BILL', no: s.no, date: s.date, partyHtml, extraHead: `<div><b>Term:</b> ${esc(s.mode || 'Credit')}</div><div><b>Status:</b> ${saleStatus(s)}</div>`, lines: s.lines, t: s, paid: s.paid, showBank: true }),
+      extraFoot: `<div class="foot-left">${balance(s) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-sale" data-id="${s.no}">Record payment</button>` : ''}${printBtn()}<button type="button" class="btn" data-act="edit-sale" data-id="${s.no}">Edit</button></div>`,
+      body: billBody({ title: c && c.gstin ? 'TAX INVOICE' : 'SALE BILL', no: s.no, date: s.date, ...party, metaLines: [['Terms', s.mode || 'Credit'], ['Status', saleStatus(s)], ...(s.returned ? [['Returned', money2(s.returned)]] : [])], lines: s.lines, t: s, paid: s.paid, isSale: true }),
     });
   };
   ACTIONS['pay-sale'] = no => {
@@ -2308,13 +2676,16 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       body: `${detailGrid([['Party', esc(partyName(s))], ['Bill total', money2(s.total)], ['Balance', money2(balance(s))]])}
         <div class="form-grid">
           ${field('Amount (₹)', 'amount', { type: 'number', value: balance(s), required: true, attrs: `min="0.01" max="${balance(s)}" step="0.01"` })}
+          ${field('Date', 'date', { type: 'date', value: todayIso, required: true, attrs: `max="${todayIso}"` })}
           ${field('Mode', 'mode', { options: ['UPI', 'NEFT / RTGS', 'Cheque', 'Cash'] })}
+          ${field('Reference (UTR / cheque no.)', 'ref', { value: '' })}
         </div>`,
-      onSubmit: d => { const a = Math.min(num(d.amount), balance(s)); s.paid = round2((s.paid || 0) + a); return `Payment of ${money(a)} recorded on ${s.no}.`; },
+      onSubmit: d => { const a = Math.min(num(d.amount), balance(s)); addPayment(s, a, d.date || todayIso, [d.mode, d.ref].filter(Boolean).join(' · ')); return `Payment of ${money(a)} recorded on ${s.no}.`; },
     });
   };
   ACTIONS['del-sale'] = no => {
     const s = db.sales.find(x => x.no === no); if (!s) return;
+    if (saleReturns(no).length) { toast(`${no} has sales returns against it. Delete or reject them first.`); return; }
     confirmModal(`Delete ${s.no}?`, `This removes the bill for <b>${esc(partyName(s))}</b> (${money(s.total)}) and puts its ${s.lines.length} item line(s) back into stock. This cannot be undone.`, 'Delete bill', () => {
       s.lines.forEach(restoreLine); db.sales = db.sales.filter(x => x !== s); return `${no} deleted — stock returned.`;
     });
@@ -2525,7 +2896,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       .map(([s, l]) => `<button type="button" class="btn ${s === 'Active' ? 'primary' : ''}" data-act="chemist-status" data-id="${c.id}|${s}">${l}</button>`).join('');
     openModal({
       title: c.name, size: 'lg',
-      extraFoot: `<div class="foot-left">${btns}<button type="button" class="btn" data-act="edit-chemist" data-id="${c.id}">Edit</button>${SERVER ? `<button type="button" class="btn" data-act="portal-login" data-id="${c.id}">${portalLogins[c.id] ? 'Portal login' : 'Create portal login'}</button>` : ''}</div>`,
+      extraFoot: `<div class="foot-left">${btns}<button type="button" class="btn" data-act="open-ledger" data-id="chemist|${c.id}">Ledger</button><button type="button" class="btn" data-act="edit-chemist" data-id="${c.id}">Edit</button>${SERVER ? `<button type="button" class="btn" data-act="portal-login" data-id="${c.id}">${portalLogins[c.id] ? 'Portal login' : 'Create portal login'}</button>` : ''}</div>`,
       body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['Address', esc(addrText(c) || '—')], ['Nearby hospital', esc(c.hospital || '—')], ['Drug licence 1', esc(c.dl1 || '—')], ['Drug licence 2', esc(c.dl2 || '—')], ['Drug licence valid upto', licValid(c)], ['FSSAI no.', esc(c.fssai || '—')], ['FSSAI valid upto', fssaiValid(c)], ['GSTIN', esc(c.gstin || '—')], ['Licence copies', licDocsBtn('chemist', c.id)], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Default CD / TD', `${dec(c.cd)}% / ${dec(c.td)}%`], ...(SERVER ? [['Portal login', portalCell(c)], ['Portal orders', String(chemOrders.filter(o => o.chemistId === c.id).length)]] : [])])}
         <div class="card-title" style="font-size:15px">Bills (${inv.length})</div>
         ${miniTable([{ h: 'Bill', c: s => s.no }, { h: 'Date', c: s => fmtDate(s.date) }, { h: 'Amount', r: 1, c: s => money(s.total) }, { h: 'Balance', r: 1, c: s => money(balance(s)) }, { h: 'Status', c: s => pill(saleStatus(s)) }], inv.slice(0, 12))}`,
@@ -2711,6 +3082,369 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     });
     return { added, updated, newHosp };
   }
+
+  // ---------- Customers ----------
+  const customerForm = (c = {}) => `<div class="form-grid">
+      ${field('Customer name', 'name', { value: c.name || '', required: true })}
+      ${field('Mobile', 'phone', { type: 'tel', value: c.phone || '', attrs: 'pattern="[6-9][0-9]{9}" inputmode="numeric" maxlength="10" title="10-digit mobile number"' })}
+      ${field('Email', 'email', { type: 'email', value: c.email || '' })}
+      ${field('Notes', 'notes', { value: c.notes || '', attrs: 'placeholder="Regular medicines, doctor, preferences…"' })}
+      ${addrFields(c, false)}
+    </div>`;
+  const readCustomer = (d, c) => Object.assign(c, { name: d.name.trim(), phone: (d.phone || '').trim(), email: (d.email || '').trim().toLowerCase(), notes: (d.notes || '').trim(), ...readAddr(d) });
+  const customerDup = (d, self) => d.phone && (db.customers || []).find(x => x !== self && x.phone === d.phone.trim());
+  ACTIONS['new-customer'] = () => openModal({
+    title: 'Add customer', size: 'lg', submitLabel: 'Add customer', body: customerForm(),
+    onSubmit: d => { const dup = customerDup(d); if (dup) { toast(`Mobile ${d.phone} is already saved for ${dup.name}.`); return false; } if (!addrOk(d)) return false; const c = { id: nextId('U', db.customers), joined: todayIso }; readCustomer(d, c); db.customers.push(c); return `${c.name} added.`; },
+  });
+  ACTIONS['edit-customer'] = id => {
+    const c = custById(id); if (!c) return;
+    openModal({ title: `Edit ${c.name}`, size: 'lg', body: customerForm(c), onSubmit: d => { const dup = customerDup(d, c); if (dup) { toast(`Mobile ${d.phone} is already saved for ${dup.name}.`); return false; } if (!addrOk(d)) return false; readCustomer(d, c); db.sales.filter(x => x.party.customerId === c.id).forEach(x => { x.party.name = c.name; x.party.phone = c.phone; }); return `${c.name} saved.`; } });
+  };
+  ACTIONS['del-customer'] = id => {
+    const c = custById(id); if (!c) return;
+    const n = custSales(id).length + (db.returns || []).filter(r => r.party.customerId === id).length + (db.inquiries || []).filter(q => q.party.customerId === id).length;
+    if (n) { toast(`${c.name} has ${n} bill(s), return(s) or enquiries, so the record can’t be deleted.`); return; }
+    confirmModal(`Delete ${c.name}?`, 'This cannot be undone.', 'Delete customer', () => { db.customers = db.customers.filter(x => x !== c); return `${c.name} deleted.`; });
+  };
+  ACTIONS['view-customer'] = id => {
+    const c = custById(id); if (!c) return;
+    const bills = custSales(id).sort((a, b) => b.date.localeCompare(a.date));
+    openModal({
+      title: c.name, size: 'lg',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn primary" data-act="sale-for-customer" data-id="${esc(c.id)}">New sale</button><button type="button" class="btn" data-act="open-ledger" data-id="customer|${esc(c.id)}">Ledger</button><button type="button" class="btn" data-act="edit-customer" data-id="${esc(c.id)}">Edit</button></div>`,
+      body: `${detailGrid([['Mobile', telLink(c.phone)], ['Email', esc(c.email || '—')], ['Address', esc(addrText(c) || '—')], ['Nearby hospital', esc(hospitalName(c) || '—')], ['Customer since', fmtDate(c.joined)], ['Purchases', money(bills.reduce((a, x) => a + x.total, 0))], ['Balance', (b => b < -0.5 ? `${money(-b)} credit` : money(b))(partyDue(bills))], ['Notes', esc(c.notes || '—')]])}
+        <div class="card-title" style="font-size:15px">Bills (${bills.length})</div>
+        ${miniTable([{ h: 'Bill', c: x => `<a href="#" data-act="view-sale" data-id="${esc(x.no)}">${esc(x.no)}</a>` }, { h: 'Date', c: x => fmtDate(x.date) }, { h: 'Items', r: 1, c: x => x.lines.length }, { h: 'Amount', r: 1, c: x => money(x.total) }, { h: 'Balance', r: 1, c: x => money(balance(x)) }, { h: 'Status', c: x => pill(saleStatus(x)) }], bills.slice(0, 15))}`,
+    });
+  };
+  ACTIONS['sale-for-customer'] = id => { if (custById(id)) saleModal(null, { customerId: id }); };
+
+  // ---------- Enquiries ----------
+  const inqRow = (it = {}) => `<tr data-iline>
+      <td><input data-i="name" list="dl-products" value="${esc(it.name || '')}" placeholder="Item name (type or pick)" autocomplete="off"></td>
+      <td><input data-i="qty" type="number" min="1" step="1" value="${esc(it.qty || 1)}" style="width:80px"></td>
+      <td><input data-i="note" value="${esc(it.note || '')}" placeholder="Strength, brand, rate asked…"></td>
+      <td><button type="button" class="btn ghost sm" data-rm-iline aria-label="Remove">✕</button></td></tr>`;
+  function inquiryModal(q) {
+    const e = q || { party: { type: 'chemist' }, date: todayIso, source: 'Phone call', status: 'Open', items: [], followUp: addDays(todayIso, 2) };
+    const pt = e.party.type;
+    openModal({
+      title: q ? `Edit enquiry ${q.no}` : 'New enquiry', size: 'xl', submitLabel: q ? 'Save enquiry' : 'Save enquiry',
+      body: `<div class="seg"><label><input type="radio" name="itype" value="chemist" ${pt === 'chemist' ? 'checked' : ''}> Chemist</label><label><input type="radio" name="itype" value="customer" ${pt === 'customer' ? 'checked' : ''}> Customer</label><label><input type="radio" name="itype" value="new" ${pt === 'new' ? 'checked' : ''}> New person</label></div>
+        <div class="form-grid g4">
+          <div class="field ${pt === 'chemist' ? '' : 'hidden'}" data-it="chemist"><label for="f-iChem">Chemist</label><select id="f-iChem" name="iChem"><option value="">Select chemist</option>${db.chemists.map(c => [c.id, `${c.name} — ${c.city || ''}`]).sort(byName).map(([v, l]) => `<option value="${esc(v)}" ${v === e.party.chemistId ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="field ${pt === 'customer' ? '' : 'hidden'}" data-it="customer"><label for="f-iCust">Customer</label><select id="f-iCust" name="iCust"><option value="">Select customer</option>${(db.customers || []).map(c => [c.id, `${c.name}${c.phone ? ' — ' + c.phone : ''}`]).sort(byName).map(([v, l]) => `<option value="${esc(v)}" ${v === e.party.customerId ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="field ${pt === 'new' ? '' : 'hidden'}" data-it="new"><label for="f-iName">Name</label><input id="f-iName" name="iName" value="${esc(e.party.name || '')}"></div>
+          <div class="field ${pt === 'new' ? '' : 'hidden'}" data-it="new"><label for="f-iPhone">Mobile</label><input id="f-iPhone" name="iPhone" type="tel" inputmode="numeric" maxlength="10" value="${esc(e.party.phone || '')}"></div>
+          ${field('Date', 'date', { type: 'date', value: e.date, required: true, attrs: `max="${todayIso}"` })}
+          ${field('Source', 'source', { value: e.source, options: INQ_SOURCES })}
+          ${field('Follow up on', 'followUp', { type: 'date', value: e.followUp || '' })}
+          ${field('Status', 'status', { value: e.status, options: INQ_STATUS.filter(x => x !== 'Converted' || e.status === 'Converted') })}
+        </div>
+        <div class="lines"><div class="table-wrap"><table><thead><tr><th>Item asked for</th><th>Qty</th><th>Note</th><th></th></tr></thead>
+          <tbody id="iBody">${(e.items.length ? e.items : [{}]).map(inqRow).join('')}</tbody></table></div>
+          <div class="add-line"><button type="button" class="btn sm" data-add-iline>+ Add item</button> <span class="small muted">Items not in your product list can be typed too — they show up as requests.</span></div></div>
+        ${field('Notes', 'notes', { value: e.notes || '', full: true, attrs: 'placeholder="Rate quoted, delivery asked for, competitor, reason lost…"' })}`,
+      onSubmit: d => {
+        const type = d.itype;
+        let party;
+        if (type === 'chemist') { if (!d.iChem) { toast('Choose the chemist.'); return false; } party = { type, chemistId: d.iChem }; }
+        else if (type === 'customer') { if (!d.iCust) { toast('Choose the customer, or pick “New person”.'); return false; } party = { type, customerId: d.iCust }; }
+        else {
+          if (!String(d.iName || '').trim()) { toast('Enter the person’s name.'); return false; }
+          if (d.iPhone && !/^[6-9]\d{9}$/.test(d.iPhone.trim())) { toast('Mobile must be a 10-digit number.'); return false; }
+          party = { type: 'new', name: d.iName.trim(), phone: (d.iPhone || '').trim() };
+        }
+        const items = $$('#iBody tr[data-iline]').map(tr => {
+          const name = $('[data-i=name]', tr).value.trim(); const pr = name && findProductByName(name);
+          return { productId: pr?.id || '', name: pr?.name || name, qty: Math.max(1, Math.floor(num($('[data-i=qty]', tr).value)) || 1), note: $('[data-i=note]', tr).value.trim() };
+        }).filter(x => x.name);
+        if (!items.length && !String(d.notes || '').trim()) { toast('Add at least one item or a note.'); return false; }
+        const vals = { party, date: d.date, source: d.source, followUp: d.followUp || '', status: d.status, items, notes: (d.notes || '').trim() };
+        if (['Converted', 'Lost'].includes(vals.status) && !(q && q.status === vals.status)) vals.closedOn = todayIso;
+        if (q) { Object.assign(q, vals); return `${q.no} saved.`; }
+        const no = nextNum('ENQ-', db.inquiries, 1001);
+        db.inquiries.push({ no, created: todayIso, ...vals });
+        return `${no} saved${vals.followUp ? ` — follow up on ${fmtDate(vals.followUp)}` : ''}.`;
+      },
+    });
+  }
+  ACTIONS['new-inquiry'] = () => inquiryModal(null);
+  ACTIONS['edit-inquiry'] = no => { const q = db.inquiries.find(x => x.no === no); if (q) inquiryModal(q); };
+  ACTIONS['del-inquiry'] = no => { const q = db.inquiries.find(x => x.no === no); if (!q) return; confirmModal(`Delete ${q.no}?`, 'This cannot be undone.', 'Delete enquiry', () => { db.inquiries = db.inquiries.filter(x => x !== q); return `${no} deleted.`; }); };
+  ACTIONS['view-inquiry'] = no => {
+    const q = db.inquiries.find(x => x.no === no); if (!q) return;
+    openModal({
+      title: `Enquiry ${q.no}`, size: 'lg',
+      extraFoot: `<div class="foot-left">${inqOpen(q) ? `<button type="button" class="btn primary" data-act="inq-convert" data-id="${esc(q.no)}">Make sale bill</button><button type="button" class="btn" data-act="inq-status" data-id="${esc(q.no)}|Quoted">Mark quoted</button><button type="button" class="btn ghost danger" data-act="inq-status" data-id="${esc(q.no)}|Lost">Mark lost</button>` : ''}<button type="button" class="btn" data-act="edit-inquiry" data-id="${esc(q.no)}">Edit</button></div>`,
+      body: `${detailGrid([['From', esc(inqPartyName(q))], ['Mobile', telLink(inqPartyPhone(q))], ['Date', fmtDate(q.date)], ['Source', esc(q.source || '—')], ['Follow up on', q.followUp ? fmtDate(q.followUp) : '—'], ['Status', pill(q.status)], ['Sale bill', q.saleNo ? `<a href="#" data-act="view-sale" data-id="${esc(q.saleNo)}">${esc(q.saleNo)}</a>` : '—']])}
+        ${miniTable([{ h: 'Item', c: i => `<span class="strong">${esc(i.name)}</span>${i.productId ? '' : ' <span class="small muted">not in product list</span>'}${i.note ? `<div class="small muted">${esc(i.note)}</div>` : ''}` }, { h: 'Asked', r: 1, c: i => qty(i.qty) }, { h: 'In stock now', r: 1, c: i => i.productId ? qty(sellableQty(i.productId)) : '—' }, { h: 'Rate', r: 1, c: i => i.productId ? dec(q.party.type === 'chemist' ? prod(i.productId)?.ptr : prod(i.productId)?.mrp) : '—' }], q.items)}
+        ${q.notes ? `<div><div class="small muted">Notes</div>${esc(q.notes)}</div>` : ''}`,
+    });
+  };
+  ACTIONS['inq-status'] = v => {
+    const [no, status] = v.split('|'); const q = db.inquiries.find(x => x.no === no); if (!q) return;
+    Object.assign(q, { status }, ['Converted', 'Lost'].includes(status) ? { closedOn: todayIso } : {}); refresh(); toast(`${no} marked ${status.toLowerCase()}.`);
+  };
+  ACTIONS['inq-convert'] = no => {
+    const q = db.inquiries.find(x => x.no === no); if (!q) return;
+    let preset = {};
+    if (q.party.type === 'chemist') {
+      const c = chem(q.party.chemistId); if (!c) { toast('This chemist no longer exists.'); return; }
+      if (c.status !== 'Active') { toast(`${c.name} is ${c.status}. Activate them before billing.`); return; }
+      preset.chemistId = c.id;
+    } else {
+      if (q.party.type === 'new') {
+        let cu = q.party.phone && db.customers.find(x => x.phone === q.party.phone);
+        if (!cu) { cu = { id: nextId('U', db.customers), name: q.party.name, phone: q.party.phone || '', joined: todayIso }; db.customers.push(cu); }
+        q.party = { type: 'customer', customerId: cu.id }; save();
+      }
+      preset.customerId = q.party.customerId;
+    }
+    const c = chem(preset.chemistId);
+    const lines = q.items.filter(i => i.productId && sellableQty(i.productId) > 0).map(i => {
+      const pr = prod(i.productId); const b = sellableBatches(pr.id)[0];
+      return { productId: pr.id, batchId: b.id, qty: Math.min(i.qty, avail(b)), free: 0, rate: c ? pr.ptr : round2(pr.mrp / (1 + pr.gst / 100)), cd: c ? c.cd || 0 : 0, td: c ? c.td || 0 : 0 };
+    });
+    const left = q.items.length - lines.length;
+    saleModal(null, { ...preset, lines, inquiryNo: q.no });
+    if (left) toast(`${left} item(s) are not in stock or not in your product list, so they were left out.`);
+  };
+
+  // ---------- Sales returns ----------
+  // retDraft.picks: { 'SALE-NO#lineIndex': { qty, free } } — what is ticked in the return form
+  let retDraft = { editing: '', picks: {} };
+  const retKey = (saleNo, idx) => `${saleNo}#${idx}`;
+  function returnedSoFar(saleNo, idx, exceptNo) {
+    let q = 0, f = 0;
+    (db.returns || []).forEach(r => { if (r.status === 'Rejected' || r.no === exceptNo) return; r.lines.forEach(l => { if (l.saleNo === saleNo && l.idx === idx) { q += l.qty; f += l.free || 0; } }); });
+    return { q, f };
+  }
+  function suppliedLines(type, id) {
+    if (!id) return [];
+    const mine = x => type === 'chemist' ? x.party.chemistId === id : x.party.customerId === id;
+    const out = [];
+    db.sales.filter(mine).sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)).forEach(sl => sl.lines.forEach((l, idx) => {
+      const done = returnedSoFar(sl.no, idx, retDraft.editing);
+      const remQ = l.qty - done.q, remF = (l.free || 0) - done.f;
+      const key = retKey(sl.no, idx);
+      if (remQ > 0 || remF > 0 || retDraft.picks[key]) out.push({ key, sale: sl, idx, l, done, remQ: Math.max(0, remQ), remF: Math.max(0, remF) });
+    }));
+    return out;
+  }
+  const retLineFrom = (x, pk) => ({ saleNo: x.sale.no, idx: x.idx, productId: x.l.productId, batchId: x.l.batchId, batch: x.l.batch, expiry: x.l.expiry, qty: pk.qty, free: pk.free, rate: x.l.rate, mrp: x.l.mrp, cd: x.l.cd || 0, td: x.l.td || 0, gst: x.l.gst });
+  const retLineValue = l => { const c = calcLine(l); return round2(c.taxable + c.gstA); };
+  function retTotals(lines) { const t = billCalc(lines); return { ...t, total: round2(lines.reduce((a, l) => a + retLineValue(l), 0)), roundOff: 0 }; }
+  const retPartyFromForm = () => { const type = $('#mform [name="rtype"]:checked')?.value || 'chemist'; return { type, id: type === 'chemist' ? $('#f-rChem')?.value : $('#f-rCust')?.value }; };
+  function renderReturnLines() {
+    const box = $('#retLines'); if (!box) return;
+    const { type, id } = retPartyFromForm();
+    if (!id) { box.innerHTML = `<div class="empty">Choose the ${type === 'chemist' ? 'chemist' : 'customer'} to see everything supplied to them.</div>`; updateRetSum(); return; }
+    const rows = suppliedLines(type, id);
+    box.innerHTML = rows.length ? `<div class="lines"><div class="table-wrap"><table class="ret-table">
+      <thead><tr><th><input type="checkbox" class="cb" data-rselall aria-label="Tick all shown"></th><th>Bill</th><th>Item</th><th>Batch</th><th>Exp</th><th class="r">Supplied</th><th class="r">Returned</th><th>Return qty</th><th>Free back</th><th class="r">Rate</th><th class="r">Disc.</th><th class="r">GST</th><th class="r">Credit</th></tr></thead>
+      <tbody>${rows.map(x => { const pk = retDraft.picks[x.key]; const pr = prod(x.l.productId); return `<tr data-rkey="${esc(x.key)}" data-text="${esc(norm([x.sale.no, pr?.name, x.l.batch].join(' ')))}" class="${pk ? 'picked' : ''}">
+        <td><input type="checkbox" class="cb" data-rsel ${pk ? 'checked' : ''} aria-label="Tick line"></td>
+        <td><span class="strong">${esc(x.sale.no)}</span><div class="small muted">${fmtDate(x.sale.date)}</div></td>
+        <td><span class="strong">${esc(pr?.name || '')}</span><div class="small muted">${esc(pr?.pack || '')}</div></td>
+        <td>${esc(x.l.batch || '')}</td><td>${x.l.expiry ? isoToExp(x.l.expiry) : ''}</td>
+        <td class="r">${qty(x.l.qty)}${x.l.free ? ` + ${qty(x.l.free)}` : ''}</td>
+        <td class="r">${x.done.q || x.done.f ? `${qty(x.done.q)}${x.done.f ? ` + ${qty(x.done.f)}` : ''}` : '—'}</td>
+        <td><input data-rq="qty" type="number" min="0" max="${x.remQ}" step="1" value="${pk ? pk.qty : ''}" placeholder="max ${x.remQ}" style="width:84px"></td>
+        <td><input data-rq="free" type="number" min="0" max="${x.remF}" step="1" value="${pk && pk.free ? pk.free : ''}" placeholder="${x.remF ? 'max ' + x.remF : '—'}" ${x.remF ? '' : 'disabled'} style="width:70px"></td>
+        <td class="r">${dec(x.l.rate)}</td><td class="r small">${[x.l.cd && `CD ${dec(x.l.cd)}%`, x.l.td && `TD ${dec(x.l.td)}%`].filter(Boolean).join('<br>') || '—'}</td><td class="r">${dec(x.l.gst)}%</td>
+        <td class="r num" data-ramt>${pk ? dec(retLineValue(retLineFrom(x, pk))) : '—'}</td></tr>`; }).join('')}</tbody></table></div></div>`
+      : `<div class="empty">Nothing left to return — everything supplied to this party has already been returned, or there are no bills.</div>`;
+    filterReturnLines(); updateRetSum();
+  }
+  function filterReturnLines() {
+    const q = norm($('#retSearch')?.value || '');
+    $$('#retLines tr[data-rkey]').forEach(tr => { tr.style.display = !q || tr.dataset.text.includes(q) || tr.classList.contains('picked') ? '' : 'none'; });
+  }
+  function retRowsMap() { const { type, id } = retPartyFromForm(); return Object.fromEntries(suppliedLines(type, id).map(x => [x.key, x])); }
+  function updateRetSum() {
+    const map = retRowsMap();
+    const lines = Object.entries(retDraft.picks).filter(([k]) => map[k]).map(([k, pk]) => retLineFrom(map[k], pk)).filter(l => l.qty + l.free > 0);
+    const el = $('#retSum'); if (el) el.innerHTML = lines.length ? `<b>${lines.length}</b> line${lines.length === 1 ? '' : 's'} ticked · ${qty(lines.reduce((a, l) => a + l.qty + l.free, 0))} units · credit <b>${money2(retTotals(lines).total)}</b>` : 'Tick the items coming back and enter how many.';
+  }
+  function retPick(tr, fromQtyInput) {
+    const key = tr.dataset.rkey; const map = retRowsMap(); const x = map[key]; if (!x) return;
+    const cb = $('[data-rsel]', tr), qi = $('[data-rq=qty]', tr), fi = $('[data-rq=free]', tr);
+    let q = Math.floor(num(qi.value)), f = Math.floor(num(fi.value));
+    if (q > x.remQ) { q = x.remQ; qi.value = q; toast(`Only ${x.remQ} can be returned on this line.`); }
+    if (f > x.remF) { f = x.remF; fi.value = f || ''; }
+    if (!fromQtyInput) { if (cb.checked && !q && !f) { q = x.remQ; f = 0; qi.value = q || ''; if (!q) { f = x.remF; fi.value = f; } } if (!cb.checked) { q = 0; f = 0; qi.value = ''; fi.value = ''; } }
+    if (q + f > 0) { retDraft.picks[key] = { qty: q, free: f }; cb.checked = true; tr.classList.add('picked'); $('[data-ramt]', tr).textContent = dec(retLineValue(retLineFrom(x, { qty: q, free: f }))); }
+    else { delete retDraft.picks[key]; cb.checked = false; tr.classList.remove('picked'); $('[data-ramt]', tr).textContent = '—'; }
+    updateRetSum();
+  }
+  function returnModal(r) {
+    const e = r || { party: { type: 'chemist' }, date: todayIso, reason: RETURN_REASONS[0], note: '', lines: [] };
+    retDraft = { editing: r ? r.no : '', picks: Object.fromEntries((r ? r.lines : []).map(l => [retKey(l.saleNo, l.idx), { qty: l.qty, free: l.free || 0 }])) };
+    const pt = e.party.type;
+    openModal({
+      title: r ? `Edit return ${r.no}` : 'New sales return', size: 'xl', submitLabel: r ? 'Save return' : 'Create return request',
+      body: `<div class="seg"><label><input type="radio" name="rtype" value="chemist" ${pt === 'chemist' ? 'checked' : ''}> Chemist</label><label><input type="radio" name="rtype" value="customer" ${pt === 'customer' ? 'checked' : ''}> Customer</label></div>
+        <div class="form-grid g4">
+          <div class="field ${pt === 'chemist' ? '' : 'hidden'}" data-rt="chemist"><label for="f-rChem">Chemist</label><select id="f-rChem" name="rChem"><option value="">Select chemist</option>${db.chemists.map(c => [c.id, `${c.name} — ${c.city || ''}`]).sort(byName).map(([v, l]) => `<option value="${esc(v)}" ${v === e.party.chemistId ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="field ${pt === 'customer' ? '' : 'hidden'}" data-rt="customer"><label for="f-rCust">Customer</label><select id="f-rCust" name="rCust"><option value="">Select customer</option>${(db.customers || []).map(c => [c.id, `${c.name}${c.phone ? ' — ' + c.phone : ''}`]).sort(byName).map(([v, l]) => `<option value="${esc(v)}" ${v === e.party.customerId ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          ${field('Return date', 'date', { type: 'date', value: e.date, required: true, attrs: `max="${todayIso}"` })}
+          ${field('Reason', 'reason', { value: e.reason, options: RETURN_REASONS })}
+          ${field('Note', 'note', { value: e.note || '', attrs: 'placeholder="Condition, who brought it back…"' })}
+        </div>
+        <div class="ret-tools"><label class="search">${icon('search')}<input id="retSearch" placeholder="Filter by item, batch or bill no." autocomplete="off"></label><span class="small" id="retSum"></span></div>
+        <div id="retLines"></div>
+        ${r ? '' : '<label class="check-line"><input type="checkbox" name="approveNow"> Approve now — put the stock back and give the credit straight away</label>'}`,
+      onSubmit: d => {
+        const { type, id } = retPartyFromForm();
+        if (!id) { toast(`Choose the ${type === 'chemist' ? 'chemist' : 'customer'}.`); return false; }
+        const map = retRowsMap();
+        const lines = Object.entries(retDraft.picks).filter(([k, pk]) => map[k] && pk.qty + pk.free > 0).map(([k, pk]) => retLineFrom(map[k], pk));
+        if (!lines.length) { toast('Tick at least one item and enter the quantity coming back.'); return false; }
+        for (const l of lines) { const x = map[retKey(l.saleNo, l.idx)]; if (l.qty > x.remQ || l.free > x.remF) { toast(`${prod(l.productId)?.name}: more than what is left to return.`); return false; } }
+        const party = type === 'chemist' ? { type, chemistId: id } : { type, customerId: id };
+        const vals = { party, date: d.date, reason: d.reason, note: (d.note || '').trim(), lines, ...retTotals(lines) };
+        if (r) { Object.assign(r, vals); return `${r.no} saved.`; }
+        const rec = { no: nextNum('SR-', db.returns, 1001), status: 'Requested', created: todayIso, ...vals };
+        db.returns.push(rec);
+        if (d.approveNow) { approveReturn(rec); return `${rec.no} approved — stock back and ${money2(rec.total)} credited.`; }
+        return `${rec.no} created as a request for ${money2(rec.total)}. Approve it to put the stock back.`;
+      },
+    });
+    renderReturnLines();
+  }
+  // Approving puts the goods back into the same batch and credits each sale bill
+  function approveReturn(r) {
+    r.lines.forEach(l => {
+      let b = batchById(l.batchId) || db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch));
+      if (!b) { const pr = prod(l.productId); b = { id: uid(), productId: l.productId, batch: l.batch, expiry: l.expiry, qty: 0, free: 0, rate: pr?.pts || 0, mrp: l.mrp, cd: 0, td: 0, gst: l.gst, source: `Sales return ${r.no}`, verified: true }; db.batches.push(b); }
+      b.qty += l.qty; b.free = (b.free || 0) + (l.free || 0);
+    });
+    const credits = {};
+    r.lines.forEach(l => { credits[l.saleNo] = round2((credits[l.saleNo] || 0) + retLineValue(l)); });
+    Object.entries(credits).forEach(([no, amt]) => { const sl = db.sales.find(x => x.no === no); if (sl) sl.returned = round2((sl.returned || 0) + amt); });
+    Object.assign(r, { status: 'Approved', approvedOn: todayIso, credits, total: round2(Object.values(credits).reduce((a, v) => a + v, 0)) });
+  }
+  function undoApprovedReturn(r) {
+    const short = r.lines.filter(l => { const b = batchById(l.batchId) || db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch)); return !b || avail(b) < l.qty + (l.free || 0); });
+    if (short.length) return short.map(l => `${prod(l.productId)?.name} (${l.batch})`);
+    r.lines.forEach(l => {
+      const b = batchById(l.batchId) || db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch));
+      let need = l.qty + (l.free || 0); const fq = Math.min(b.qty, need); b.qty -= fq; need -= fq; b.free = (b.free || 0) - need;
+    });
+    Object.entries(r.credits || {}).forEach(([no, amt]) => { const sl = db.sales.find(x => x.no === no); if (sl) sl.returned = Math.max(0, round2((sl.returned || 0) - amt)); });
+    return [];
+  }
+  const returnById = no => (db.returns || []).find(x => x.no === no);
+  ACTIONS['new-return'] = () => returnModal(null);
+  ACTIONS['edit-return'] = no => { const r = returnById(no); if (!r) return; if (r.status !== 'Requested') { toast('Only requested returns can be edited.'); return; } returnModal(r); };
+  ACTIONS['approve-return'] = no => {
+    const r = returnById(no); if (!r || r.status !== 'Requested') return;
+    confirmModal(`Approve ${r.no}?`, `${r.lines.length} line(s) go back into stock and <b>${money2(r.total)}</b> is credited to ${esc(retPartyName(r))} against ${esc([...new Set(r.lines.map(l => l.saleNo))].join(', '))}.`, 'Approve return', () => { approveReturn(r); return `${r.no} approved — stock back, ${money2(r.total)} credited.`; });
+    $('#modalFoot [data-submit]').classList.remove('danger-solid'); $('#modalFoot [data-submit]').classList.add('primary');
+  };
+  ACTIONS['reject-return'] = no => {
+    const r = returnById(no); if (!r || r.status !== 'Requested') return;
+    openModal({ title: `Reject ${r.no}?`, size: 'sm', submitLabel: 'Reject return', body: `<div class="form-grid">${field('Reason for rejecting', 'why', { full: true })}</div>`, onSubmit: d => { Object.assign(r, { status: 'Rejected', rejectedOn: todayIso, rejectNote: (d.why || '').trim() }); return `${r.no} rejected. No stock or credit changed.`; } });
+    $('#modalFoot [data-submit]').classList.add('danger-solid');
+  };
+  ACTIONS['del-return'] = no => {
+    const r = returnById(no); if (!r) return;
+    confirmModal(`Delete ${r.no}?`, r.status === 'Approved' ? `This return was approved: its ${r.lines.length} line(s) will be taken back out of stock and the ${money2(r.total)} credit removed from the bills. This cannot be undone.` : 'This cannot be undone.', 'Delete return', () => {
+      if (r.status === 'Approved') { const short = undoApprovedReturn(r); if (short.length) { toast(`Some of the returned stock is already sold again: ${short.join(', ')}. The return can’t be deleted.`); return false; } }
+      db.returns = db.returns.filter(x => x !== r); return `${no} deleted.`;
+    });
+  };
+  ACTIONS['view-return'] = no => {
+    const r = returnById(no); if (!r) return;
+    const c = r.party.type === 'chemist' ? chem(r.party.chemistId) : null, cu = c ? null : custById(r.party.customerId);
+    const party = c ? { partyTitle: `M/S ${c.name}`, partyLines: [addrText(c), `DL No: ${dlText(c) || '—'}`, `GSTIN: ${c.gstin || '—'}`, `Mob: ${c.phone}`] } : { partyTitle: cu?.name || 'Customer', partyLines: [cu && addrText(cu), `Mob: ${cu?.phone || '—'}`] };
+    openModal({
+      title: `Sales return ${r.no}`, size: 'xl',
+      extraFoot: `<div class="foot-left">${r.status === 'Requested' ? `<button type="button" class="btn primary" data-act="approve-return" data-id="${esc(r.no)}">Approve</button><button type="button" class="btn" data-act="reject-return" data-id="${esc(r.no)}">Reject</button><button type="button" class="btn" data-act="edit-return" data-id="${esc(r.no)}">Edit</button>` : ''}${printBtn()}</div>`,
+      body: billBody({ title: r.status === 'Approved' ? 'CREDIT NOTE · SALES RETURN' : 'SALES RETURN REQUEST', no: r.no, date: r.date, ...party, metaLines: [['Against', [...new Set(r.lines.map(l => l.saleNo))].join(', ')], ['Reason', r.reason || '—'], ['Status', r.status], ...(r.approvedOn ? [['Approved', fmtDate(r.approvedOn)]] : [])], lines: r.lines, t: r, isSale: true }),
+    });
+  };
+
+  // ---------- Ledger actions ----------
+  ACTIONS['open-ledger'] = v => {
+    const [type, id] = v.split('|');
+    Object.assign(ledgerState, { type, id });
+    if (location.hash === '#ledger') render(); else location.hash = 'ledger';
+    window.scrollTo(0, 0);
+  };
+  ACTIONS['ledger-clear-dates'] = () => { ledgerState.from = ''; ledgerState.to = ''; render(); };
+  ACTIONS['ledger-csv'] = () => {
+    const st = ledgerState; const L = ledgerCalc(st.type, st.id, st.from, st.to);
+    const rows = [['Date', 'Particulars', 'Note', 'Voucher', 'Debit', 'Credit', 'Balance'], ['', 'Opening balance', '', '', '', '', balTxt(L.open, st.type)], ...L.rows.map(e => [e.date, e.kind, e.note, e.ref, e.dr || '', e.cr || '', balTxt(e.bal, st.type)]), ['', 'Total', '', '', L.dr, L.cr, balTxt(L.close, st.type)]];
+    downloadText(`ledger-${(ledgerPartyName(st.type, st.id) || 'party').replace(/[^\w-]+/g, '_')}-${todayIso}.csv`, rows.map(r => r.map(csvCell).join(',')).join('\r\n'));
+  };
+  ACTIONS['ledger-print'] = () => {
+    const st = ledgerState; const L = ledgerCalc(st.type, st.id, st.from, st.to); const f = db.settings.firm;
+    const pty = st.type === 'chemist' ? chem(st.id) : st.type === 'customer' ? custById(st.id) : sup(st.id);
+    openModal({
+      title: `Ledger · ${pty?.name || ''}`, size: 'xl',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="print" data-id="a4">${icon('file')}Print (A4)</button></div>`,
+      body: `<div class="paper-wrap"><div class="paper paper-a4"><div class="bill">
+        <div class="bill-top"><span class="bill-title">ACCOUNT STATEMENT</span></div>
+        <div class="bill-head ledger-head">
+          <div class="bill-from">${f.logo ? `<img class="bill-logo" src="${esc(f.logo)}" alt="">` : ''}<div><div class="bill-firm">${esc(f.name)}</div>${firmLines(f).map(x => `<div>${esc(x)}</div>`).join('')}</div></div>
+          <div class="bill-to"><div class="bill-to-label">${st.type === 'supplier' ? 'Supplier' : 'Party'}</div><div class="strong">${esc(pty?.name || '')}</div>${[pty && addrText(pty), pty?.gstin && `GSTIN: ${pty.gstin}`, pty?.phone && `Mob: ${pty.phone}`].filter(Boolean).map(x => `<div>${esc(x)}</div>`).join('')}
+            <div class="small" style="margin-top:4px">Period: ${st.from ? fmtDate(st.from) : 'Beginning'} to ${st.to ? fmtDate(st.to) : fmtDate(todayIso)}</div></div>
+        </div>
+        ${ledgerTable(L, st.type, true)}
+        <div class="bill-words"><span>Closing balance</span>${balTxt(L.close, st.type)} — ${esc(rupeesInWords(Math.abs(L.close)))}</div>
+        <div class="bill-sign"><div><span>&nbsp;</span><span class="sig-line">Party's confirmation</span></div><div><span>For <b>${esc(f.name)}</b></span><span class="sig-line">Authorised signatory</span></div></div>
+      </div></div></div>`,
+    });
+  };
+
+  // ---------- Profile ----------
+  let pendingLogo; // undefined = unchanged, '' = removed, data URL = new logo
+  function imageToDataUrl(file, max = 200) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file); const img = new Image();
+      img.onload = () => { const k = Math.min(1, max / Math.max(img.width, img.height)); const cv = document.createElement('canvas'); cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k); cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url); resolve(cv.toDataURL('image/png')); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('This image could not be read. Use a PNG or JPG.')); };
+      img.src = url;
+    });
+  }
+  const logoPreview = src => src ? `<img src="${esc(src)}" alt="Logo">` : `<span>${esc((db.settings.firm.name || 'P').trim().charAt(0).toUpperCase())}</span>`;
+  ACTIONS['open-profile'] = () => {
+    const f = db.settings.firm, pr = db.settings.profile || {};
+    pendingLogo = undefined;
+    openModal({
+      title: 'Profile', size: 'lg', submitLabel: 'Save profile',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="open-settings" data-id="">Settings</button>${SERVER ? '<button type="button" class="btn" data-act="change-password" data-id="">Change password</button>' : ''}</div>`,
+      body: `<div class="profile-head">
+          <div class="profile-logo" id="profLogo">${logoPreview(f.logo)}</div>
+          <div class="profile-logo-acts"><div class="strong">Business logo</div><div class="small muted">Shown in the sidebar and on printed bills. A square PNG or JPG works best.</div>
+            <div class="toolbar" style="margin-top:8px"><label class="btn sm">${icon('upload')}Upload logo<input type="file" id="logoFile" accept="image/png,image/jpeg,image/webp" hidden></label><button type="button" class="btn sm ghost" id="logoRemove">Remove</button></div></div>
+        </div>
+        <div class="form-grid">
+          <div class="field full form-sec">Business</div>
+          ${field('Business name', 'bizName', { value: f.name || '', required: true })}
+          ${field('Tagline (shown under the name)', 'tagline', { value: f.tagline ?? 'Pharma Suite', attrs: 'placeholder="e.g. Pharma Distributors"' })}
+          ${field('Type of business', 'bizType', { value: f.bizType || 'Pharmaceutical distributor', options: ['Pharmaceutical distributor', 'Wholesale chemist', 'Retail chemist / medical store', 'Surgical & medical supplies', 'Hospital pharmacy', 'Other'] })}
+          ${field('Business phone', 'bizPhone', { value: f.phone || '' })}
+          <div class="field full form-sec">Your profile</div>
+          ${field('Your name', 'pName', { value: pr.name || '', attrs: 'autocomplete="name"' })}
+          ${field('Designation', 'pRole', { value: pr.role || '', attrs: 'list="dl-roles" placeholder="e.g. Proprietor"' })}
+          ${field('Mobile', 'pPhone', { type: 'tel', value: pr.phone || '', attrs: 'inputmode="numeric" maxlength="10"' })}
+          ${field('Email', 'pEmail', { type: 'email', value: pr.email || '' })}
+          <datalist id="dl-roles">${dlOptions(['Proprietor', 'Partner', 'Director', 'Manager', 'Pharmacist', 'Accountant', 'Sales executive'])}</datalist>
+        </div>
+        <div class="small muted">Address, licences, bank details, terms and backups are in Settings.</div>`,
+      onSubmit: d => {
+        if (d.pPhone && !/^[6-9]\d{9}$/.test(d.pPhone.trim())) { toast('Mobile must be a 10-digit number.'); return false; }
+        Object.assign(f, { name: d.bizName.trim(), tagline: (d.tagline || '').trim(), bizType: d.bizType, phone: (d.bizPhone || '').trim() });
+        if (pendingLogo !== undefined) f.logo = pendingLogo;
+        db.settings.profile = { name: (d.pName || '').trim(), role: (d.pRole || '').trim(), phone: (d.pPhone || '').trim(), email: (d.pEmail || '').trim().toLowerCase() };
+        return 'Profile saved.';
+      },
+    });
+  };
 
   // Chemist orders
   const orderById = id => chemOrders.find(o => o.id === id);
@@ -3016,8 +3750,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     const s = sup(g.supplierId);
     openModal({
       title: `Goods receipt ${g.no}`, size: 'xl',
-      extraFoot: !g.invoiced ? `<div class="foot-left"><button type="button" class="btn primary" data-act="invoice-grn" data-id="${g.no}">Add purchase invoice</button></div>` : '',
-      body: billDoc({ title: 'GOODS RECEIPT NOTE', no: g.no, date: g.date, partyHtml: `<div class="strong">Supplier: ${esc(s?.name)}</div><div>GST NO: ${esc(s?.gstin || '—')}</div><div>PO: ${esc(g.poNo)} · Challan: ${esc(g.challan || '—')}</div><div>Invoice: ${esc(g.invoiced || 'Awaiting')}</div>`, lines: g.lines, t: g }),
+      extraFoot: `<div class="foot-left">${!g.invoiced ? `<button type="button" class="btn primary" data-act="invoice-grn" data-id="${g.no}">Add purchase invoice</button>` : ''}${printBtn()}</div>`,
+      body: billBody({ title: 'GOODS RECEIPT NOTE', no: g.no, date: g.date, partyTitle: s?.name || '', partyLines: [s && addrText(s), `GSTIN: ${s?.gstin || '—'}`], metaLines: [['PO', g.poNo || '—'], ['Challan', g.challan || '—'], ['Invoice', g.invoiced || 'Awaiting']], lines: g.lines, t: g }),
     });
   };
   ACTIONS['del-grn'] = no => {
@@ -3070,8 +3804,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     const s = sup(p.supplierId);
     openModal({
       title: `Purchase invoice ${p.no}`, size: 'xl',
-      extraFoot: `<div class="foot-left">${balance(p) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-pi" data-id="${p.no}">Record payment</button>` : ''}<button type="button" class="btn" data-act="print" data-id="">Print</button></div>`,
-      body: billDoc({ title: 'PURCHASE BILL', no: `${p.no} (supplier bill ${p.supplierInvNo})`, date: p.date, partyHtml: `<div class="strong">Supplier: ${esc(s?.name)}</div><div>GST NO: ${esc(s?.gstin || '—')}</div><div>Due: ${fmtDate(p.due)} · ${piStatus(p)}</div><div>Source: ${esc(p.grnNo || p.source || 'Manual')}</div>`, lines: piLines(p), t: p, paid: p.paid }),
+      extraFoot: `<div class="foot-left">${balance(p) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-pi" data-id="${p.no}">Record payment</button>` : ''}${printBtn()}</div>`,
+      body: billBody({ title: 'PURCHASE BILL', no: p.no, date: p.date, partyTitle: s?.name || '', partyLines: [s && addrText(s), `GSTIN: ${s?.gstin || '—'}`], metaLines: [['Supplier bill', p.supplierInvNo || '—'], ['Due', fmtDate(p.due)], ['Status', piStatus(p)], ['Source', p.grnNo || p.source || 'Manual']], lines: piLines(p), t: p, paid: p.paid }),
     });
   };
   ACTIONS['edit-pi'] = no => {
@@ -3084,7 +3818,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         ${field('Due date', 'due', { type: 'date', value: p.due, required: true })}
         ${field('Paid so far (₹)', 'paid', { type: 'number', value: p.paid || 0, attrs: `min="0" max="${p.total}" step="0.01"` })}
       </div><div class="small muted">To change the items, edit the stock lines in Stock Details.</div>`,
-      onSubmit: d => { Object.assign(p, { supplierInvNo: d.supplierInvNo.trim(), date: d.date, due: d.due, paid: Math.min(p.total, round2(num(d.paid))) }); return `${p.no} updated.`; },
+      onSubmit: d => { Object.assign(p, { supplierInvNo: d.supplierInvNo.trim(), date: d.date, due: d.due }); adjustPaid(p, Math.min(p.total, round2(num(d.paid))), 'Adjusted when the bill was edited'); return `${p.no} updated.`; },
     });
   };
   ACTIONS['del-pi'] = no => {
@@ -3107,9 +3841,11 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       body: `${detailGrid([['Supplier', esc(sup(p.supplierId)?.name)], ['Bill total', money2(p.total)], ['Balance', money2(balance(p))]])}
         <div class="form-grid">
           ${field('Amount (₹)', 'amount', { type: 'number', value: balance(p), required: true, attrs: `min="0.01" max="${balance(p)}" step="0.01"` })}
+          ${field('Date', 'date', { type: 'date', value: todayIso, required: true, attrs: `max="${todayIso}"` })}
           ${field('Mode', 'mode', { options: ['NEFT / RTGS', 'UPI', 'Cheque', 'Cash'] })}
+          ${field('Reference (UTR / cheque no.)', 'ref', { value: '' })}
         </div>`,
-      onSubmit: d => { const a = Math.min(num(d.amount), balance(p)); p.paid = round2((p.paid || 0) + a); return `Payment of ${money(a)} recorded on ${p.no}.`; },
+      onSubmit: d => { const a = Math.min(num(d.amount), balance(p)); addPayment(p, a, d.date || todayIso, [d.mode, d.ref].filter(Boolean).join(' · ')); return `Payment of ${money(a)} recorded on ${p.no}.`; },
     });
   };
 
@@ -3214,6 +3950,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
           ${addrFields(f, false)}
           ${licFields(f, false)}
           ${field('Default CD % for new chemists', 'defcd', { type: 'number', value: db.settings.defaultCd ?? 0, attrs: numAttrs() })}
+          ${field('Bank details (printed on sale bills)', 'bank', { value: f.bank || '', full: true, attrs: 'placeholder="e.g. SBI Ghumarwin · A/c 1234567890 · IFSC SBIN0001234 · UPI shop@sbi"' })}
+          ${field('Terms (printed on sale bills)', 'terms', { value: f.terms || '', full: true, attrs: 'placeholder="E. & O.E. Goods once sold will be taken back only as per terms. Subject to local jurisdiction."' })}
           <div class="field"><label>Licence copies</label><div>${licDocsBtn('firm', 'firm')}</div></div>
         </div>
         <div class="card-title" style="font-size:15px">AI bill reading</div>
@@ -3226,7 +3964,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
         <div class="small muted">All data lives in this browser. Download a backup regularly.</div>`,
       onSubmit: d => {
         if (!addrOk(d)) return false;
-        Object.assign(db.settings.firm, { name: d.name.trim(), phone: d.phone.trim(), ...readAddr(d), ...readLic(d) });
+        Object.assign(db.settings.firm, { name: d.name.trim(), phone: d.phone.trim(), ...readAddr(d), ...readLic(d), bank: (d.bank || '').trim(), terms: (d.terms || '').trim() });
         fileLicence('firm', 'firm');
         db.settings.defaultCd = num(d.defcd);
         setApiKey((d.apikey || '').trim());
@@ -3238,7 +3976,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   ACTIONS['reset-data'] = () => confirmModal('Reset to sample data?', 'Everything in this browser will be replaced with the sample data. Download a backup first if you need it. This cannot be undone.', 'Reset', () => {
     db = seed(); entry = null; Object.keys(listState).forEach(k => delete listState[k]); billStore.clear().catch(() => {}); return 'Sample data restored.';
   });
-  ACTIONS['print'] = () => window.print();
+  ACTIONS['print'] = id => printBill(id);
 
   // ---------- Events ----------
   document.addEventListener('click', e => {
@@ -3259,6 +3997,10 @@ Copy text exactly as printed. Use an empty string for anything that is not print
       $$('button', tab.parentElement).forEach(b => b.classList.toggle('active', b === tab));
       fillList(key); return;
     }
+    if (e.target.closest('[data-add-iline]')) { $('#iBody').insertAdjacentHTML('beforeend', inqRow()); $('#iBody tr:last-child [data-i=name]').focus(); return; }
+    const ril = e.target.closest('[data-rm-iline]');
+    if (ril) { if ($$('#iBody tr[data-iline]').length > 1) ril.closest('tr').remove(); else $$('input', ril.closest('tr')).forEach(i => { i.value = i.dataset.i === 'qty' ? 1 : ''; }); return; }
+    if (e.target.closest('#logoRemove')) { pendingLogo = ''; $('#profLogo').innerHTML = logoPreview(''); return; }
     if (e.target.closest('[data-hosp-none]')) { setHospitalChoice(''); return; }
     if (e.target.closest('[data-hosp-other]')) { setHospitalChoice('__other'); return; }
     const ph = e.target.closest('[data-pick-hosp]');
@@ -3325,6 +4067,8 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     if (e.target.matches('#mform [name="district"]')) refreshAddrLists();
     if (e.target.matches('#mform [name="tehsil"]')) refreshHospitalSelect();
     if (e.target.id === 'hospSearch') { renderHospResults(); return; }
+    if (e.target.matches('[data-rq]')) { retPick(e.target.closest('tr'), true); return; }
+    if (e.target.id === 'retSearch') { filterReturnLines(); return; }
     if (e.target.matches('#mform [name="email"], #mform [name="phone"]')) syncLoginDefaults();
     if (e.target.matches('#f-pUser, #f-pPass')) e.target.dataset.auto = e.target.value ? '0' : '1';
     const s = e.target.closest('[data-list-search]');
@@ -3373,6 +4117,19 @@ Copy text exactly as printed. Use an empty string for anything that is not print
     if (t.id === 'docCsv' && t.files[0]) {
       try { const r = importDoctors(await t.files[0].text()); refresh(); toast(`${r.added} doctors added, ${r.updated} updated${r.newHosp ? `, ${r.newHosp} new hospitals added to the directory` : ''}.`); }
       catch (err) { toast(err.message || 'Could not read the CSV.'); }
+      t.value = ''; return;
+    }
+    if (t.matches('[name="paperSize"]')) { setPaperSize(t.value); return; }
+    if (t.matches('[name="itype"]')) { $$('#mform [data-it]').forEach(el => el.classList.toggle('hidden', el.dataset.it !== t.value)); return; }
+    if (t.matches('[name="rtype"]')) { $$('#mform [data-rt]').forEach(el => el.classList.toggle('hidden', el.dataset.rt !== t.value)); retDraft.picks = {}; renderReturnLines(); return; }
+    if (t.id === 'f-rChem' || t.id === 'f-rCust') { retDraft.picks = {}; renderReturnLines(); return; }
+    if (t.matches('[data-rsel]')) { retPick(t.closest('tr'), false); return; }
+    if (t.matches('[data-rselall]')) { $$('#retLines tr[data-rkey]').filter(tr => tr.style.display !== 'none').forEach(tr => { $('[data-rsel]', tr).checked = t.checked; retPick(tr, false); }); return; }
+    if (t.matches('[name="ledgerType"]')) { Object.assign(ledgerState, { type: t.value, id: '' }); render(); return; }
+    if (t.id === 'ledgerParty') { ledgerState.id = t.value; render(); return; }
+    if (t.id === 'ledgerFrom' || t.id === 'ledgerTo') { ledgerState[t.id === 'ledgerFrom' ? 'from' : 'to'] = t.value; render(); return; }
+    if (t.id === 'logoFile' && t.files[0]) {
+      try { pendingLogo = await imageToDataUrl(t.files[0]); $('#profLogo').innerHTML = logoPreview(pendingLogo); } catch (err) { toast(err.message); }
       t.value = ''; return;
     }
     if (t.id === 'hospCsv' && t.files[0]) {
@@ -3466,6 +4223,7 @@ Copy text exactly as printed. Use an empty string for anything that is not print
   $('#modalClose').addEventListener('click', () => closeModal());
   $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
   $('#settingsBtn').addEventListener('click', () => ACTIONS['open-settings']());
+  $('#avatarBtn').addEventListener('click', () => ACTIONS['open-profile']());
   window.addEventListener('hashchange', render);
   window.addEventListener('beforeunload', e => { if ((entry && entry.lines.some(l => l.name)) || saveTimer || saving) { e.preventDefault(); e.returnValue = ''; } });
   $('#logoutBtn').addEventListener('click', async () => { try { await api('POST', 'api/logout', {}); } catch { /* signed out anyway */ } location.href = 'login.html'; });

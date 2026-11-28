@@ -120,7 +120,8 @@
     </section>`).join('');
   }
   function viewBills() {
-    const due = bills.reduce((a, b) => a + Math.max(0, b.total - b.paid), 0);
+    const left = b => Math.max(0, b.total - b.paid - (b.returned || 0));
+    const due = bills.reduce((a, b) => a + left(b), 0);
     return `<div class="grid g-2">
         <div class="card kpi"><div class="kpi-label"><span class="dot"></span>Bills</div><div class="kpi-value num">${bills.length}</div></div>
         <div class="card kpi"><div class="kpi-label"><span class="dot"></span>Balance due</div><div class="kpi-value num">${money(due)}</div></div>
@@ -128,7 +129,7 @@
       <section class="card"><div class="card-head"><h2 class="card-title">My bills</h2></div>
       <div class="table-wrap">${bills.length ? `<table><thead><tr><th>Bill</th><th>Date</th><th class="r">Items</th><th class="r">Amount</th><th class="r">Paid</th><th class="r">Balance</th><th></th></tr></thead><tbody>${bills.map(b => `<tr>
         <td class="strong">${esc(b.no)}</td><td>${fmtDate(b.date)}</td><td class="r">${b.items}</td><td class="r num">${money(b.total)}</td><td class="r num">${money(b.paid)}</td>
-        <td class="r num">${b.total - b.paid > 0.5 ? `<b>${money(b.total - b.paid)}</b>` : pill('Paid')}</td><td><button type="button" class="btn sm ghost" data-bill="${esc(b.no)}">Items</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">No bills yet.</div>'}</div></section>`;
+        <td class="r num">${left(b) > 0.5 ? `<b>${money(left(b))}</b>` : pill('Paid')}${b.returned ? `<div class="small muted">${money(b.returned)} returned</div>` : ''}</td><td><button type="button" class="btn sm ghost" data-bill="${esc(b.no)}">Items</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">No bills yet.</div>'}</div></section>`;
   }
 
   function render() {

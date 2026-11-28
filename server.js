@@ -201,7 +201,7 @@ async function api(req, res, url) {
     if (route === 'GET /api/portal/orders') return send(res, 200, orders.filter(o => o.chemistId === cid).sort((a, b) => b.created.localeCompare(a.created)));
     if (route === 'GET /api/portal/bills') {
       const bills = (store.data?.sales || []).filter(x => x.party?.chemistId === cid).sort((a, b) => b.date.localeCompare(a.date))
-        .map(x => ({ no: x.no, date: x.date, total: x.total, paid: x.paid || 0, items: x.lines.length, lines: x.lines.map(l => ({ name: store.data.products.find(p => p.id === l.productId)?.name || '', batch: l.batch, expiry: l.expiry, qty: l.qty, free: l.free, rate: l.rate })) }));
+        .map(x => ({ no: x.no, date: x.date, total: x.total, paid: x.paid || 0, returned: x.returned || 0, items: x.lines.length, lines: x.lines.map(l => ({ name: store.data.products.find(p => p.id === l.productId)?.name || '', batch: l.batch, expiry: l.expiry, qty: l.qty, free: l.free, rate: l.rate })) }));
       return send(res, 200, bills);
     }
     if (route === 'POST /api/portal/orders') {
