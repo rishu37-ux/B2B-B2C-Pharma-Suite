@@ -3,7 +3,9 @@
   'use strict';
 
   // ---------- Utilities ----------
-  const KEY = 'pharmaSuite.v1';
+  const KEY = 'pharmaSuite.v2';
+  const KEY_API = 'pharmaSuite.anthropicKey';
+  const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.8.0/+esm';
   const DAY = 86400000;
   const TODAY = new Date(); TODAY.setHours(0, 0, 0, 0);
 
@@ -13,10 +15,14 @@
   const inr0 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
   const inr2 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const nf = new Intl.NumberFormat('en-IN');
+  const n2 = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const money = v => inr0.format(Math.round(v || 0));
   const money2 = v => inr2.format(v || 0);
+  const dec = v => n2.format(+v || 0);
   const qty = v => nf.format(v || 0);
-  const round2 = v => Math.round(v * 100) / 100;
+  const round2 = v => Math.round((+v || 0) * 100) / 100;
+  const num = v => { const x = parseFloat(String(v ?? '').replace(/,/g, '')); return Number.isFinite(x) ? x : 0; };
+  const norm = s => String(s ?? '').toUpperCase().replace(/\s+/g, ' ').trim();
   const compact = v => {
     v = v || 0;
     if (Math.abs(v) >= 1e7) return '₹' + (v / 1e7).toFixed(2) + ' Cr';
@@ -26,14 +32,22 @@
   const iso = d => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
   const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d || 1); };
   const fmtDate = s => s ? parse(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-  const fmtMonth = s => s ? parse(s).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : '—';
   const daysFrom = s => Math.round((parse(s) - TODAY) / DAY);
   const addDays = (s, n) => iso(parse(s).getTime() + n * DAY);
-  const expDays = exp => { const [y, m] = exp.split('-').map(Number); return Math.round((new Date(y, m, 0) - TODAY) / DAY); };
+  const expDays = exp => { if (!exp) return -1; const [y, m] = exp.split('-').map(Number); return Math.round((new Date(y, m, 0) - TODAY) / DAY); };
+  const expToIso = e => {
+    const m = String(e ?? '').trim().match(/^(\d{1,2})\s*[/\-.]\s*(\d{2}|\d{4})$/);
+    if (!m) return '';
+    const mo = +m[1]; if (mo < 1 || mo > 12) return '';
+    let y = +m[2]; if (y < 100) y += 2000;
+    return `${y}-${String(mo).padStart(2, '0')}`;
+  };
+  const isoToExp = s => s ? `${s.slice(5, 7)}/${s.slice(2, 4)}` : '—';
   const monthKey = s => s.slice(0, 7);
   const todayIso = iso(TODAY);
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const nextNo = (prefix, arr, field = 'no') => prefix + (Math.max(0, ...arr.map(x => +String(x[field]).replace(/\D/g, '') || 0)) + 1);
+  const nextId = (prefix, arr, pad = 3) => prefix + String(Math.max(0, ...arr.map(x => +String(x.id).replace(/\D/g, '') || 0)) + 1).padStart(pad, '0');
   const lastMonths = n => {
     const out = [];
     for (let i = n - 1; i >= 0; i--) {
@@ -42,7 +56,6 @@
     }
     return out;
   };
-
   function rng(seed) {
     return () => {
       seed |= 0; seed = seed + 0x6D2B79F5 | 0;
@@ -52,6 +65,32 @@
     };
   }
 
+  // ---------- Bill maths (same method as the printed sale bill) ----------
+  // Amount = Qty × Rate; CD on amount; TD on amount after CD; GST on the taxable value.
+  function calcLine(l) {
+    const amount = round2(num(l.qty) * num(l.rate));
+    const cdA = amount * num(l.cd) / 100;
+    const tdA = (amount - cdA) * num(l.td) / 100;
+    const taxable = amount - cdA - tdA;
+    return { amount, cdA, tdA, taxable, gstA: taxable * num(l.gst) / 100 };
+  }
+  function billCalc(lines) {
+    let gross = 0, cd = 0, td = 0, taxable = 0, gst = 0; const slabs = {};
+    lines.forEach(l => {
+      const c = calcLine(l);
+      gross += c.amount; cd += c.cdA; td += c.tdA; taxable += c.taxable; gst += c.gstA;
+      const k = num(l.gst); slabs[k] = slabs[k] || { taxable: 0, gst: 0 };
+      slabs[k].taxable += c.taxable; slabs[k].gst += c.gstA;
+    });
+    const pre = taxable + gst, net = Math.round(pre);
+    Object.values(slabs).forEach(s => { s.taxable = round2(s.taxable); s.gst = round2(s.gst); });
+    return { gross: round2(gross), cd: round2(cd), td: round2(td), taxable: round2(taxable), cgst: round2(gst / 2), sgst: round2(gst / 2), gst: round2(gst), roundOff: round2(net - pre), total: net, slabs };
+  }
+
+  // Towns used in the sample data → district
+  const TOWN_DISTRICT = { Ghumarwin: 'Bilaspur', Bilaspur: 'Bilaspur', Hamirpur: 'Hamirpur', Mandi: 'Mandi', Barsar: 'Hamirpur', Bhoranj: 'Hamirpur', Una: 'Una', Sundernagar: 'Mandi', Dharamshala: 'Kangra', Baddi: 'Solan' };
+  const seedAddr = town => ({ district: TOWN_DISTRICT[town] || '', tehsil: town, subTehsil: '', locality: town, address: '', pincode: '', hospital: '', city: town });
+
   // ---------- Sample data ----------
   function seed() {
     const r = rng(20261127);
@@ -60,181 +99,252 @@
     const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
     const letters = n => Array.from({ length: n }, () => pick(L)).join('');
     const digits = n => Array.from({ length: n }, () => ri(0, 9)).join('');
-    const gstin = st => `${st}${letters(5)}${digits(4)}${pick(L)}1Z${pick(L)}`;
+    const gstin = () => `02${letters(5)}${digits(4)}${pick(L)}1Z${pick(L)}`;
     const phone = () => `9${ri(6, 9)}${digits(8)}`;
-    const monthOff = off => iso(new Date(TODAY.getFullYear(), TODAY.getMonth() + off, 1)).slice(0, 7);
+
+    const companies = ['LUPIN', 'ADDI B', 'TORRENT', 'SUN PHARMA', 'IPCA LAB'].map((name, i) => ({ id: 'M' + String(i + 1).padStart(2, '0'), name }));
+    const categories = ['Medicinal', 'Cosmetic / Derma', 'Nutraceutical', 'Diabetes & Insulin', 'Ayurvedic', 'Surgical', 'OTC / FMCG']
+      .map((name, i) => ({ id: 'K' + String(i + 1).padStart(2, '0'), name }));
+    const forms = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Pen', 'Cream', 'Lotion', 'Oral solution', 'Drops', 'Sachet', 'Device', 'Other']
+      .map((name, i) => ({ id: 'F' + String(i + 1).padStart(2, '0'), name }));
+    const co = n => companies.find(c => c.name === n).id;
+    const ca = n => categories.find(c => c.name === n).id;
 
     const suppliers = [
-      ['Arogya Labs Pvt Ltd', 'Vikram Mehta', 'Ahmedabad', '24', 30],
-      ['Sanjeevani Healthcare', 'Neha Kapoor', 'Mumbai', '27', 45],
-      ['Nirmal Pharmaceuticals', 'Rakesh Jain', 'Indore', '23', 30],
-      ['Vedant Lifesciences', 'Anita Desai', 'Pune', '27', 21],
-      ['Medisure Formulations', 'Sunil Verma', 'Delhi', '07', 30],
-      ['Dhanvantari Remedies', 'Kavita Rao', 'Hyderabad', '36', 45],
-    ].map((s, i) => ({
-      id: 'S' + String(i + 1).padStart(3, '0'), name: s[0], contact: s[1], city: s[2], phone: phone(),
-      gstin: gstin(s[3]), dl: `${s[3]}-WH-${digits(5)}`, terms: s[4],
-    }));
+      ['Himachal Pharma Distributors', 'Rajesh Thakur', 'Hamirpur', 30],
+      ['Shivalik Medical Agencies', 'Anjali Verma', 'Mandi', 21],
+      ['Baddi Pharma Traders', 'Naveen Sharma', 'Baddi', 45],
+      ['Kangra Drug House', 'Pankaj Katoch', 'Dharamshala', 30],
+      ['Una Medicos Wholesale', 'Sunita Rana', 'Una', 30],
+    ].map((s, i) => ({ id: 'S' + String(i + 1).padStart(3, '0'), name: s[0], contact: s[1], ...seedAddr(s[2]), phone: phone(), fssai: '1' + digits(13), fssaiValid: iso(TODAY.getTime() + ri(200, 1500) * DAY), gstin: gstin(), dl1: `HP-20B-${digits(5)}`, dl2: `HP-21B-${digits(5)}`, dlValid: iso(TODAY.getTime() + ri(120, 1500) * DAY), terms: s[3] }));
 
-    const P = [
-      ['Paracetamol 650 mg', 'Paracetamol', 'Tablet', '15 Tab', 34, 5, 0, 400, '3004'],
-      ['Amoxicillin 500 mg', 'Amoxicillin', 'Capsule', '10 Cap', 98, 5, 1, 200, '3004'],
-      ['Azithromycin 500 mg', 'Azithromycin', 'Tablet', '3 Tab', 119, 5, 1, 200, '3004'],
-      ['Pantoprazole 40 mg', 'Pantoprazole', 'Tablet', '15 Tab', 155, 5, 2, 250, '3004'],
-      ['Metformin 500 mg SR', 'Metformin', 'Tablet', '15 Tab', 42, 5, 2, 300, '3004'],
-      ['Atorvastatin 10 mg', 'Atorvastatin', 'Tablet', '15 Tab', 128, 5, 3, 200, '3004'],
-      ['Amlodipine 5 mg', 'Amlodipine', 'Tablet', '15 Tab', 56, 5, 3, 250, '3004'],
-      ['Cetirizine 10 mg', 'Cetirizine', 'Tablet', '10 Tab', 22, 5, 0, 300, '3004'],
-      ['Ondansetron 4 mg', 'Ondansetron', 'Tablet', '10 Tab', 65, 5, 4, 150, '3004'],
-      ['ORS Orange 21 g', 'Oral rehydration salts', 'Sachet', '21 g', 22, 5, 4, 500, '3004'],
-      ['Vitamin D3 60000 IU', 'Cholecalciferol', 'Capsule', '4 Cap', 125, 5, 5, 150, '3004'],
-      ['Diclofenac Gel 30 g', 'Diclofenac', 'Gel', '30 g Tube', 115, 5, 5, 100, '3004'],
-      ['Ambroxol Syrup 100 ml', 'Ambroxol', 'Syrup', '100 ml', 98, 5, 1, 120, '3004'],
-      ['Telmisartan 40 mg', 'Telmisartan', 'Tablet', '15 Tab', 138, 5, 3, 200, '3004'],
-      ['Montelukast 10 mg', 'Montelukast', 'Tablet', '10 Tab', 189, 5, 2, 150, '3004'],
-      ['Calcium + D3 500 mg', 'Calcium carbonate', 'Tablet', '15 Tab', 112, 5, 5, 200, '3004'],
-      ['Insulin Glargine 100 IU', 'Insulin glargine', 'Injection', '3 ml Pen', 780, 5, 4, 40, '3004'],
-      ['Hand Sanitizer 500 ml', 'Isopropyl alcohol', 'Liquid', '500 ml', 250, 18, 0, 80, '3808'],
+    // Items as printed on the sample sale bill: name, company, mfg, pack, hsn, batch, exp, qty, rate, mrp, gst, category, form
+    const BILL = [
+      ['BASUGINE PEN', 'LUPIN', 'LUPIN', '1PACK', '90183100', 'A25036CL', '01/29', 1, 823.57, 1153.00, 12, 'Diabetes & Insulin', 'Pen'],
+      ['BASUGINE PEN', 'LUPIN', '', '1PACK', '90183100', 'A25048CL', '01/29', 4, 823.57, 1153.00, 12, 'Diabetes & Insulin', 'Pen'],
+      ['SATPAM PLUS 15TAB', 'ADDI B', '', '15TAB', '30049099', 'AT2404098', '03/26', 10, 185.39, 259.54, 12, 'Medicinal', 'Tablet'],
+      ['CARE NGT 2.6', 'ADDI B', '', '30TAB', '30049099', 'AT2504123D', '03/27', 15, 171.43, 240.00, 12, 'Medicinal', 'Tablet'],
+      ['ADDI-D3 NANO SHOT 4*5ML', 'ADDI B', '', '1', '30049099', 'E25385', '04/27', 20, 210.00, 294.00, 12, 'Nutraceutical', 'Oral solution'],
+      ['LUPISULIN-R 40 INJ', 'LUPIN', 'M.J.BI', '10ML', '30043110', 'AO32515014', '04/27', 10, 145.16, 181.45, 5, 'Diabetes & Insulin', 'Injection'],
+      ['DILNIP 10MG 15TAB', 'LUPIN', '', '15TAB', '30049099', 'DNL250608', '05/27', 20, 171.36, 239.90, 12, 'Medicinal', 'Tablet'],
+      ['RESTBRO D 10TAB', 'ADDI B', '', '10TAB', '30049099', 'AT2502176D', '01/27', 20, 189.19, 264.86, 12, 'Medicinal', 'Tablet'],
+      ['ADENO PLUS XT 10TAB', 'ADDI B', '', '10TAB', '30049099', 'AT2503004', '08/26', 10, 113.57, 159.00, 12, 'Nutraceutical', 'Tablet'],
+      ['AJADUO 25/5MG TAB', 'LUPIN', 'LUPIN', '10TAB', '300490', 'JB01390', '05/27', 10, 148.43, 207.80, 12, 'Diabetes & Insulin', 'Tablet'],
+      ['NIKORAN-5MG TAB', 'TORRENT', '', '20TAB', '30049099', '2964M011', '11/26', 10, 343.04, 480.25, 12, 'Medicinal', 'Tablet'],
+      ['MOISTUREX 100G', 'SUN PHARMA', 'SUN', '100 GM', '300490', 'SXG1212A', '05/27', 5, 214.29, 300.00, 12, 'Cosmetic / Derma', 'Cream'],
+      ['MOISTUREX SOFT LOTION 100ML', 'SUN PHARMA', 'SUN', '100ML', '300490', 'JNC0012', '02/27', 5, 296.43, 415.00, 12, 'Cosmetic / Derma', 'Lotion'],
+      ['ARZU 10MG TAB', 'LUPIN', '', '10TAB', '300490', 'AR250302', '02/27', 10, 164.75, 230.65, 12, 'Medicinal', 'Tablet'],
+      ['ARZU 5MG 10TAB', 'LUPIN', 'LUPIN', '10TAB', '30049099', '06TAF001', '01/27', 10, 69.29, 97.00, 12, 'Medicinal', 'Tablet'],
+      ['DARTVIT GOLD 15TAB', 'ADDI B', '', '15TAB', '30049099', '129D250293', '03/27', 10, 258.00, 361.20, 12, 'Nutraceutical', 'Tablet'],
+      ['TORSTAR PLUS LS10 15TAB', 'ADDI B', '', '15TAB', '30049079', 'AT2501228A', '12/26', 7, 63.79, 89.30, 12, 'Medicinal', 'Tablet'],
+      ['TORSTAR PLUS LS10 15TAB', 'ADDI B', '', '15TAB', '30049079', 'AT2504133B', '03/27', 3, 63.79, 89.30, 12, 'Medicinal', 'Tablet'],
+      ['TORSTAR PLUS-10 15TAB', 'ADDI B', '', '15TAB', '30049079', 'AT2502145', '01/27', 10, 67.86, 95.00, 12, 'Medicinal', 'Tablet'],
+      ['ISONORM - 30MG SR TAB', 'LUPIN', 'LUPIN', '10TAB', '300490', 'M250600', '03/27', 10, 46.57, 65.20, 12, 'Medicinal', 'Tablet'],
+      ['PERISET SYP', 'IPCA LAB', 'IPCA', '30ML', '300490', 'EUT1125009AM', '03/27', 9, 30.72, 43.00, 12, 'Medicinal', 'Syrup'],
+      ['DIPEXTIL-CV 325', 'ADDI B', '', '10TAB', '30049099', 'T250094G', '07/26', 5, 243.57, 341.00, 12, 'Medicinal', 'Tablet'],
+      ['VINICOR XL 50MG TAB', 'IPCA LAB', 'IPCA', '10TAB', '300490', 'IAM0425001BH', '03/27', 10, 47.53, 66.53, 12, 'Medicinal', 'Tablet'],
+      ['VINICOR XL 25MG TAB', 'IPCA LAB', '', '10TAB', '300490', 'IAO0425002BH', '03/27', 10, 34.56, 48.38, 12, 'Medicinal', 'Tablet'],
+      ['LEFNO-20MG TAB', 'IPCA LAB', 'IPCA', '10TAB', '300490', 'GOV0125005AS', '09/27', 10, 230.68, 322.95, 12, 'Medicinal', 'Tablet'],
+      ['ULYSES 300MG 15TAB', 'LUPIN', '', '15TAB', '300490', 'TB-042414', '03/26', 10, 525.91, 690.25, 5, 'Medicinal', 'Tablet'],
+      ['PEGALUP 200ML', 'LUPIN', '', '200ML', '300490', 'A25011SD', '05/27', 4, 335.82, 470.15, 12, 'Medicinal', 'Syrup'],
     ];
-    const products = P.map((p, i) => ({
-      id: 'P' + String(i + 1).padStart(3, '0'), name: p[0], salt: p[1], category: p[2], pack: p[3],
-      mrp: p[4], gst: p[5], supplierId: suppliers[p[6]].id, reorder: p[7], hsn: p[8],
-      ptr: round2(p[4] * 0.7), pts: round2(p[4] * 0.6),
-    }));
-
-    const batches = [];
-    const lowSet = new Set([4, 10, 16]);
-    products.forEach((p, i) => {
-      const code = p.name.replace(/[^A-Z]/g, '').slice(0, 2) || 'BT';
-      const n = lowSet.has(i) ? 1 : ri(1, 3);
-      for (let k = 0; k < n; k++) {
-        let off = pick([3, 6, 9, 14, 18, 24, 30]);
-        if (i === 2 && k === 0) off = 1;
-        if (i === 8 && k === 0) off = -1;
-        if (i === 12 && k === 0) off = 2;
-        const q = lowSet.has(i) ? Math.round(p.reorder * 0.4) : ri(Math.round(p.reorder * 0.5), Math.round(p.reorder * 2.5));
-        batches.push({ id: uid() + i + k, productId: p.id, batch: code + digits(4), expiry: monthOff(off), qty: q });
-      }
+    const products = [], batches = [];
+    BILL.forEach(b => {
+      let p = products.find(x => x.name === b[0]);
+      if (!p) {
+        p = {
+          id: 'P' + String(products.length + 1).padStart(3, '0'), name: b[0], companyId: co(b[1]), mfg: b[2] || b[1], categoryId: ca(b[11]), form: b[12],
+          pack: b[3], hsn: b[4], gst: b[10], mrp: b[9], ptr: b[8], pts: round2(b[8] * 0.9), reorder: Math.max(5, b[7] * 2),
+        };
+        products.push(p);
+      } else if (!p.mfg && b[2]) p.mfg = b[2];
+      batches.push({
+        id: uid() + batches.length, productId: p.id, batch: b[5], expiry: expToIso(b[6]), qty: b[7] * ri(2, 6), free: 0,
+        rate: p.pts, mrp: b[9], cd: 2, td: 0, gst: b[10], supplierId: pick(suppliers).id, source: 'Opening stock', verified: true,
+      });
     });
+    // a few batches with free goods and low stock to show alerts
+    batches[4].free = 4; batches[9].free = 2;
+    batches.filter(b => b.productId === 'P005' || b.productId === 'P020').forEach(b => { b.qty = 3; });
 
     const chemists = [
-      ['Shree Ram Medicals', 'Ramesh Agarwal', 'Jaipur', '08'],
-      ['Sanjivani Pharmacy', 'Pooja Sharma', 'Jaipur', '08'],
-      ['Gupta Medical Store', 'Alok Gupta', 'Kota', '08'],
-      ['Apna Chemist', 'Imran Khan', 'Ajmer', '08'],
-      ['Life Care Pharmacy', 'Deepa Nair', 'Udaipur', '08'],
-      ['Om Sai Medicos', 'Sachin Patil', 'Jodhpur', '08'],
-      ['City Health Mart', 'Manish Bansal', 'Jaipur', '08'],
-      ['Jeevan Medical Hall', 'Harpreet Singh', 'Bikaner', '08'],
-      ['Balaji Medicals', 'Suresh Choudhary', 'Alwar', '08'],
-      ['Wellness Point Chemist', 'Ritu Malhotra', 'Jaipur', '08'],
-      ['Raj Medical Agency', 'Rajendra Meena', 'Bhilwara', '08'],
-      ['Care Plus Pharmacy', 'Sneha Joshi', 'Sikar', '08'],
+      ['Jai Durga Medicos', 'Rakesh Kumar', 'Ghumarwin'],
+      ['Shiv Shakti Pharmacy', 'Meena Devi', 'Bilaspur'],
+      ['Gupta Medical Hall', 'Ashok Gupta', 'Hamirpur'],
+      ['New Life Chemist', 'Vikas Sood', 'Mandi'],
+      ['Sharma Medicos', 'Deepak Sharma', 'Barsar'],
+      ['Himalaya Medical Store', 'Kamal Chandel', 'Bhoranj'],
+      ['Om Medicos', 'Sanjay Rana', 'Una'],
+      ['City Care Pharmacy', 'Neha Guleria', 'Bilaspur'],
+      ['Thakur Medical Agency', 'Ravi Thakur', 'Sundernagar'],
+      ['Kailash Chemist', 'Pritam Singh', 'Ghumarwin'],
     ].map((c, i) => ({
-      id: 'C' + String(i + 1).padStart(3, '0'), name: c[0], owner: c[1], city: c[2], phone: phone(),
-      dl: `RJ-${c[2].slice(0, 3).toUpperCase()}-20B/21B-${digits(5)}`, gstin: gstin(c[3]),
-      creditLimit: pick([100000, 150000, 200000, 300000]), terms: pick([21, 30, 30, 45]),
-      joined: addDays(todayIso, -ri(200, 900)),
-      status: i === 11 ? 'Pending verification' : i === 7 ? 'On hold' : 'Active',
+      id: 'C' + String(i + 1).padStart(3, '0'), name: c[0], owner: c[1], ...seedAddr(c[2]), phone: phone(), ...(i % 3 === 0 ? { fssai: '2' + digits(13), fssaiValid: iso(TODAY.getTime() + ri(90, 1500) * DAY) } : {}),
+      dl1: `HP-${c[2].slice(0, 3).toUpperCase()}-20-${digits(5)}`, dl2: `HP-${c[2].slice(0, 3).toUpperCase()}-21-${digits(5)}`, dlValid: iso(TODAY.getTime() + (i === 4 ? 25 : ri(120, 1500)) * DAY), gstin: gstin(),
+      creditLimit: pick([100000, 150000, 200000, 300000]), terms: pick([14, 21, 30]), cd: 2, td: 0,
+      joined: iso(TODAY.getTime() - ri(200, 900) * DAY), status: i === 9 ? 'Pending verification' : i === 6 ? 'On hold' : 'Active',
     }));
-    chemists[11].joined = addDays(todayIso, -3);
+    chemists[9].joined = iso(TODAY.getTime() - 3 * DAY);
 
-    const lineTotals = lines => {
-      let sub = 0, gst = 0;
-      lines.forEach(l => { const p = products.find(x => x.id === l.productId); const a = l.qty * l.rate; sub += a; gst += a * p.gst / 100; });
-      return { sub: round2(sub), gst: round2(gst), total: round2(sub + gst) };
-    };
-    const scaleQty = (p, q) => p.mrp > 500 ? Math.max(1, Math.ceil(q / 12)) : q;
+    const people = [['Ramesh Chand', 'Ghumarwin'], ['Sunita Devi', 'Bilaspur'], ['Mohan Lal', 'Bajoha'], ['Kiran Bala', 'Ghumarwin']];
 
-    // Sales invoices
+    // Sales (historical — stock above is already net of these)
     const sales = [];
-    const activeChem = chemists.filter(c => c.status !== 'Pending verification');
-    const saleDates = Array.from({ length: 160 }, () => addDays(todayIso, -ri(0, 179))).sort();
+    const activeChem = chemists.filter(c => c.status === 'Active');
+    const saleDates = Array.from({ length: 90 }, () => iso(TODAY.getTime() - ri(0, 179) * DAY)).sort();
     saleDates.forEach((d, i) => {
-      const c = r() < 0.45 ? activeChem[ri(0, 3)] : pick(activeChem);
+      const individual = r() < 0.18;
+      const c = individual ? null : (r() < 0.45 ? activeChem[ri(0, 2)] : pick(activeChem));
       const used = new Set(); const lines = [];
-      const n = ri(1, 4);
+      const n = individual ? ri(1, 2) : ri(2, 5);
       while (lines.length < n) {
-        const p = pick(products); if (used.has(p.id)) continue; used.add(p.id);
-        const b = batches.find(x => x.productId === p.id);
-        lines.push({ productId: p.id, qty: scaleQty(p, ri(20, 150)), rate: p.ptr, batches: [{ batch: b ? b.batch : '—', qty: 0 }] });
+        const b = pick(batches); if (used.has(b.id)) continue; used.add(b.id);
+        const p = products.find(x => x.id === b.productId);
+        const q = individual ? ri(1, 3) : ri(2, 12);
+        lines.push({ productId: p.id, batchId: b.id, batch: b.batch, expiry: b.expiry, qty: q, free: 0, rate: individual ? round2(p.mrp / (1 + p.gst / 100)) : p.ptr, mrp: b.mrp, cd: individual ? 0 : 2, td: 0, gst: b.gst, alloc: { fromQty: q, fromFree: 0 } });
       }
-      lines.forEach(l => { l.batches[0].qty = l.qty; });
-      const t = lineTotals(lines);
+      const t = billCalc(lines);
       const age = -daysFrom(d);
       let paid = 0; const x = r();
-      if (age > 45) paid = x < 0.93 ? t.total : round2(t.total * 0.5);
-      else if (age > 20) paid = x < 0.6 ? t.total : x < 0.8 ? round2(t.total * 0.5) : 0;
-      else paid = x < 0.3 ? t.total : x < 0.5 ? round2(t.total * 0.4) : 0;
-      sales.push({ no: 'SI-' + (1001 + i), date: d, chemistId: c.id, lines, ...t, paid });
+      if (individual) paid = t.total;
+      else if (age > 45) paid = x < 0.93 ? t.total : Math.round(t.total * 0.5);
+      else if (age > 15) paid = x < 0.6 ? t.total : x < 0.8 ? Math.round(t.total * 0.5) : 0;
+      else paid = x < 0.3 ? t.total : x < 0.5 ? Math.round(t.total * 0.4) : 0;
+      const party = individual ? { type: 'individual', name: pick(people)[0], phone: phone() } : { type: 'chemist', chemistId: c.id };
+      sales.push({ no: 'SMS-' + (4001 + i), date: d, party, lines, ...t, paid, mode: individual ? 'Cash' : 'Credit' });
     });
 
-    // Purchase orders, GRNs, purchase invoices
+    // Purchase orders, goods receipts and purchase invoices (history)
     const pos = [], grns = [], pinvoices = [];
-    const poCount = 24;
+    const poCount = 14;
     for (let i = 0; i < poCount; i++) {
-      const date = addDays(todayIso, -Math.round(175 - i * (172 / (poCount - 1))));
+      const date = iso(TODAY.getTime() - Math.round(170 - i * (167 / (poCount - 1))) * DAY);
       const s = suppliers[i % suppliers.length];
-      let pool = products.filter(p => p.supplierId === s.id);
-      if (pool.length < 2) pool = products;
       const used = new Set(); const lines = [];
-      const n = Math.min(pool.length, ri(2, 4));
+      const n = ri(3, 6);
       while (lines.length < n) {
-        const p = pick(pool); if (used.has(p.id)) continue; used.add(p.id);
-        lines.push({ productId: p.id, qty: scaleQty(p, ri(25, 120) * 10), rate: p.pts });
+        const p = pick(products); if (used.has(p.id)) continue; used.add(p.id);
+        lines.push({ productId: p.id, qty: ri(2, 8) * 10, rate: p.pts, gst: p.gst });
       }
-      const t = lineTotals(lines);
-      const po = { no: 'PO-' + (2001 + i), date, expected: addDays(date, 7), supplierId: s.id, lines, ...t, status: 'Open' };
+      const po = { no: 'PO-' + (2001 + i), date, expected: addDays(date, 7), supplierId: s.id, lines, ...billCalc(lines), status: 'Open' };
       pos.push(po);
       const fromEnd = poCount - 1 - i;
-      if (fromEnd < 3) continue; // still open
-      const partial = fromEnd === 3;
+      if (fromEnd < 2) continue;
+      const partial = fromEnd === 2;
       const gDate = addDays(date, ri(3, 6));
-      const gLines = lines.map(l => ({
-        productId: l.productId, batch: products.find(p => p.id === l.productId).name.replace(/[^A-Z]/g, '').slice(0, 2) + digits(4),
-        expiry: monthOff(ri(12, 30)), qty: partial ? Math.round(l.qty / 2) : l.qty, rate: l.rate,
-      }));
+      const gLines = lines.map(l => {
+        const p = products.find(x => x.id === l.productId);
+        return { productId: l.productId, batch: letters(2) + digits(5), expiry: iso(new Date(TODAY.getFullYear() + 1, TODAY.getMonth() + ri(0, 18), 1)).slice(0, 7), qty: partial ? Math.round(l.qty / 2) : l.qty, free: 0, rate: l.rate, mrp: p.mrp, cd: 0, td: 0, gst: p.gst };
+      });
       po.status = partial ? 'Partially received' : 'Received';
-      const g = { no: 'GRN-' + (3001 + grns.length), date: gDate, poNo: po.no, supplierId: s.id, challan: 'DC/' + digits(5), lines: gLines, ...lineTotals(gLines), invoiced: '' };
+      const g = { no: 'GRN-' + (3001 + grns.length), date: gDate, poNo: po.no, supplierId: s.id, challan: 'DC/' + digits(5), lines: gLines, ...billCalc(gLines), invoiced: '' };
       grns.push(g);
-      if (fromEnd < 6) continue; // awaiting invoice
+      if (fromEnd < 4) continue;
       const piDate = addDays(gDate, ri(0, 2));
       const due = addDays(piDate, s.terms);
-      const paid = daysFrom(due) < 0 ? (r() < 0.85 ? g.total : round2(g.total * 0.5)) : (r() < 0.3 ? g.total : 0);
-      const pi = { no: 'PI-' + (4001 + pinvoices.length), supplierInvNo: s.name.slice(0, 3).toUpperCase() + '/' + digits(5), date: piDate, due, supplierId: s.id, grnNo: g.no, sub: g.sub, gst: g.gst, total: g.total, paid };
-      pinvoices.push(pi);
-      g.invoiced = pi.no;
+      const paid = daysFrom(due) < 0 ? (r() < 0.85 ? g.total : Math.round(g.total * 0.5)) : (r() < 0.3 ? g.total : 0);
+      pinvoices.push({ no: 'PI-' + (4001 + pinvoices.length), supplierInvNo: s.name.slice(0, 3).toUpperCase() + '/' + digits(5), date: piDate, due, supplierId: s.id, grnNo: g.no, source: 'GRN', ...billCalc(gLines), paid });
+      g.invoiced = pinvoices[pinvoices.length - 1].no;
     }
 
-    return { products, batches, chemists, suppliers, sales, pos, grns, pinvoices };
+    const settings = {
+      firm: { name: 'Shankar Medical Store', district: 'Bilaspur', tehsil: 'Ghumarwin', subTehsil: '', locality: 'Bajoha', address: '', pincode: '174021', hospital: '', city: 'Bajoha', phone: '01978-315172', gstin: '02AFNFS3835D1Z4', dl1: '20B 20160', dl2: '21B 20161' },
+      defaultCd: 2, individualTerms: 0,
+    };
+    // Hospital directory, with each sample chemist linked to a civil hospital or CHC in its tehsil where one is listed
+    const hospitals = seedHospitals();
+    chemists.forEach(c => {
+      const h = hospitals.filter(x => x.district === c.district && norm(x.tehsil) === norm(c.tehsil)).sort(hospSort)[0];
+      if (h) { c.hospitalId = h.id; c.hospital = h.name; }
+    });
+    return { version: 2, settings, companies, categories, forms, products, batches, chemists, suppliers, sales, pos, grns, pinvoices, hospitals };
   }
 
   function load() {
     try { const raw = localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
   }
+  // Server mode (node server.js): data lives on the server and is shared with the chemist portal.
+  // Browser-only mode (any static server): data lives in this browser's localStorage.
+  let SERVER = false, serverRev = 0, saveTimer = null, saving = false, saveAgain = false, saveBlocked = false;
+  async function api(method, url, body) {
+    const r = await fetch(url, { method, cache: 'no-store', headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined });
+    if (r.status === 401) { location.href = 'login.html'; throw new Error('Please log in again.'); }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(data.error || `Server error (${r.status})`), { status: r.status });
+    return data;
+  }
+  async function pushToServer() {
+    if (saving) { saveAgain = true; return; }
+    saving = true;
+    try {
+      const r = await api('PUT', 'api/db', { rev: serverRev, data: db });
+      serverRev = r.rev;
+    } catch (err) {
+      if (err.status === 409) { saveBlocked = true; showBanner('This data was changed in another window or by another person. <a href="./">Reload</a> to see the latest — changes made here since then were not saved.'); }
+      else showBanner(`Could not save to the server: ${esc(err.message)}. Your last change is not saved yet — it will retry on the next change.`);
+    } finally {
+      saving = false;
+      if (saveAgain) { saveAgain = false; pushToServer(); }
+    }
+  }
   function save() {
-    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage unavailable */ }
+    if (SERVER) {
+      if (saveBlocked) return;
+      clearTimeout(saveTimer); saveTimer = setTimeout(() => { saveTimer = null; pushToServer(); }, 250);
+      return;
+    }
+    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { toast('Could not save — browser storage is full or blocked.'); }
+  }
+  function showBanner(html) {
+    let b = $('#banner');
+    if (!b) { b = document.createElement('div'); b.id = 'banner'; b.className = 'banner'; $('.main').prepend(b); }
+    b.innerHTML = html;
+  }
+  const getApiKey = () => { try { return localStorage.getItem(KEY_API) || ''; } catch { return ''; } };
+  const setApiKey = k => { try { if (k) localStorage.setItem(KEY_API, k); else localStorage.removeItem(KEY_API); } catch { /* storage unavailable */ } };
+
+  let db = null;
+  // Chemist orders and portal logins (server mode only)
+  let chemOrders = [];
+  let portalLogins = {};
+  async function loadOrders() {
+    if (!SERVER) return;
+    try {
+      const prev = JSON.stringify(chemOrders);
+      const before = new Set(chemOrders.map(o => o.id));
+      chemOrders = await api('GET', 'api/orders');
+      if (JSON.stringify(chemOrders) === prev) return;
+      const fresh = chemOrders.filter(o => !before.has(o.id) && o.status === 'New');
+      if (loadOrders.done && fresh.length) toast(`New order from ${chem(fresh[0].chemistId)?.name || 'a chemist'} — see Chemist Orders.`);
+      loadOrders.done = true;
+      const busy = $('#modalBack').classList.contains('open') || document.activeElement?.matches('input, select, textarea');
+      if (!busy && ['chemorders', 'overview'].includes(route) && searchQuery.length < 2) render();
+      else renderNav(searchQuery.length >= 2 ? '' : route === 'folder' ? 'suppliers' : route);
+    } catch { /* will retry on the next poll */ }
+  }
+  async function loadLogins() {
+    if (!SERVER) return;
+    try { portalLogins = await api('GET', 'api/logins'); } catch { portalLogins = {}; }
   }
 
-  let db = load() || seed();
-
-  // ---------- Derived data ----------
+  // ---------- Lookups & derived data ----------
   const prod = id => db.products.find(p => p.id === id);
   const chem = id => db.chemists.find(c => c.id === id);
   const sup = id => db.suppliers.find(s => s.id === id);
-  const stockQty = pid => db.batches.filter(b => b.productId === pid).reduce((a, b) => a + b.qty, 0);
-  const sellableQty = pid => db.batches.filter(b => b.productId === pid && expDays(b.expiry) >= 0).reduce((a, b) => a + b.qty, 0);
-  const batchValue = b => b.qty * (prod(b.productId)?.pts || 0);
-  const stockValue = () => db.batches.filter(b => expDays(b.expiry) >= 0).reduce((a, b) => a + batchValue(b), 0);
-  const lineTotals = lines => {
-    let sub = 0, gst = 0;
-    lines.forEach(l => { const p = prod(l.productId); const a = l.qty * l.rate; sub += a; gst += a * (p ? p.gst : 0) / 100; });
-    return { sub: round2(sub), gst: round2(gst), total: round2(sub + gst) };
-  };
+  const company = id => db.companies.find(c => c.id === id);
+  const category = id => db.categories.find(c => c.id === id);
+  const batchById = id => db.batches.find(b => b.id === id);
+  const avail = b => (b.qty || 0) + (b.free || 0);
+  const sellableBatches = pid => db.batches.filter(b => b.productId === pid && avail(b) > 0 && expDays(b.expiry) >= 0).sort((a, b) => a.expiry.localeCompare(b.expiry));
+  const sellableQty = pid => sellableBatches(pid).reduce((a, b) => a + avail(b), 0);
+  const batchAmount = b => round2((b.qty || 0) * (b.rate || 0));
+  const stockValue = () => db.batches.filter(b => expDays(b.expiry) >= 0).reduce((a, b) => a + batchAmount(b), 0);
   const balance = d => Math.max(0, round2(d.total - (d.paid || 0)));
+  const partyName = s => s.party.type === 'chemist' ? (chem(s.party.chemistId)?.name || 'Unknown chemist') : (s.party.name || 'Individual');
+  const partyCity = s => s.party.type === 'chemist' ? (chem(s.party.chemistId)?.city || '') : (s.party.phone || '');
   const saleStatus = s => {
     if (balance(s) <= 0.5) return 'Paid';
-    const terms = chem(s.chemistId)?.terms || 30;
+    const terms = s.party.type === 'chemist' ? (chem(s.party.chemistId)?.terms ?? 30) : (db.settings.individualTerms ?? 0);
     if (-daysFrom(s.date) > terms) return 'Overdue';
     return s.paid > 0 ? 'Partial' : 'Due';
   };
@@ -245,11 +355,34 @@
   };
   const batchStatus = b => { const d = expDays(b.expiry); return d < 0 ? 'Expired' : d <= 90 ? 'Near expiry' : 'Good'; };
   const receivedQty = (poNo, pid) => db.grns.filter(g => g.poNo === poNo).flatMap(g => g.lines).filter(l => l.productId === pid).reduce((a, l) => a + l.qty, 0);
-  const chemOutstanding = cid => db.sales.filter(s => s.chemistId === cid).reduce((a, s) => a + balance(s), 0);
+  const chemOutstanding = cid => db.sales.filter(s => s.party.chemistId === cid).reduce((a, s) => a + balance(s), 0);
   const supPayable = sid => db.pinvoices.filter(p => p.supplierId === sid).reduce((a, p) => a + balance(p), 0);
   const lowStock = () => db.products.filter(p => sellableQty(p.id) < p.reorder);
   const sumBy = (arr, pred, f = x => x.total) => arr.filter(pred).reduce((a, x) => a + f(x), 0);
   const pctChange = (a, b) => b ? Math.round((a - b) / b * 100) : 0;
+  const findProductByName = name => db.products.find(p => norm(p.name) === norm(name));
+  function findOrCreateCompany(name) {
+    if (!norm(name)) return '';
+    let c = db.companies.find(x => norm(x.name) === norm(name));
+    if (!c) { c = { id: nextId('M', db.companies, 2), name: norm(name) }; db.companies.push(c); }
+    return c.id;
+  }
+  function guessForm(name, pack) {
+    const s = norm(name + ' ' + pack);
+    if (/\bPEN\b/.test(s)) return 'Pen';
+    if (/INJ|VIAL|AMP/.test(s)) return 'Injection';
+    if (/SYP|SYRUP|SUSP/.test(s)) return 'Syrup';
+    if (/LOTION/.test(s)) return 'Lotion';
+    if (/CREAM|GEL|OINT|\bGM\b|\d+G\b/.test(s)) return 'Cream';
+    if (/DROP/.test(s)) return 'Drops';
+    if (/SACHET/.test(s)) return 'Sachet';
+    if (/CAP/.test(s)) return 'Capsule';
+    if (/TAB/.test(s)) return 'Tablet';
+    if (/ML\b/.test(s)) return 'Syrup';
+    return 'Other';
+  }
+  const defaultCategoryId = () => (db.categories.find(c => c.name === 'Medicinal') || db.categories[0])?.id || '';
+  const salePtr = (mrp, gst) => round2(num(mrp) / (1 + num(gst) / 100) * 0.8);
 
   const PILL = {
     Paid: 'ok', Partial: 'info', Due: 'warn', Overdue: 'bad', Unpaid: 'warn',
@@ -257,9 +390,12 @@
     Invoiced: 'ok', 'Awaiting invoice': 'warn',
     Active: 'ok', 'Pending verification': 'warn', 'On hold': 'bad',
     Good: 'ok', 'Near expiry': 'warn', Expired: 'bad', 'Low stock': 'warn', 'Out of stock': 'bad', 'In stock': 'ok',
-    PO: 'info', GRN: 'ok', Invoice: 'neutral',
+    PO: 'info', GRN: 'ok', Invoice: 'neutral', Chemist: 'info', Individual: 'neutral',
+    'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
+    New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
+    Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
   };
-  const pill = s => `<span class="pill ${PILL[s] || 'neutral'}">${esc(s)}</span>`;
+  const pill = s => `<span class="pill ${PILL[s] || (/^Short/.test(s) || / short$/.test(s) ? 'warn' : 'neutral')}">${esc(s)}</span>`;
 
   // ---------- Icons ----------
   const ICONS = {
@@ -273,47 +409,67 @@
     clipboard: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="M9 10h6M9 14h6M9 18h3"/>',
     check: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5"/><path d="M15 18l2 2 4-4"/>',
     file: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/>',
+    upload: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    tick: '<path d="M20 6 9 17l-5-5"/>',
+    filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+    doctor: '<circle cx="12" cy="7" r="4"/><path d="M5 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2"/><path d="M12 14v4M10 16h4"/>',
+    hospital: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 7v6M9 10h6"/><path d="M9 21v-4h6v4"/>',
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    clip: '<path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.01"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     rupee: '<path d="M7 4h10M7 9h10M7 4c6 0 6 9 0 9l7 7"/>',
+    spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   };
   const icon = n => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 
   // ---------- Navigation ----------
   const NAV = [
     { group: 'Dashboard', items: [['overview', 'Overview', 'grid']] },
-    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemists', 'Onboard Chemists', 'store']] },
-    { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products', 'pill']] },
-    { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
+    { group: 'Sales', items: [['sales', 'Sales', 'trend'], ['chemorders', 'Chemist Orders', 'cart'], ['chemists', 'Onboard Chemists', 'store']] },
+    { group: 'Inventory', items: [['stock', 'Stock Details', 'box'], ['products', 'Products & Masters', 'pill']] },
+    { group: 'Directory', items: [['hospitals', 'Hospital Directory', 'hospital'], ['doctors', 'Doctors Directory', 'doctor']] },
+  { group: 'Purchase', items: [['purchase', 'Purchase', 'cart'], ['billentry', 'Bill Upload / Entry', 'spark'], ['suppliers', 'Supplier Details', 'truck'], ['orders', 'Purchase Orders', 'clipboard'], ['grn', 'Goods Receipt (GRN)', 'check'], ['invoices', 'Purchase Invoices', 'file']] },
   ];
   const SUBTITLES = {
     overview: 'Your business at a glance',
-    sales: 'Invoices raised to chemists and payments collected',
-    chemists: 'Retail chemists onboarded for B2B supply',
-    stock: 'Batch-wise stock with expiry tracking',
-    products: 'Product master with pricing and tax',
+    sales: 'Bills to chemists and individual customers — stock is deducted automatically',
+    chemists: 'Retail chemists onboarded for B2B supply, with their portal logins',
+    chemorders: 'Orders placed by chemists on their portal',
+    stock: 'Batch-wise stock in bill format',
+    products: 'Products, companies, categories and forms',
     purchase: 'Purchase summary across suppliers',
-    suppliers: 'Manufacturers and stockists you buy from',
+    billentry: 'Upload a bill photo or PDF, check every line, then add it to stock',
+    suppliers: 'Distributors and stockists you buy from',
     orders: 'Orders placed with suppliers',
     grn: 'Goods received against purchase orders',
     invoices: 'Supplier bills and payments due',
     search: 'Search results',
+    folder: 'Every bill from this supplier, and what was bought when',
+    hospitals: 'Medical colleges, hospitals, CHCs and PHCs of Himachal Pradesh — and the chemists near them',
+    doctors: 'Medical officers and doctors — specialization, mobile and the hospital they work at',
   };
 
   function renderNav(route) {
     const badges = {
       orders: db.pos.filter(p => p.status === 'Open' || p.status === 'Partially received').length,
-      stock: db.batches.filter(b => batchStatus(b) !== 'Good').length,
+      stock: db.batches.filter(b => avail(b) > 0 && (batchStatus(b) !== 'Good' || !b.verified)).length,
       chemists: db.chemists.filter(c => c.status === 'Pending verification').length,
       grn: db.grns.filter(g => !g.invoiced).length,
+      billentry: entry && entry.lines.length ? '•' : 0,
+      chemorders: chemOrders.filter(o => o.status === 'New').length,
     };
     $('#nav').innerHTML = NAV.map(g => `
       <div class="nav-group-title">${g.group}</div>
-      <div class="nav">${g.items.map(([id, label, ic]) => `
+      <div class="nav">${g.items.filter(([id]) => SERVER || id !== 'chemorders').map(([id, label, ic]) => `
         <button type="button" data-nav="${id}" class="${route === id ? 'active' : ''}">${icon(ic)}<span>${label}</span>${badges[id] ? `<span class="badge-n">${badges[id]}</span>` : ''}</button>`).join('')}
       </div>`).join('');
+    $('#brandName').textContent = db.settings.firm.name || 'Pharma Suite';
+    $('.brand-home').title = `${db.settings.firm.name || 'Pharma Suite'} — Home (Overview)`;
+    $('#brandMark').textContent = (db.settings.firm.name || 'P').trim().charAt(0).toUpperCase();
   }
 
   // ---------- Building blocks ----------
@@ -323,40 +479,122 @@
     return `<span class="${p >= 0 ? 'up' : 'down'}">${p >= 0 ? '▲' : '▼'} ${Math.abs(p)}%</span> ${text}`;
   };
   const actBtn = (act, id, label, cls = '') => `<button type="button" class="btn sm ${cls}" data-act="${act}" data-id="${esc(id)}">${label}</button>`;
+  const rowActs = (...btns) => `<div class="row-acts">${btns.filter(Boolean).join('')}</div>`;
 
-  function table(columns, rows, empty = 'Nothing to show yet.') {
+  function table(columns, rows, empty = 'Nothing to show yet.', foot = '') {
     if (!rows.length) return `<div class="empty">${empty}</div>`;
     return `<table><thead><tr>${columns.map(c => `<th class="${c.r ? 'r' : ''}">${c.h}</th>`).join('')}</tr></thead>
-      <tbody>${rows.map(row => `<tr>${columns.map(c => `<td class="${c.r ? 'r num' : ''}">${c.c(row)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+      <tbody>${rows.map((row, i) => `<tr>${columns.map(c => `<td class="${c.r ? 'r num' : ''}">${c.c(row, i)}</td>`).join('')}</tr>`).join('')}</tbody>${foot}</table>`;
   }
 
+  // Generic list card: tabs, search, dropdown filters, and (optionally) checkbox selection with a bulk-edit bar.
+  // cfg.filters: [{ k, label, options: [[value, label]], test(row, value) }]
+  // cfg.select:  { id(row), fields: [{ k, label, type: 'pct' | 'gst' | 'select', options? }], apply?(items, vals), extra?, actions? }
   const lists = {};
   const listState = {};
+  const bulkInput = (key, f) => {
+    const name = `data-bulk="${key}|${f.k}"`;
+    if (f.type === 'select') return `<label class="bf"><span>${f.label}</span><select ${name}><option value="">— keep —</option>${f.options.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select></label>`;
+    return `<label class="bf"><span>${f.label}</span><input ${name} inputmode="decimal" placeholder="—" ${f.type === 'gst' ? 'list="dl-gst"' : ''}></label>`;
+  };
   function useList(cfg) {
     lists[cfg.key] = cfg;
-    const st = listState[cfg.key] || (listState[cfg.key] = { q: '', tab: cfg.tabs ? cfg.tabs[0].id : null });
+    const st = listState[cfg.key] || (listState[cfg.key] = { q: '', tab: cfg.tabs ? cfg.tabs[0].id : null, f: {}, sel: new Set(), visible: [] });
+    const k = cfg.key;
     return `<section class="card">
       <div class="card-head">
-        <h2 class="card-title">${cfg.title}</h2><span class="hint" id="cnt-${cfg.key}"></span>
+        <h2 class="card-title">${cfg.title}</h2><span class="hint" id="cnt-${k}"></span>
         <div class="spacer"></div>
         <div class="toolbar">
-          ${cfg.tabs ? `<div class="tabs" data-tabs="${cfg.key}">${cfg.tabs.map(t => `<button type="button" data-tab="${t.id}" class="${st.tab === t.id ? 'active' : ''}">${t.label}</button>`).join('')}</div>` : ''}
-          ${cfg.noSearch ? '' : `<label class="search">${icon('search')}<input data-list-search="${cfg.key}" value="${esc(st.q)}" placeholder="Search…"></label>`}
+          ${cfg.tabs ? `<div class="tabs" data-tabs="${k}">${cfg.tabs.map(t => `<button type="button" data-tab="${t.id}" class="${st.tab === t.id ? 'active' : ''}">${t.label}</button>`).join('')}</div>` : ''}
+          ${cfg.noSearch ? '' : `<label class="search">${icon('search')}<input data-list-search="${k}" value="${esc(st.q)}" placeholder="Search…"></label>`}
           ${cfg.actions || ''}
         </div>
       </div>
-      <div class="table-wrap" id="tbl-${cfg.key}"></div>
+      ${cfg.filters ? `<div class="filter-bar">${icon('filter')}${cfg.filters.map(f => `<label class="filter"><span>${f.label}</span><select data-list-filter="${k}|${f.k}"><option value="">All</option>${f.options.map(([v, l]) => `<option value="${esc(v)}" ${st.f[f.k] === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`).join('')}
+        <button type="button" class="btn sm ghost ${Object.values(st.f).some(Boolean) ? '' : 'hidden'}" data-filter-clear="${k}" id="fclr-${k}">Clear filters</button></div>` : ''}
+      ${cfg.select ? `<div class="bulk-bar hidden" id="bulk-${k}">
+        <span class="bulk-n" id="bulkn-${k}"></span>
+        ${cfg.select.fields.map(f => bulkInput(k, f)).join('')}
+        <button type="button" class="btn sm primary" data-bulkapply="${k}">Apply to selected</button>
+        ${cfg.select.extra || ''}
+        <button type="button" class="btn sm ghost" data-bulkclear="${k}">Clear selection</button>
+        <span class="small muted bulk-hint">Type a value to set it on every ticked row. Empty boxes are left as they are.</span>
+      </div>` : ''}
+      <div class="table-wrap" id="tbl-${k}"></div>
     </section>`;
+  }
+  function listRows(key) {
+    const cfg = lists[key]; const st = listState[key];
+    let rows = cfg.rows();
+    if (cfg.tabs) { const t = cfg.tabs.find(t => t.id === st.tab); if (t && t.filter) rows = rows.filter(t.filter); }
+    (cfg.filters || []).forEach(f => { const v = st.f[f.k]; if (v) rows = rows.filter(r => f.test(r, v)); });
+    if (st.q) { const q = st.q.toLowerCase(); rows = rows.filter(r => cfg.text(r).toLowerCase().includes(q)); }
+    return rows;
   }
   function fillList(key) {
     const cfg = lists[key]; const st = listState[key];
     const el = $('#tbl-' + key); if (!cfg || !el) return;
-    let rows = cfg.rows();
-    if (cfg.tabs) { const t = cfg.tabs.find(t => t.id === st.tab); if (t && t.filter) rows = rows.filter(t.filter); }
-    if (st.q) { const q = st.q.toLowerCase(); rows = rows.filter(r => cfg.text(r).toLowerCase().includes(q)); }
-    el.innerHTML = table(cfg.columns, rows, cfg.empty);
-    const cnt = $('#cnt-' + key); if (cnt) cnt.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}`;
+    const rows = listRows(key);
+    let columns = cfg.columns;
+    if (cfg.select) {
+      const ids = rows.map(r => String(cfg.select.id(r)));
+      st.visible = ids;
+      const all = ids.length > 0 && ids.every(id => st.sel.has(id));
+      columns = [{ h: `<input type="checkbox" class="cb" data-selall="${key}" ${all ? 'checked' : ''} aria-label="Select all shown rows">`, c: r => { const id = String(cfg.select.id(r)); return `<input type="checkbox" class="cb" data-sel="${key}" value="${esc(id)}" ${st.sel.has(id) ? 'checked' : ''} aria-label="Select row">`; } }, ...columns];
+    }
+    el.innerHTML = table(columns, rows, cfg.empty, cfg.foot ? cfg.foot(rows) : '');
+    updateListMeta(key, rows.length);
   }
+  function updateListMeta(key, shown) {
+    const st = listState[key]; const cfg = lists[key];
+    if (shown == null) shown = $$(`#tbl-${key} tbody tr`).length;
+    const cnt = $('#cnt-' + key);
+    if (cnt) cnt.textContent = `${shown} record${shown === 1 ? '' : 's'}${cfg.select && st.sel.size ? ` · ${st.sel.size} selected` : ''}`;
+    $('#fclr-' + key)?.classList.toggle('hidden', !Object.values(st.f).some(Boolean));
+    const bar = $('#bulk-' + key);
+    if (bar) { bar.classList.toggle('hidden', !st.sel.size); $('#bulkn-' + key).textContent = `${st.sel.size} selected`; }
+    const sa = $(`[data-selall="${key}"]`);
+    if (sa) { const n = st.visible.filter(id => st.sel.has(id)).length; sa.checked = n > 0 && n === st.visible.length; sa.indeterminate = n > 0 && n < st.visible.length; }
+  }
+  const selectedItems = key => { const cfg = lists[key], st = listState[key]; return cfg.rows().filter(r => st.sel.has(String(cfg.select.id(r)))); };
+  function bulkApply(key) {
+    const cfg = lists[key]; const st = listState[key];
+    const items = selectedItems(key);
+    if (!items.length) { toast('Tick at least one row first.'); return; }
+    const vals = {}; const said = [];
+    for (const f of cfg.select.fields) {
+      const el = $(`[data-bulk="${key}|${f.k}"]`); const raw = (el?.value || '').trim();
+      if (raw === '') continue;
+      if (f.type === 'select') { vals[f.k] = raw; said.push(`${f.label} ${f.options.find(o => String(o[0]) === raw)?.[1] || raw}`); continue; }
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0 || v > 100) { toast(`${f.label} must be a number from 0 to 100.`); el.focus(); return; }
+      vals[f.k] = v; said.push(`${f.label} ${dec(v)}`);
+    }
+    if (!said.length) { toast('Type at least one value to apply.'); return; }
+    const msg = cfg.select.apply ? cfg.select.apply(items, vals) : (items.forEach(it => Object.assign(it, vals)), null);
+    st.sel.clear(); refresh();
+    toast(msg || `${said.join(', ')} set on ${items.length} row${items.length === 1 ? '' : 's'}.`);
+  }
+
+  // Ready-made filters
+  const byName = (a, b) => String(a[1]).localeCompare(String(b[1]));
+  const PROD_FILTERS = {
+    company: ['Company / brand', () => db.companies.map(c => [c.id, c.name]).sort(byName), (p, v) => p.companyId === v],
+    category: ['Category', () => db.categories.map(c => [c.id, c.name]), (p, v) => p.categoryId === v],
+    form: ['Type / form', () => db.forms.map(f => [f.name, f.name]), (p, v) => p.form === v],
+    item: ['Item', () => db.products.map(p => [p.id, p.name]).sort(byName), (p, v) => p.id === v],
+  };
+  // getProds(row) returns the products on that row (one for a stock line, several for a bill)
+  const prodFilters = (getProds, keys = ['company', 'category', 'form', 'item']) => keys.map(k => {
+    const [label, opts, match] = PROD_FILTERS[k];
+    return { k, label, options: opts(), test: (r, v) => getProds(r).some(p => p && match(p, v)) };
+  });
+  const monthLabel = k => parse(k + '-01').toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+  const monthFilter = (dates, getDate) => ({ k: 'month', label: 'Month', options: [...new Set(dates.map(monthKey))].sort().reverse().map(m => [m, monthLabel(m)]), test: (r, v) => monthKey(getDate(r)) === v });
+  const supplierFilter = getSid => ({ k: 'supplier', label: 'Supplier', options: db.suppliers.map(s => [s.id, s.name]).sort(byName), test: (r, v) => getSid(r) === v });
+  const PCT_FIELDS = [{ k: 'cd', label: 'CD%', type: 'pct' }, { k: 'td', label: 'TD%', type: 'pct' }];
+  const GST_FIELD = { k: 'gst', label: 'GST%', type: 'gst' };
 
   const niceMax = v => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); const n = v / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; };
   const axisMoney = v => v >= 1e7 ? '₹' + +(v / 1e7).toFixed(1) + 'Cr' : v >= 1e5 ? '₹' + +(v / 1e5).toFixed(1) + 'L' : v >= 1e3 ? '₹' + +(v / 1e3).toFixed(0) + 'K' : '₹' + Math.round(v);
@@ -396,62 +634,68 @@
 
   VIEWS.overview = () => {
     const sM = sumBy(db.sales, s => monthKey(s.date) === thisM), sP = sumBy(db.sales, s => monthKey(s.date) === prevM);
-    const pM = sumBy(db.grns, g => monthKey(g.date) === thisM), pP = sumBy(db.grns, g => monthKey(g.date) === prevM);
+    const purchDate = p => p.date;
+    const pM = sumBy(db.pinvoices, p => monthKey(purchDate(p)) === thisM), pP = sumBy(db.pinvoices, p => monthKey(purchDate(p)) === prevM);
     const recv = db.sales.reduce((a, s) => a + balance(s), 0);
     const overdue = db.sales.filter(s => saleStatus(s) === 'Overdue');
     const months = lastMonths(6);
     const series = [
       { label: 'Sales', color: 'var(--brand)', values: months.map(m => sumBy(db.sales, s => monthKey(s.date) === m.key)) },
-      { label: 'Purchases', color: 'var(--gold)', values: months.map(m => sumBy(db.grns, g => monthKey(g.date) === m.key)) },
+      { label: 'Purchases', color: 'var(--gold)', values: months.map(m => sumBy(db.pinvoices, p => monthKey(p.date) === m.key)) },
     ];
     const alerts = [];
+    const unver = db.batches.filter(b => !b.verified && avail(b) > 0);
+    if (unver.length) alerts.push(['info', 'spark', `${unver.length} stock lines added from bills need checking`, 'Open Stock Details → Needs check', 'stock']);
     const low = lowStock();
     if (low.length) alerts.push(['warn', 'alert', `${low.length} products below reorder level`, low.slice(0, 3).map(p => p.name).join(', ') + (low.length > 3 ? '…' : ''), 'stock']);
-    const near = db.batches.filter(b => batchStatus(b) === 'Near expiry');
-    if (near.length) alerts.push(['warn', 'clock', `${near.length} batches expiring within 90 days`, `Stock value ${compact(near.reduce((a, b) => a + batchValue(b), 0))}`, 'stock']);
-    const exp = db.batches.filter(b => batchStatus(b) === 'Expired');
+    const near = db.batches.filter(b => avail(b) > 0 && batchStatus(b) === 'Near expiry');
+    if (near.length) alerts.push(['warn', 'clock', `${near.length} batches expiring within 90 days`, `Stock amount ${compact(near.reduce((a, b) => a + batchAmount(b), 0))}`, 'stock']);
+    const exp = db.batches.filter(b => avail(b) > 0 && batchStatus(b) === 'Expired');
     if (exp.length) alerts.push(['bad', 'alert', `${exp.length} expired batches in stock`, 'Return to supplier or write off', 'stock']);
-    if (overdue.length) alerts.push(['bad', 'rupee', `${overdue.length} overdue sales invoices`, `${compact(overdue.reduce((a, s) => a + balance(s), 0))} to collect`, 'sales']);
+    if (overdue.length) alerts.push(['bad', 'rupee', `${overdue.length} overdue sale bills`, `${compact(overdue.reduce((a, s) => a + balance(s), 0))} to collect`, 'sales']);
     const openPo = db.pos.filter(p => p.status === 'Open' || p.status === 'Partially received');
     if (openPo.length) alerts.push(['info', 'truck', `${openPo.length} purchase orders awaiting delivery`, `Worth ${compact(openPo.reduce((a, p) => a + p.total, 0))}`, 'orders']);
     const dueSoon = db.pinvoices.filter(p => piStatus(p) !== 'Paid' && daysFrom(p.due) <= 7);
     if (dueSoon.length) alerts.push(['warn', 'file', `${dueSoon.length} supplier bills due within 7 days`, `${compact(dueSoon.reduce((a, p) => a + balance(p), 0))} payable`, 'invoices']);
+    const lic = [[db.settings.firm.name + ' (your firm)', db.settings.firm], ...db.chemists.map(c => [c.name, c]), ...db.suppliers.map(s => [s.name, s])].filter(([, x]) => soon(x.dlValid) || soon(x.fssaiValid));
+    if (lic.length) alerts.push(['warn', 'file', `${lic.length} drug/FSSAI licence${lic.length === 1 ? '' : 's'} expired or expiring within 60 days`, lic.map(x => x[0]).join(', '), 'chemists']);
+    const newOrders = chemOrders.filter(o => o.status === 'New');
+    if (newOrders.length) alerts.unshift(['info', 'cart', `${newOrders.length} new order${newOrders.length === 1 ? '' : 's'} from chemists`, newOrders.map(o => chem(o.chemistId)?.name || o.chemistId).join(', '), 'chemorders']);
     const pend = db.chemists.filter(c => c.status === 'Pending verification');
     if (pend.length) alerts.push(['info', 'store', `${pend.length} chemist awaiting verification`, pend.map(c => c.name).join(', '), 'chemists']);
 
     const since = addDays(todayIso, -90);
-    const byChem = {};
-    db.sales.filter(s => s.date >= since).forEach(s => { byChem[s.chemistId] = (byChem[s.chemistId] || 0) + s.total; });
-    const top = Object.entries(byChem).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([id, v]) => ({ label: chem(id)?.name || id, value: v }));
-
+    const byParty = {};
+    db.sales.filter(s => s.date >= since).forEach(s => { const k = partyName(s); byParty[k] = (byParty[k] || 0) + s.total; });
+    const top = Object.entries(byParty).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([label, value]) => ({ label, value }));
     const recent = [...db.sales].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)).slice(0, 7);
 
     return `
       <div class="grid g-4">
         ${kpi('Sales this month', compact(sM), trendFoot(sM, sP))}
         ${kpi('Purchases this month', compact(pM), trendFoot(pM, pP))}
-        ${kpi('Stock value (at cost)', compact(stockValue()), `${db.products.filter(p => sellableQty(p.id) > 0).length} products · ${db.batches.length} batches`)}
-        ${kpi('Receivables', compact(recv), overdue.length ? `<span class="down">${overdue.length} overdue</span> invoices` : 'All invoices within terms')}
+        ${kpi('Stock amount (at purchase rate)', compact(stockValue()), `${db.products.filter(p => sellableQty(p.id) > 0).length} products · ${db.batches.filter(b => avail(b) > 0).length} batches`)}
+        ${kpi('Receivables', compact(recv), overdue.length ? `<span class="down">${overdue.length} overdue</span> bills` : 'All bills within terms')}
       </div>
       <div class="grid g-2-1">
         <section class="card"><div class="card-head"><h2 class="card-title">Sales vs purchases</h2><span class="hint">Last 6 months</span><div class="spacer"></div>${legend(series)}</div>
           <div class="card-body">${barChart(months.map(m => m.label), series)}</div></section>
         <section class="card"><div class="card-head"><h2 class="card-title">Needs attention</h2></div>
           <div class="alert-list">${alerts.map(([k, ic, t, s, go]) => `
-            <div class="alert-item"><div class="alert-icon ${k}">${icon(ic)}</div><div style="flex:1;min-width:0"><div class="strong">${esc(t)}</div><div class="small muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s)}</div></div><button type="button" class="btn ghost sm" data-nav="${go}">View</button></div>`).join('') || '<div class="empty">All clear.</div>'}
+            <div class="alert-item"><div class="alert-icon ${k}">${icon(ic)}</div><div style="flex:1;min-width:0"><div class="strong">${esc(t)}</div><div class="small muted ellipsis">${esc(s)}</div></div><button type="button" class="btn ghost sm" data-nav="${go}">View</button></div>`).join('') || '<div class="empty">All clear.</div>'}
           </div></section>
       </div>
       <div class="grid g-2-1">
         <section class="card"><div class="card-head"><h2 class="card-title">Recent sales</h2><div class="spacer"></div><button type="button" class="btn sm" data-nav="sales">All sales</button>${actBtn('new-sale', '', icon('plus') + 'New sale', 'primary')}</div>
           <div class="table-wrap">${table([
-            { h: 'Invoice', c: s => `<span class="strong">${s.no}</span>` },
+            { h: 'Bill', c: s => `<span class="strong">${s.no}</span>` },
             { h: 'Date', c: s => fmtDate(s.date) },
-            { h: 'Chemist', c: s => esc(chem(s.chemistId)?.name) },
+            { h: 'Party', c: s => esc(partyName(s)) },
             { h: 'Amount', r: 1, c: s => money(s.total) },
             { h: 'Status', c: s => pill(saleStatus(s)) },
             { h: '', c: s => actBtn('view-sale', s.no, 'View', 'ghost') },
           ], recent)}</div></section>
-        <section class="card"><div class="card-head"><h2 class="card-title">Top chemists</h2><span class="hint">Last 90 days</span></div>
+        <section class="card"><div class="card-head"><h2 class="card-title">Top customers</h2><span class="hint">Last 90 days</span></div>
           <div class="card-body">${barList(top)}</div></section>
       </div>`;
   };
@@ -467,24 +711,26 @@
         ${kpi('Sales this month', compact(sM), trendFoot(sM, sP))}
         ${kpi('Collected on this month’s bills', compact(cM), sM ? `${Math.round(cM / sM * 100)}% of billed` : '—')}
         ${kpi('Outstanding', compact(out), `<span class="down">${compact(overdueAmt)}</span> overdue`)}
-        ${kpi('Invoices this month', qty(nM), nM ? `Avg ${compact(sM / nM)} per invoice` : '—')}
+        ${kpi('Bills this month', qty(nM), nM ? `Avg ${compact(sM / nM)} per bill` : '—')}
       </div>
       ${useList({
-        key: 'sales', title: 'Sales invoices',
+        key: 'sales', title: 'Sale bills',
         actions: actBtn('new-sale', '', icon('plus') + 'New sale', 'primary'),
-        tabs: [{ id: 'all', label: 'All' }, ...['Paid', 'Partial', 'Due', 'Overdue'].map(s => ({ id: s, label: s, filter: x => saleStatus(x) === s }))],
+        tabs: [{ id: 'all', label: 'All' }, { id: 'chem', label: 'Chemists', filter: s => s.party.type === 'chemist' }, { id: 'ind', label: 'Individuals', filter: s => s.party.type === 'individual' }, ...['Due', 'Overdue'].map(s => ({ id: s, label: s, filter: x => saleStatus(x) === s }))],
+        filters: [...prodFilters(s => s.lines.map(l => prod(l.productId))), { k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (s, v) => s.party.chemistId === v }, { k: 'district', label: 'District', options: [...new Set(db.chemists.map(c => c.district).filter(Boolean))].sort().map(v => [v, v]), test: (s, v) => chem(s.party.chemistId)?.district === v }, monthFilter(db.sales.map(s => s.date), s => s.date)],
         rows: () => [...db.sales].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
-        text: s => [s.no, chem(s.chemistId)?.name, chem(s.chemistId)?.city].join(' '),
+        text: s => [s.no, partyName(s), partyCity(s), ...s.lines.map(l => prod(l.productId)?.name + ' ' + l.batch)].join(' '),
         columns: [
-          { h: 'Invoice', c: s => `<span class="strong">${s.no}</span>` },
+          { h: 'Bill no', c: s => `<span class="strong">${s.no}</span>` },
           { h: 'Date', c: s => fmtDate(s.date) },
-          { h: 'Chemist', c: s => `${esc(chem(s.chemistId)?.name)}<div class="small muted">${esc(chem(s.chemistId)?.city)}</div>` },
+          { h: 'Party', c: s => `${esc(partyName(s))}<div class="small muted">${esc(partyCity(s))}</div>` },
+          { h: 'Type', c: s => pill(s.party.type === 'chemist' ? 'Chemist' : 'Individual') },
           { h: 'Items', r: 1, c: s => s.lines.length },
-          { h: 'Amount', r: 1, c: s => money(s.total) },
+          { h: 'Net amount', r: 1, c: s => money(s.total) },
           { h: 'Received', r: 1, c: s => money(s.paid) },
           { h: 'Balance', r: 1, c: s => `<span class="${balance(s) > 0 ? 'strong' : 'muted'}">${money(balance(s))}</span>` },
           { h: 'Status', c: s => pill(saleStatus(s)) },
-          { h: '', c: s => actBtn('view-sale', s.no, 'View', 'ghost') + (balance(s) > 0.5 ? ' ' + actBtn('pay-sale', s.no, 'Receive') : '') },
+          { h: '', c: s => rowActs(actBtn('view-sale', s.no, 'View', 'ghost'), balance(s) > 0.5 && actBtn('pay-sale', s.no, 'Receive'), actBtn('edit-sale', s.no, 'Edit', 'ghost'), actBtn('del-sale', s.no, 'Delete', 'ghost danger')) },
         ],
       })}`;
   };
@@ -492,13 +738,13 @@
   VIEWS.chemists = () => {
     const active = db.chemists.filter(c => c.status === 'Active').length;
     const pend = db.chemists.filter(c => c.status === 'Pending verification').length;
-    const out = db.sales.reduce((a, s) => a + balance(s), 0);
+    const out = db.chemists.reduce((a, c) => a + chemOutstanding(c.id), 0);
     const newM = db.chemists.filter(c => monthKey(c.joined) === thisM).length;
     return `
       <div class="grid g-4">
         ${kpi('Active chemists', qty(active), `${db.chemists.length} onboarded in total`)}
         ${kpi('Pending verification', qty(pend), 'Check drug licence and GSTIN')}
-        ${kpi('Total receivable', compact(out), 'Across all chemists')}
+        ${kpi('Receivable from chemists', compact(out), 'Across all chemists')}
         ${kpi('Onboarded this month', qty(newM), 'New retail partners')}
       </div>
       ${useList({
@@ -506,46 +752,204 @@
         actions: actBtn('new-chemist', '', icon('plus') + 'Onboard chemist', 'primary'),
         tabs: [{ id: 'all', label: 'All' }, ...['Active', 'Pending verification', 'On hold'].map(s => ({ id: s, label: s === 'Pending verification' ? 'Pending' : s, filter: c => c.status === s }))],
         rows: () => db.chemists,
-        text: c => [c.id, c.name, c.owner, c.city, c.phone, c.dl, c.gstin].join(' '),
+        select: { id: c => c.id, fields: PCT_FIELDS, apply: (items, v) => { items.forEach(c => Object.assign(c, v)); return `Default ${Object.keys(v).map(k => k.toUpperCase() + ' ' + dec(v[k]) + '%').join(', ')} set for ${items.length} chemist(s). Used on their new bills.`; } },
+        text: c => [c.id, c.name, c.owner, addrText(c), c.hospital, c.phone, c.dl1, c.dl2, c.fssai, c.gstin].join(' '),
+        filters: [{ k: 'district', label: 'District', options: [...new Set(db.chemists.map(c => c.district).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => c.district === v }, { k: 'tehsil', label: 'Tehsil', options: [...new Set(db.chemists.map(c => c.tehsil).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => c.tehsil === v }, { k: 'hosp', label: 'Nearby hospital', options: [...new Set(db.chemists.map(hospitalName).filter(Boolean))].sort().map(v => [v, v]), test: (c, v) => hospitalName(c) === v }],
         columns: [
           { h: 'Chemist', c: c => `<span class="strong">${esc(c.name)}</span><div class="small muted">${esc(c.owner)} · ${esc(c.id)}</div>` },
-          { h: 'City', c: c => esc(c.city) },
+          { h: 'Area', c: c => `${esc(c.locality || c.city || '—')}<div class="small muted">${esc([c.tehsil && 'Teh. ' + c.tehsil, c.district].filter(Boolean).join(' · '))}</div>` },
           { h: 'Phone', c: c => esc(c.phone) },
-          { h: 'Drug licence', c: c => `<span class="small">${esc(c.dl)}</span>` },
+          { h: 'Drug licence 1 / 2', c: c => licCell(c) },
           { h: 'GSTIN', c: c => `<span class="small">${esc(c.gstin || '—')}</span>` },
+          { h: 'CD% / TD%', r: 1, c: c => `${dec(c.cd)} / ${dec(c.td)}` },
           { h: 'Credit limit', r: 1, c: c => money(c.creditLimit) },
-          { h: 'Outstanding', r: 1, c: c => { const o = chemOutstanding(c.id); return `<span class="${o > c.creditLimit ? 'strong' : ''}" style="${o > c.creditLimit ? 'color:var(--bad)' : ''}">${money(o)}</span>`; } },
+          { h: 'Outstanding', r: 1, c: c => { const o = chemOutstanding(c.id); return `<span style="${o > c.creditLimit ? 'color:var(--bad);font-weight:600' : ''}">${money(o)}</span>`; } },
           { h: 'Status', c: c => pill(c.status) },
-          { h: '', c: c => actBtn('view-chemist', c.id, 'View', 'ghost') },
+          ...(SERVER ? [{ h: 'Portal login', c: c => portalCell(c) }] : []),
+          { h: '', c: c => rowActs(actBtn('view-chemist', c.id, 'View', 'ghost'), actBtn('edit-chemist', c.id, 'Edit', 'ghost'), actBtn('del-chemist', c.id, 'Delete', 'ghost danger')) },
         ],
       })}`;
   };
 
-  VIEWS.stock = () => {
-    const near = db.batches.filter(b => batchStatus(b) === 'Near expiry');
-    const exp = db.batches.filter(b => batchStatus(b) === 'Expired');
-    const low = lowStock();
+  // Orders placed by chemists on the portal
+  const orderShort = l => l.productId ? Math.max(0, l.qty - sellableQty(l.productId)) : l.qty;
+  VIEWS.chemorders = () => {
+    const open = chemOrders.filter(o => ['New', 'Accepted', 'Arranging'].includes(o.status));
+    const short = open.filter(o => o.lines.some(l => orderShort(l) > 0));
     return `
       <div class="grid g-4">
-        ${kpi('Saleable stock value', compact(stockValue()), 'At purchase rate (PTS)')}
-        ${kpi('Below reorder level', qty(low.length), 'Products to reorder')}
-        ${kpi('Near expiry (≤ 90 days)', compact(near.reduce((a, b) => a + batchValue(b), 0)), `${near.length} batches`)}
-        ${kpi('Expired stock', compact(exp.reduce((a, b) => a + batchValue(b), 0)), `${exp.length} batches`)}
+        ${kpi('New orders', qty(chemOrders.filter(o => o.status === 'New').length), 'Waiting for you to accept')}
+        ${kpi('Open orders', qty(open.length), 'Accepted or being arranged')}
+        ${kpi('Need stock', qty(short.length), 'Open orders with items short or not stocked')}
+        ${kpi('Billed this month', qty(chemOrders.filter(o => o.status === 'Billed' && monthKey(o.date) === thisM).length), 'Orders turned into sale bills')}
       </div>
       ${useList({
-        key: 'stock', title: 'Batch-wise stock',
-        tabs: [{ id: 'all', label: 'All' }, { id: 'near', label: 'Near expiry', filter: b => batchStatus(b) === 'Near expiry' }, { id: 'exp', label: 'Expired', filter: b => batchStatus(b) === 'Expired' }],
-        rows: () => db.batches.filter(b => b.qty > 0).sort((a, b) => a.expiry.localeCompare(b.expiry)),
-        text: b => [prod(b.productId)?.name, prod(b.productId)?.salt, b.batch].join(' '),
+        key: 'chemorders', title: 'Chemist orders',
+        actions: `<button type="button" class="btn sm" data-act="orders-refresh" data-id="">Refresh</button>`,
+        tabs: [{ id: 'open', label: 'Open', filter: o => ['New', 'Accepted', 'Arranging'].includes(o.status) }, ...['New', 'Arranging', 'Billed', 'Rejected', 'Cancelled'].map(s => ({ id: s, label: s, filter: o => o.status === s })), { id: 'all', label: 'All' }],
+        filters: [{ k: 'chemist', label: 'Chemist', options: db.chemists.map(c => [c.id, c.name]).sort(byName), test: (o, v) => o.chemistId === v }, ...prodFilters(o => o.lines.map(l => prod(l.productId)), ['company', 'item'])],
+        rows: () => [...chemOrders].sort((a, b) => b.created.localeCompare(a.created)),
+        text: o => [o.id, chem(o.chemistId)?.name, o.note, ...o.lines.map(l => l.name)].join(' '),
+        empty: chemOrders.length ? 'No orders in this view — try another tab.' : 'No orders yet. Chemists with a portal login can order from their phone or computer.',
         columns: [
-          { h: 'Product', c: b => `<span class="strong">${esc(prod(b.productId)?.name)}</span><div class="small muted">${esc(prod(b.productId)?.pack)}</div>` },
+          { h: 'Order', c: o => `<span class="strong">${esc(o.id)}</span><div class="small muted">${new Date(o.created).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>` },
+          { h: 'Chemist', c: o => `${esc(chem(o.chemistId)?.name || o.chemistId)}<div class="small muted">${esc(chem(o.chemistId)?.city || '')}</div>` },
+          { h: 'Items', c: o => `${o.lines.length}<div class="small muted ellipsis" style="max-width:280px">${esc(o.lines.map(l => `${l.name} × ${l.qty}`).join(', '))}</div>` },
+          { h: 'Stock', c: o => { const n = o.lines.filter(l => orderShort(l) > 0).length; return n ? pill(`${n} short`) : pill('All in stock'); } },
+          { h: 'Note', c: o => `<span class="small">${esc(o.note || '—')}</span>` },
+          { h: 'Status', c: o => pill(o.status) + (o.saleNo ? `<div class="small muted">${esc(o.saleNo)}</div>` : '') },
+          { h: '', c: o => rowActs(actBtn('view-order', o.id, 'View', 'ghost'), ['New', 'Accepted', 'Arranging'].includes(o.status) && actBtn('order-bill', o.id, 'Make bill', 'primary'), o.status === 'New' && actBtn('order-status', o.id + '|Accepted', 'Accept')) },
+        ],
+      })}`;
+  };
+
+  VIEWS.hospitals = () => {
+    const hs = db.hospitals || [];
+    const count = (...t) => hs.filter(h => t.includes(h.type)).length;
+    const linked = db.chemists.filter(c => c.hospitalId || c.hospital).length;
+    return `
+      <div class="grid g-4">
+        ${kpi('Hospitals & health centres', qty(hs.length), `${usedValues('district').filter(d => hs.some(h => h.district === d)).length} districts`)}
+        ${kpi('Medical colleges & big hospitals', qty(count('Medical College', 'Medical University', 'AIIMS', 'Zonal Hospital', 'Regional Hospital', 'District Hospital')), 'Colleges, AIIMS, zonal & regional')}
+        ${kpi('Civil hospitals & CHCs', qty(count('Civil Hospital', 'Sub-Divisional Hospital', 'CHC')), `${count('PHC')} PHCs as well`)}
+        ${kpi('Chemists linked to a hospital', qty(linked), `of ${db.chemists.length} chemists`)}
+      </div>
+      ${useList({
+        key: 'hospitals', title: 'Hospital directory · Himachal Pradesh',
+        actions: `<label class="btn sm">${icon('file')}Import CSV<input type="file" id="hospCsv" accept=".csv,text/csv" hidden></label>${actBtn('hosp-export', '', 'Export CSV', 'ghost')}${actBtn('new-hospital', '', icon('plus') + 'Add hospital', 'primary')}`,
+        tabs: [{ id: 'all', label: 'All' }, { id: 'big', label: 'Colleges & big hospitals', filter: h => hospRank(h.type) <= 5 }, { id: 'civil', label: 'Civil & CHC', filter: h => ['Civil Hospital', 'Sub-Divisional Hospital', 'CHC'].includes(h.type) }, { id: 'phc', label: 'PHC', filter: h => h.type === 'PHC' }, { id: 'near', label: 'With chemists', filter: h => nearChemists(h).length > 0 }],
+        filters: [
+          { k: 'district', label: 'District', options: [...new Set(hs.map(h => h.district).filter(Boolean))].sort().map(v => [v, v]), test: (h, v) => h.district === v },
+          { k: 'tehsil', label: 'Tehsil / block', options: [...new Set(hs.map(h => h.tehsil).filter(Boolean))].sort().map(v => [v, v]), test: (h, v) => h.tehsil === v },
+          { k: 'type', label: 'Type', options: HOSP_TYPES.filter(t => hs.some(h => h.type === t)).map(t => [t, t]), test: (h, v) => h.type === v },
+        ],
+        select: {
+          id: h => h.id,
+          fields: [{ k: 'type', label: 'Type', type: 'select', options: HOSP_TYPES.map(t => [t, t]) }, { k: 'district', label: 'District', type: 'select', options: HP_DISTRICTS.map(d => [d, d]) }],
+          extra: `<button type="button" class="btn sm ghost danger" data-bulkact="hospitals|delete">Delete</button>`,
+          actions: { delete: items => { deleteHospitals(items); return false; } },
+        },
+        rows: () => [...(db.hospitals || [])].sort((a, b) => (a.district || 'zz').localeCompare(b.district || 'zz') || hospSort(a, b)),
+        text: h => [h.name, h.type, h.district, h.tehsil, h.locality, h.pincode, h.phone, h.headName, h.headMobile, h.pharmName, h.pharmMobile].join(' '),
+        empty: 'No hospitals match.',
+        columns: [
+          { h: 'Hospital / health centre', c: h => `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}" class="strong">${esc(h.name)}</a>${h.source && h.source !== 'HPPCB list' ? `<div class="small muted">${esc(h.source)}</div>` : ''}` },
+          { h: 'Type', c: h => pill(h.type) },
+          { h: 'District', c: h => esc(h.district || '—') },
+          { h: 'Tehsil / block', c: h => esc(h.tehsil || '—') },
+          { h: 'Village / locality', c: h => esc(h.locality || '—') },
+          { h: 'PIN', c: h => esc(h.pincode || '—') },
+          { h: 'Head of hospital', c: h => contactHtml(h.headName, h.headMobile) },
+          { h: 'Pharmacist', c: h => contactHtml(h.pharmName, h.pharmMobile) },
+          { h: 'Doctors', r: 1, c: h => { const n = (db.doctors || []).filter(d => d.hospitalId === h.id).length; return n ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${n}</a>` : '<span class="muted">0</span>'; } },
+          { h: 'Chemists near', r: 1, c: h => { const n = nearChemists(h).length; return n ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${n}</a>` : '<span class="muted">0</span>'; } },
+          { h: '', c: h => rowActs(actBtn('edit-hospital', h.id, 'Edit', 'ghost'), actBtn('del-hospital', h.id, 'Delete', 'ghost danger')) },
+        ],
+      })}
+      <div class="small muted">Starting list: PHCs, CHCs, civil, sub-divisional, ESI and ayurvedic hospitals from the HP State Pollution Control Board’s health-care-facility list, with district and block filled from India Post PIN data where it was not printed. Medical colleges, AIIMS, the medical university and zonal/regional hospitals were added from a well-known list — please check them. The list may not have every health centre: add missing ones, or import an official list as CSV (columns: name, type, district, tehsil, locality, pincode, phone).</div>`;
+  };
+
+  const docHosp = d => hospById(d.hospitalId);
+  const docDistrict = d => docHosp(d)?.district || d.district || '';
+  VIEWS.doctors = () => {
+    const ds = db.doctors || [];
+    const spec = [...new Set(ds.map(d => d.specialization).filter(Boolean))];
+    return `
+      <div class="grid g-4">
+        ${kpi('Doctors', qty(ds.length), `${spec.length} specializations`)}
+        ${kpi('Specialists', qty(ds.filter(d => d.specialization && !/^(general|medical officer|mbbs)/i.test(d.specialization)).length), 'Other than general / MO')}
+        ${kpi('Hospitals covered', qty(new Set(ds.map(d => d.hospitalId).filter(Boolean)).size), `of ${(db.hospitals || []).length} in the directory`)}
+        ${kpi('With mobile number', qty(ds.filter(d => d.mobile).length), ds.length ? `${Math.round(ds.filter(d => d.mobile).length / ds.length * 100)}% of doctors` : '—')}
+      </div>
+      ${useList({
+        key: 'doctors', title: 'Doctors & medical officers',
+        actions: `<label class="btn sm">${icon('file')}Import CSV<input type="file" id="docCsv" accept=".csv,text/csv" hidden></label>${actBtn('doc-export', '', 'Export CSV', 'ghost')}${actBtn('new-doctor', '', icon('plus') + 'Add doctor', 'primary')}`,
+        filters: [
+          { k: 'district', label: 'District', options: [...new Set(ds.map(docDistrict).filter(Boolean))].sort().map(v => [v, v]), test: (d, v) => docDistrict(d) === v },
+          { k: 'spec', label: 'Specialization', options: spec.sort().map(v => [v, v]), test: (d, v) => d.specialization === v },
+          { k: 'desig', label: 'Designation', options: [...new Set(ds.map(d => d.designation).filter(Boolean))].sort().map(v => [v, v]), test: (d, v) => d.designation === v },
+          { k: 'hosp', label: 'Hospital', options: [...new Set(ds.map(d => d.hospitalId).filter(Boolean))].map(id => [id, hospById(id)?.name || id]).sort(byName), test: (d, v) => d.hospitalId === v },
+        ],
+        select: {
+          id: d => d.id,
+          fields: [{ k: 'specialization', label: 'Specialization', type: 'select', options: DOC_SPECS.map(v => [v, v]) }, { k: 'designation', label: 'Designation', type: 'select', options: DOC_DESIGS.map(v => [v, v]) }],
+          extra: `<button type="button" class="btn sm ghost danger" data-bulkact="doctors|delete">Delete</button>`,
+          actions: { delete: items => { deleteDoctors(items); return false; } },
+        },
+        rows: () => [...(db.doctors || [])].sort((a, b) => a.name.localeCompare(b.name)),
+        text: d => [d.name, d.designation, d.specialization, d.qualification, d.mobile, d.hospital, docHosp(d)?.name, docDistrict(d), docHosp(d)?.tehsil].join(' '),
+        empty: (db.doctors || []).length ? 'No doctors match.' : 'No doctors yet. Use “Add doctor”, or import a CSV (name, designation, specialization, qualification, mobile, hospital, district).',
+        columns: [
+          { h: 'Doctor', c: d => `<a href="#" data-act="view-doctor" data-id="${esc(d.id)}" class="strong">${esc(d.name)}</a>${d.qualification ? `<div class="small muted">${esc(d.qualification)}</div>` : ''}` },
+          { h: 'Designation', c: d => esc(d.designation || '—') },
+          { h: 'Specialization', c: d => d.specialization ? pill(d.specialization) : '—' },
+          { h: 'Mobile', c: d => telLink(d.mobile) },
+          { h: 'Hospital', c: d => { const h = docHosp(d); return h ? `<a href="#" data-act="view-hospital" data-id="${esc(h.id)}">${esc(h.name)}</a><div class="small muted">${esc(h.type)}</div>` : esc(d.hospital || '—'); } },
+          { h: 'District', c: d => `${esc(docDistrict(d) || '—')}${docHosp(d)?.tehsil ? `<div class="small muted">${esc(docHosp(d).tehsil)}</div>` : ''}` },
+          { h: '', c: d => rowActs(actBtn('edit-doctor', d.id, 'Edit', 'ghost'), actBtn('del-doctor', d.id, 'Delete', 'ghost danger')) },
+        ],
+      })}`;
+  };
+
+  const stockText = b => { const p = prod(b.productId); return [p?.name, company(p?.companyId)?.name, p?.mfg, p?.pack, p?.hsn, b.batch, b.source, sup(b.supplierId)?.name].join(' '); };
+  VIEWS.stock = () => {
+    const live = db.batches.filter(b => avail(b) > 0);
+    const near = live.filter(b => batchStatus(b) === 'Near expiry');
+    const exp = live.filter(b => batchStatus(b) === 'Expired');
+    const unver = live.filter(b => !b.verified);
+    return `
+      <div class="grid g-4">
+        ${kpi('Stock amount (Qty × Rate)', compact(stockValue()), `${live.length} batches in stock`)}
+        ${kpi('Needs checking', qty(unver.length), unver.length ? 'Lines added from uploaded bills' : 'Everything verified')}
+        ${kpi('Near expiry (≤ 90 days)', compact(near.reduce((a, b) => a + batchAmount(b), 0)), `${near.length} batches`)}
+        ${kpi('Expired stock', compact(exp.reduce((a, b) => a + batchAmount(b), 0)), `${exp.length} batches`)}
+      </div>
+      ${useList({
+        key: 'stock', title: 'Stock register',
+        actions: `${unver.length ? actBtn('verify-all', '', 'Mark all checked') : ''}${actBtn('new-batch', '', icon('plus') + 'Add stock', 'primary')}`,
+        tabs: [
+          { id: 'all', label: 'In stock', filter: b => avail(b) > 0 },
+          { id: 'unver', label: 'Needs check', filter: b => !b.verified && avail(b) > 0 },
+          { id: 'near', label: 'Near expiry', filter: b => avail(b) > 0 && batchStatus(b) === 'Near expiry' },
+          { id: 'exp', label: 'Expired', filter: b => avail(b) > 0 && batchStatus(b) === 'Expired' },
+          { id: 'zero', label: 'Sold out', filter: b => avail(b) <= 0 },
+        ],
+        rows: () => [...db.batches].sort((a, b) => (prod(a.productId)?.name || '').localeCompare(prod(b.productId)?.name || '') || a.expiry.localeCompare(b.expiry)),
+        text: stockText,
+        filters: [...prodFilters(b => [prod(b.productId)]), supplierFilter(b => b.supplierId)],
+        select: {
+          id: b => b.id, fields: [...PCT_FIELDS, GST_FIELD],
+          extra: `<button type="button" class="btn sm" data-bulkact="stock|verify">Mark checked</button><button type="button" class="btn sm ghost danger" data-bulkact="stock|delete">Delete</button>`,
+          actions: {
+            verify: items => { items.forEach(b => { b.verified = true; }); return `${items.length} line(s) marked checked.`; },
+            delete: items => {
+              confirmModal(`Delete ${items.length} stock line(s)?`, `This removes ${qty(items.reduce((a, b) => a + avail(b), 0))} units from stock. Bills that used these batches keep their record. This cannot be undone.`, 'Delete lines', () => {
+                const ids = new Set(items.map(b => b.id)); db.batches = db.batches.filter(b => !ids.has(b.id)); listState.stock.sel.clear(); return `${items.length} stock line(s) deleted.`;
+              });
+              return false;
+            },
+          },
+        },
+        foot: rows => rows.length ? `<tfoot><tr><td colspan="9" class="strong">Total</td><td class="r num strong">${qty(rows.reduce((a, b) => a + (b.qty || 0), 0))}</td><td class="r num">${qty(rows.reduce((a, b) => a + (b.free || 0), 0))}</td><td colspan="5"></td><td class="r num strong">${dec(rows.reduce((a, b) => a + batchAmount(b), 0))}</td><td colspan="2"></td></tr></tfoot>` : '',
+        columns: [
+          { h: 'SN', c: (b, i) => `<span class="muted">${i + 1}</span>` },
+          { h: 'Item name', c: b => `<span class="strong">${esc(prod(b.productId)?.name)}</span>${b.source ? `<div class="small muted">${esc(b.source)}</div>` : ''}` },
+          { h: 'Company', c: b => esc(company(prod(b.productId)?.companyId)?.name || '—') },
+          { h: 'MFG name', c: b => esc(prod(b.productId)?.mfg || '—') },
+          { h: 'Pack', c: b => esc(prod(b.productId)?.pack) },
+          { h: 'HSN', c: b => esc(prod(b.productId)?.hsn) },
           { h: 'Batch', c: b => esc(b.batch) },
-          { h: 'Expiry', c: b => fmtMonth(b.expiry) },
-          { h: 'Days left', r: 1, c: b => { const d = expDays(b.expiry); return d < 0 ? `<span style="color:var(--bad)">${d}</span>` : qty(d); } },
+          { h: 'Exp', c: b => { const st = batchStatus(b); return `<span style="${st === 'Expired' ? 'color:var(--bad);font-weight:600' : st === 'Near expiry' ? 'color:var(--warn);font-weight:600' : ''}">${isoToExp(b.expiry)}</span>`; } },
           { h: 'Qty', r: 1, c: b => qty(b.qty) },
-          { h: 'Rate (PTS)', r: 1, c: b => money2(prod(b.productId)?.pts) },
-          { h: 'Value', r: 1, c: b => money(batchValue(b)) },
-          { h: 'Status', c: b => pill(batchStatus(b)) },
+          { h: 'Free', r: 1, c: b => qty(b.free) },
+          { h: 'Rate', r: 1, c: b => dec(b.rate) },
+          { h: 'MRP', r: 1, c: b => dec(b.mrp) },
+          { h: 'CD%', r: 1, c: b => dec(b.cd) },
+          { h: 'TD%', r: 1, c: b => dec(b.td) },
+          { h: 'GST%', r: 1, c: b => dec(b.gst) },
+          { h: 'Amount', r: 1, c: b => dec(batchAmount(b)) },
+          { h: 'Check', c: b => b.verified ? pill('Verified') : pill('Needs check') },
+          { h: '', c: b => rowActs(!b.verified && actBtn('verify-batch', b.id, 'Mark checked'), actBtn('edit-batch', b.id, 'Edit', 'ghost'), actBtn('del-batch', b.id, 'Delete', 'ghost danger')) },
         ],
       })}
       ${useList({
@@ -554,8 +958,7 @@
         text: p => p.name,
         empty: 'Every product is above its reorder level.',
         columns: [
-          { h: 'Product', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.salt)}</div>` },
-          { h: 'Supplier', c: p => esc(sup(p.supplierId)?.name) },
+          { h: 'Product', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(company(p.companyId)?.name || '')}</div>` },
           { h: 'Saleable stock', r: 1, c: p => qty(sellableQty(p.id)) },
           { h: 'Reorder level', r: 1, c: p => qty(p.reorder) },
           { h: 'Suggested qty', r: 1, c: p => qty(p.reorder * 2 - sellableQty(p.id)) },
@@ -564,39 +967,111 @@
       })}`;
   };
 
+  const masterUsage = {
+    companies: id => db.products.filter(p => p.companyId === id).length,
+    categories: id => db.products.filter(p => p.categoryId === id).length,
+    forms: id => { const f = db.forms.find(x => x.id === id); return db.products.filter(p => p.form === f?.name).length; },
+  };
+  const MASTER_LABEL = { companies: ['Companies / brands', 'company'], categories: ['Categories', 'category'], forms: ['Forms (Tablet, Syrup…)', 'form'] };
+  const masterCard = kind => `
+    <section class="card">
+      <div class="card-head"><h2 class="card-title">${MASTER_LABEL[kind][0]}</h2><span class="hint">${db[kind].length}</span><div class="spacer"></div>${actBtn('master-add', kind, icon('plus') + 'Add', 'sm')}</div>
+      <div class="alert-list master-list">${db[kind].map(m => `
+        <div class="alert-item"><div style="flex:1;min-width:0"><span class="strong">${esc(m.name)}</span> <span class="small muted">${masterUsage[kind](m.id)} products</span></div>
+        ${actBtn('master-edit', kind + '|' + m.id, 'Edit', 'ghost')}${actBtn('master-del', kind + '|' + m.id, 'Delete', 'ghost danger')}</div>`).join('') || '<div class="empty">None yet.</div>'}</div>
+    </section>`;
+
   VIEWS.products = () => `
     ${useList({
-      key: 'products', title: 'Product master',
+      key: 'products', title: 'Products',
       actions: actBtn('new-product', '', icon('plus') + 'Add product', 'primary'),
       tabs: [{ id: 'all', label: 'All' }, { id: 'low', label: 'Low stock', filter: p => { const q = sellableQty(p.id); return q > 0 && q < p.reorder; } }, { id: 'out', label: 'Out of stock', filter: p => sellableQty(p.id) <= 0 }],
+      filters: prodFilters(p => [p], ['company', 'category', 'form']),
+      select: {
+        id: p => p.id,
+        fields: [GST_FIELD, { k: 'categoryId', label: 'Category', type: 'select', options: db.categories.map(c => [c.id, c.name]) }, { k: 'form', label: 'Form', type: 'select', options: db.forms.map(f => [f.name, f.name]) }, { k: 'companyId', label: 'Company', type: 'select', options: db.companies.map(c => [c.id, c.name]).sort(byName) }],
+        extra: '<label class="check-line small"><input type="checkbox" id="bulkSyncGst" checked> Also change GST on their stock</label>',
+        apply: (items, v) => {
+          const sync = $('#bulkSyncGst')?.checked;
+          let nb = 0;
+          items.forEach(p => {
+            Object.assign(p, v);
+            if (v.gst != null && sync) db.batches.filter(b => b.productId === p.id && avail(b) > 0).forEach(b => { b.gst = v.gst; nb++; });
+          });
+          return `${items.length} product(s) updated${nb ? ` · GST changed on ${nb} stock line(s)` : ''}.`;
+        },
+      },
       rows: () => [...db.products].sort((a, b) => a.name.localeCompare(b.name)),
-      text: p => [p.id, p.name, p.salt, p.category, sup(p.supplierId)?.name, p.hsn].join(' '),
+      text: p => [p.id, p.name, p.salt, company(p.companyId)?.name, p.mfg, category(p.categoryId)?.name, p.form, p.hsn].join(' '),
       columns: [
-        { h: 'Product', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.salt)} · ${esc(p.id)}</div>` },
-        { h: 'Company', c: p => esc(sup(p.supplierId)?.name) },
-        { h: 'Category', c: p => esc(p.category) },
+        { h: 'Item name', c: p => `<span class="strong">${esc(p.name)}</span><div class="small muted">${esc(p.id)}${p.salt ? ' · ' + esc(p.salt) : ''}</div>` },
+        { h: 'Company', c: p => esc(company(p.companyId)?.name || '—') },
+        { h: 'MFG name', c: p => esc(p.mfg || '—') },
+        { h: 'Category', c: p => esc(category(p.categoryId)?.name || '—') },
+        { h: 'Form', c: p => esc(p.form) },
         { h: 'Pack', c: p => esc(p.pack) },
         { h: 'HSN', c: p => esc(p.hsn) },
-        { h: 'GST', r: 1, c: p => p.gst + '%' },
-        { h: 'MRP', r: 1, c: p => money2(p.mrp) },
-        { h: 'PTR', r: 1, c: p => money2(p.ptr) },
-        { h: 'PTS', r: 1, c: p => money2(p.pts) },
+        { h: 'GST%', r: 1, c: p => dec(p.gst) },
+        { h: 'MRP', r: 1, c: p => dec(p.mrp) },
+        { h: 'Sale rate', r: 1, c: p => dec(p.ptr) },
+        { h: 'Purchase rate', r: 1, c: p => dec(p.pts) },
         { h: 'Stock', r: 1, c: p => qty(sellableQty(p.id)) },
         { h: 'Status', c: p => { const q = sellableQty(p.id); return pill(q <= 0 ? 'Out of stock' : q < p.reorder ? 'Low stock' : 'In stock'); } },
-        { h: '', c: p => actBtn('edit-product', p.id, 'Edit', 'ghost') },
+        { h: '', c: p => rowActs(actBtn('edit-product', p.id, 'Edit', 'ghost'), actBtn('del-product', p.id, 'Delete', 'ghost danger')) },
       ],
-    })}`;
+    })}
+    <div class="grid g-3">${masterCard('companies')}${masterCard('categories')}${masterCard('forms')}</div>`;
+
+  // Every purchased line (from purchase bills, and goods receipts not yet billed), newest first
+  function purchaseLines(sid) {
+    const out = [];
+    db.pinvoices.filter(p => !sid || p.supplierId === sid).forEach(p => piLines(p).forEach((l, i) => out.push({ ...l, key: `${p.no}#${i}`, date: p.date, docNo: p.no, ref: p.supplierInvNo, supplierId: p.supplierId, act: 'view-pi' })));
+    db.grns.filter(g => !g.invoiced && (!sid || g.supplierId === sid)).forEach(g => g.lines.forEach((l, i) => out.push({ ...l, key: `${g.no}#${i}`, date: g.date, docNo: g.no, ref: g.challan, supplierId: g.supplierId, act: 'view-grn' })));
+    return out.sort((a, b) => b.date.localeCompare(a.date) || b.docNo.localeCompare(a.docNo));
+  }
+  const lineAmount = l => calcLine(l).amount;
+  const plineCols = (withSupplier) => [
+    { h: 'Date', c: l => fmtDate(l.date) },
+    { h: 'Bill', c: l => `<a href="#" data-act="${l.act}" data-id="${esc(l.docNo)}" class="strong">${esc(l.docNo)}</a><div class="small muted">${esc(l.ref || '')}</div>` },
+    ...(withSupplier ? [{ h: 'Supplier', c: l => `<a href="#" data-nav="folder/${esc(l.supplierId)}">${esc(sup(l.supplierId)?.name || '—')}</a>` }] : []),
+    { h: 'Item name', c: l => `<span class="strong">${esc(prod(l.productId)?.name || l.name)}</span>` },
+    { h: 'Company', c: l => esc(company(prod(l.productId)?.companyId)?.name || '—') },
+    { h: 'Type', c: l => esc(prod(l.productId)?.form || '') },
+    { h: 'Batch', c: l => esc(l.batch) },
+    { h: 'Exp', c: l => isoToExp(l.expiry) },
+    { h: 'Qty', r: 1, c: l => qty(l.qty) },
+    { h: 'Free', r: 1, c: l => qty(l.free) },
+    { h: 'Rate', r: 1, c: l => dec(l.rate) },
+    { h: 'MRP', r: 1, c: l => dec(l.mrp) },
+    { h: 'CD%', r: 1, c: l => dec(l.cd) },
+    { h: 'GST%', r: 1, c: l => dec(l.gst) },
+    { h: 'Amount', r: 1, c: l => dec(lineAmount(l)) },
+  ];
+  const plineFoot = (span) => rows => rows.length ? `<tfoot><tr><td colspan="${span}" class="strong">Total</td><td class="r num strong">${qty(rows.reduce((a, l) => a + (l.qty || 0), 0))}</td><td class="r num">${qty(rows.reduce((a, l) => a + (l.free || 0), 0))}</td><td colspan="4"></td><td class="r num strong">${dec(rows.reduce((a, l) => a + lineAmount(l), 0))}</td></tr></tfoot>` : '';
+  const supplierDocs = sid => [...db.pinvoices.filter(p => p.supplierId === sid), ...db.grns.filter(g => g.supplierId === sid && !g.invoiced)];
+  function folderCard(s) {
+    const bills = db.pinvoices.filter(p => p.supplierId === s.id);
+    const last = [...bills.map(p => p.date), ...db.grns.filter(g => g.supplierId === s.id).map(g => g.date)].sort().pop();
+    const pay = supPayable(s.id);
+    return `<button type="button" class="folder-card" data-nav="folder/${esc(s.id)}">
+      <div class="folder-ic">${icon('folder')}</div>
+      <div class="folder-main"><div class="strong ellipsis">${esc(s.name)}</div>
+        <div class="small muted">${bills.length} bill${bills.length === 1 ? '' : 's'} · ${last ? 'last ' + fmtDate(last) : 'no purchases yet'}</div>
+        <div class="small"><span class="num strong">${compact(bills.reduce((a, p) => a + p.total, 0))}</span> bought${pay > 0.5 ? ` · <span class="bad-text">${compact(pay)} due</span>` : ''}</div></div>
+    </button>`;
+  }
+  const lastPurchase = sid => [...db.pinvoices.filter(p => p.supplierId === sid), ...db.grns.filter(g => g.supplierId === sid)].map(x => x.date).sort().pop() || '';
 
   VIEWS.purchase = () => {
-    const pM = sumBy(db.grns, g => monthKey(g.date) === thisM), pP = sumBy(db.grns, g => monthKey(g.date) === prevM);
+    const pM = sumBy(db.pinvoices, p => monthKey(p.date) === thisM), pP = sumBy(db.pinvoices, p => monthKey(p.date) === prevM);
     const payable = db.pinvoices.reduce((a, p) => a + balance(p), 0);
     const overdue = db.pinvoices.filter(p => piStatus(p) === 'Overdue');
     const openPo = db.pos.filter(p => p.status === 'Open' || p.status === 'Partially received');
     const awaiting = db.grns.filter(g => !g.invoiced);
     const months = lastMonths(6);
-    const series = [{ label: 'Goods received', color: 'var(--gold)', values: months.map(m => sumBy(db.grns, g => monthKey(g.date) === m.key)) }];
+    const series = [{ label: 'Purchases', color: 'var(--gold)', values: months.map(m => sumBy(db.pinvoices, p => monthKey(p.date) === m.key)) }];
     const since = months[0].key;
-    const bySup = db.suppliers.map(s => ({ label: s.name, value: sumBy(db.grns, g => g.supplierId === s.id && monthKey(g.date) >= since) })).sort((a, b) => b.value - a.value);
+    const bySup = db.suppliers.map(s => ({ label: s.name, value: sumBy(db.pinvoices, p => p.supplierId === s.id && monthKey(p.date) >= since) })).sort((a, b) => b.value - a.value);
     const activity = [
       ...db.pos.map(p => ({ type: 'PO', no: p.no, date: p.date, supplierId: p.supplierId, total: p.total, status: p.status, act: 'view-po' })),
       ...db.grns.map(g => ({ type: 'GRN', no: g.no, date: g.date, supplierId: g.supplierId, total: g.total, status: g.invoiced ? 'Invoiced' : 'Awaiting invoice', act: 'view-grn' })),
@@ -609,15 +1084,26 @@
         ${kpi('Open purchase orders', compact(openPo.reduce((a, p) => a + p.total, 0)), `${openPo.length} orders awaiting delivery`)}
         ${kpi('GRNs awaiting invoice', qty(awaiting.length), `Worth ${compact(awaiting.reduce((a, g) => a + g.total, 0))}`)}
       </div>
+      <section class="card cta-card">
+        <div class="card-body cta">
+          <div class="cta-icon">${icon('spark')}</div>
+          <div style="flex:1;min-width:220px"><div class="card-title">Upload a purchase bill</div><div class="small muted">Photo or PDF of a supplier bill → read into a CSV → check every line → add to stock.</div></div>
+          <button type="button" class="btn primary" data-nav="billentry">${icon('upload')}Upload bill</button>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2 class="card-title">Supplier folders</h2><span class="hint">Every bill is filed under its supplier — open a folder for its bills and item history</span><div class="spacer"></div>${actBtn('new-supplier', '', icon('plus') + 'Add supplier', 'sm')}</div>
+        <div class="card-body"><div class="folder-grid">${[...db.suppliers].sort((a, b) => lastPurchase(b.id).localeCompare(lastPurchase(a.id)) || a.name.localeCompare(b.name)).map(folderCard).join('') || '<div class="muted">No suppliers yet.</div>'}</div></div>
+      </section>
       <div class="grid g-2-1">
-        <section class="card"><div class="card-head"><h2 class="card-title">Monthly purchases</h2><span class="hint">Value of goods received</span></div>
+        <section class="card"><div class="card-head"><h2 class="card-title">Monthly purchases</h2><span class="hint">Purchase bills by date</span></div>
           <div class="card-body">${barChart(months.map(m => m.label), series)}</div></section>
         <section class="card"><div class="card-head"><h2 class="card-title">By supplier</h2><span class="hint">Last 6 months</span></div>
           <div class="card-body">${barList(bySup, 'gold')}</div></section>
       </div>
       <section class="card">
         <div class="card-head"><h2 class="card-title">Recent purchase activity</h2><div class="spacer"></div>
-          <div class="toolbar">${actBtn('new-po', '', icon('plus') + 'Purchase order', 'primary')}${actBtn('new-grn', '', icon('plus') + 'Goods receipt')}${actBtn('new-pi', '', icon('plus') + 'Purchase invoice')}</div></div>
+          <div class="toolbar">${actBtn('new-po', '', icon('plus') + 'Purchase order')}${actBtn('new-grn', '', icon('plus') + 'Goods receipt')}</div></div>
         <div class="table-wrap">${table([
           { h: 'Type', c: a => pill(a.type) },
           { h: 'Number', c: a => `<span class="strong">${a.no}</span>` },
@@ -627,7 +1113,85 @@
           { h: 'Status', c: a => pill(a.status) },
           { h: '', c: a => actBtn(a.act, a.no, 'View', 'ghost') },
         ], activity)}</div>
-      </section>`;
+      </section>
+      ${useList({
+        key: 'plines', title: 'Purchased items',
+        filters: [supplierFilter(l => l.supplierId), ...prodFilters(l => [prod(l.productId)]), monthFilter(purchaseLines().map(l => l.date), l => l.date)],
+        rows: () => purchaseLines(),
+        text: l => [l.docNo, l.ref, sup(l.supplierId)?.name, prod(l.productId)?.name, company(prod(l.productId)?.companyId)?.name, l.batch].join(' '),
+        columns: plineCols(true),
+        foot: plineFoot(8),
+      })}`;
+  };
+
+  // Supplier folder: one supplier's bills and everything bought from them
+  let folderId = '';
+  VIEWS.folder = () => {
+    const s = sup(folderId);
+    const docs = supplierDocs(s.id);
+    const lines = purchaseLines(s.id);
+    const total = db.pinvoices.filter(p => p.supplierId === s.id).reduce((a, p) => a + p.total, 0);
+    const byItem = {};
+    lines.forEach(l => {
+      const k = l.productId; const x = byItem[k] || (byItem[k] = { productId: k, times: 0, qty: 0, free: 0, amount: 0, last: '', lastRate: 0 });
+      x.times++; x.qty += l.qty || 0; x.free += l.free || 0; x.amount += lineAmount(l);
+      if (l.date >= x.last) { x.last = l.date; x.lastRate = l.rate; }
+    });
+    return `
+      <section class="card">
+        <div class="card-head"><button type="button" class="btn sm ghost" data-nav="suppliers">← Suppliers</button><div class="folder-ic sm">${icon('folder')}</div><h2 class="card-title">${esc(s.name)}</h2><span class="hint">${esc(s.id)}</span><div class="spacer"></div>
+          <div class="toolbar">${actBtn('edit-supplier', s.id, 'Edit supplier', 'ghost')}${actBtn('new-po', '', icon('plus') + 'Purchase order')}<button type="button" class="btn sm primary" data-act="upload-for" data-id="${esc(s.id)}">${icon('upload')}Upload bill</button></div></div>
+        <div class="card-body">${detailGrid([['Contact', esc(s.contact || '—')], ['Mobile', esc(s.phone || '—')], ['Address', esc(addrText(s) || '—')], ['Nearby hospital', esc(s.hospital || '—')], ['GSTIN', esc(s.gstin || '—')], ['Drug licence 1', esc(s.dl1 || '—')], ['Drug licence 2', esc(s.dl2 || '—')], ['Drug licence valid upto', licValid(s)], ['FSSAI no.', esc(s.fssai || '—')], ['FSSAI valid upto', fssaiValid(s)], ['Terms', (s.terms ?? 30) + ' days'], ['Licence copies', licDocsBtn('supplier', s.id)]])}</div>
+      </section>
+      <div class="grid g-4">
+        ${kpi('Purchase bills', qty(db.pinvoices.filter(p => p.supplierId === s.id).length), `${db.grns.filter(g => g.supplierId === s.id && !g.invoiced).length} receipts awaiting a bill`)}
+        ${kpi('Total purchased', compact(total), `${Object.keys(byItem).length} different items`)}
+        ${kpi('Payable', compact(supPayable(s.id)), `${db.pinvoices.filter(p => p.supplierId === s.id && piStatus(p) === 'Overdue').length} overdue bills`)}
+        ${kpi('Last purchase', lastPurchase(s.id) ? fmtDate(lastPurchase(s.id)) : '—', lastPurchase(s.id) ? `${-daysFrom(lastPurchase(s.id))} days ago` : 'Nothing bought yet')}
+      </div>
+      ${useList({
+        key: 'fbills', title: 'Bills in this folder',
+        filters: [monthFilter(docs.map(d => d.date), d => d.date)],
+        rows: () => supplierDocs(s.id).sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
+        text: d => [d.no, d.supplierInvNo, d.challan, ...(d.files || []), ...piLines(d).map(l => prod(l.productId)?.name)].join(' '),
+        empty: 'No bills from this supplier yet. Use “Upload bill” to add one.',
+        columns: [
+          { h: 'Date', c: d => fmtDate(d.date) },
+          { h: 'Our no.', c: d => `<span class="strong">${esc(d.no)}</span>` },
+          { h: 'Supplier bill', c: d => esc(d.supplierInvNo || (d.challan ? 'Challan ' + d.challan : '—')) },
+          { h: 'Source', c: d => d.supplierInvNo != null ? pill(d.grnNo ? 'GRN' : (d.source || 'Manual')) : pill('Awaiting invoice') },
+          { h: 'Items', c: d => { const ls = piLines(d); return `${ls.length}<div class="small muted ellipsis" style="max-width:260px">${esc(ls.map(l => prod(l.productId)?.name).join(', '))}</div>`; } },
+          { h: 'Amount', r: 1, c: d => money(d.total) },
+          { h: 'Balance', r: 1, c: d => d.supplierInvNo != null ? money(balance(d)) : '—' },
+          { h: 'Status', c: d => d.supplierInvNo != null ? pill(piStatus(d)) : '' },
+          { h: 'Bill copy', c: d => d.supplierInvNo == null ? '' : d.files?.length ? `<button type="button" class="btn sm ghost" data-act="open-bill-file" data-id="${esc(d.no)}">${icon('clip')}${d.files.length} file${d.files.length === 1 ? '' : 's'}</button>` : `<button type="button" class="btn sm ghost" data-act="attach-bill" data-id="${esc(d.no)}">${icon('clip')}Attach</button>` },
+          { h: '', c: d => d.supplierInvNo != null ? rowActs(actBtn('view-pi', d.no, 'View', 'ghost'), balance(d) > 0.5 && actBtn('pay-pi', d.no, 'Pay')) : rowActs(actBtn('view-grn', d.no, 'View', 'ghost'), actBtn('invoice-grn', d.no, 'Add invoice')) },
+        ],
+      })}
+      ${useList({
+        key: 'fitems', title: 'Item purchase history',
+        filters: [...prodFilters(l => [prod(l.productId)]), monthFilter(lines.map(l => l.date), l => l.date)],
+        rows: () => purchaseLines(s.id),
+        text: l => [l.docNo, l.ref, prod(l.productId)?.name, company(prod(l.productId)?.companyId)?.name, l.batch].join(' '),
+        empty: 'Nothing bought from this supplier yet.',
+        columns: plineCols(false),
+        foot: plineFoot(7),
+      })}
+      ${useList({
+        key: 'fsum', title: 'Items bought — summary',
+        rows: () => Object.values(byItem).sort((a, b) => b.amount - a.amount),
+        text: x => [prod(x.productId)?.name, company(prod(x.productId)?.companyId)?.name].join(' '),
+        empty: 'Nothing bought from this supplier yet.',
+        columns: [
+          { h: 'Item name', c: x => `<span class="strong">${esc(prod(x.productId)?.name || '—')}</span><div class="small muted">${esc(company(prod(x.productId)?.companyId)?.name || '')}</div>` },
+          { h: 'Times bought', r: 1, c: x => x.times },
+          { h: 'Total qty', r: 1, c: x => qty(x.qty) },
+          { h: 'Free', r: 1, c: x => qty(x.free) },
+          { h: 'Last rate', r: 1, c: x => dec(x.lastRate) },
+          { h: 'Last bought', c: x => fmtDate(x.last) },
+          { h: 'Amount', r: 1, c: x => dec(x.amount) },
+        ],
+      })}`;
   };
 
   VIEWS.suppliers = () => {
@@ -636,17 +1200,19 @@
       key: 'suppliers', title: 'Suppliers',
       actions: actBtn('new-supplier', '', icon('plus') + 'Add supplier', 'primary'),
       rows: () => db.suppliers,
-      text: s => [s.id, s.name, s.contact, s.city, s.gstin, s.dl, s.phone].join(' '),
+      text: s => [s.id, s.name, s.contact, addrText(s), s.gstin, s.dl1, s.dl2, s.fssai, s.phone].join(' '),
       columns: [
-        { h: 'Supplier', c: s => `<span class="strong">${esc(s.name)}</span><div class="small muted">${esc(s.contact)} · ${esc(s.id)}</div>` },
-        { h: 'City', c: s => esc(s.city) },
-        { h: 'Phone', c: s => esc(s.phone) },
-        { h: 'GSTIN', c: s => `<span class="small">${esc(s.gstin)}</span>` },
-        { h: 'Drug licence', c: s => `<span class="small">${esc(s.dl)}</span>` },
+        { h: 'Supplier', c: s => `<a href="#" data-nav="folder/${esc(s.id)}" class="folder-link">${icon('folder')}<span class="strong">${esc(s.name)}</span></a><div class="small muted">${esc(s.contact || '—')} · ${esc(s.id)}</div>` },
+        { h: 'Bills', r: 1, c: s => db.pinvoices.filter(p => p.supplierId === s.id).length },
+        { h: 'Last purchase', c: s => lastPurchase(s.id) ? fmtDate(lastPurchase(s.id)) : '—' },
+        { h: 'Area', c: s => `${esc(s.locality || s.city || '—')}<div class="small muted">${esc(s.district || '')}</div>` },
+        { h: 'Phone', c: s => esc(s.phone || '—') },
+        { h: 'GSTIN', c: s => `<span class="small">${esc(s.gstin || '—')}</span>` },
+        { h: 'Drug licence 1 / 2', c: s => licCell(s) },
         { h: 'Terms', r: 1, c: s => s.terms + ' days' },
-        { h: 'Purchases (6 mo)', r: 1, c: s => money(sumBy(db.grns, g => g.supplierId === s.id && monthKey(g.date) >= since)) },
+        { h: 'Purchases (6 mo)', r: 1, c: s => money(sumBy(db.pinvoices, p => p.supplierId === s.id && monthKey(p.date) >= since)) },
         { h: 'Payable', r: 1, c: s => money(supPayable(s.id)) },
-        { h: '', c: s => actBtn('view-supplier', s.id, 'View', 'ghost') },
+        { h: '', c: s => rowActs(`<button type="button" class="btn sm" data-nav="folder/${esc(s.id)}">${icon('folder')}Open folder</button>`, actBtn('edit-supplier', s.id, 'Edit', 'ghost'), actBtn('del-supplier', s.id, 'Delete', 'ghost danger')) },
       ],
     });
   };
@@ -665,7 +1231,7 @@
       { h: 'Value', r: 1, c: p => money(p.total) },
       { h: 'Expected', c: p => fmtDate(p.expected) },
       { h: 'Status', c: p => pill(p.status) },
-      { h: '', c: p => actBtn('view-po', p.no, 'View', 'ghost') + ((p.status === 'Open' || p.status === 'Partially received') ? ' ' + actBtn('receive-po', p.no, 'Receive') : '') },
+      { h: '', c: p => { const open = p.status === 'Open' || p.status === 'Partially received'; const hasGrn = db.grns.some(g => g.poNo === p.no); return rowActs(actBtn('view-po', p.no, 'View', 'ghost'), open && actBtn('receive-po', p.no, 'Receive'), p.status === 'Open' && !hasGrn && actBtn('edit-po', p.no, 'Edit', 'ghost'), !hasGrn && actBtn('del-po', p.no, 'Delete', 'ghost danger')); } },
     ],
   });
 
@@ -681,10 +1247,10 @@
       { h: 'PO', c: g => esc(g.poNo) },
       { h: 'Supplier', c: g => esc(sup(g.supplierId)?.name) },
       { h: 'Challan', c: g => esc(g.challan || '—') },
-      { h: 'Qty received', r: 1, c: g => qty(g.lines.reduce((a, l) => a + l.qty, 0)) },
+      { h: 'Qty + free', r: 1, c: g => qty(g.lines.reduce((a, l) => a + l.qty + (l.free || 0), 0)) },
       { h: 'Value', r: 1, c: g => money(g.total) },
       { h: 'Invoice', c: g => g.invoiced ? pill('Invoiced') + ` <span class="small muted">${esc(g.invoiced)}</span>` : pill('Awaiting invoice') },
-      { h: '', c: g => actBtn('view-grn', g.no, 'View', 'ghost') + (!g.invoiced ? ' ' + actBtn('invoice-grn', g.no, 'Add invoice') : '') },
+      { h: '', c: g => rowActs(actBtn('view-grn', g.no, 'View', 'ghost'), !g.invoiced && actBtn('invoice-grn', g.no, 'Add invoice'), !g.invoiced && actBtn('del-grn', g.no, 'Delete', 'ghost danger')) },
     ],
   });
 
@@ -702,37 +1268,381 @@
       </div>
       ${useList({
         key: 'invoices', title: 'Purchase invoices',
-        actions: actBtn('new-pi', '', icon('plus') + 'New purchase invoice', 'primary'),
+        actions: `<button type="button" class="btn sm" data-nav="billentry">${icon('upload')}Upload bill</button>${actBtn('new-pi', '', icon('plus') + 'Invoice for a GRN', 'primary')}`,
         tabs: [{ id: 'all', label: 'All' }, { id: 'unpaid', label: 'Unpaid', filter: p => piStatus(p) !== 'Paid' }, { id: 'Overdue', label: 'Overdue', filter: p => piStatus(p) === 'Overdue' }, { id: 'Paid', label: 'Paid', filter: p => piStatus(p) === 'Paid' }],
+        filters: [supplierFilter(p => p.supplierId), ...prodFilters(p => piLines(p).map(l => prod(l.productId)), ['company', 'form', 'item']), monthFilter(db.pinvoices.map(p => p.date), p => p.date)],
         rows: () => [...db.pinvoices].sort((a, b) => b.date.localeCompare(a.date) || b.no.localeCompare(a.no)),
         text: p => [p.no, p.supplierInvNo, p.grnNo, sup(p.supplierId)?.name].join(' '),
         columns: [
           { h: 'Invoice', c: p => `<span class="strong">${p.no}</span><div class="small muted">Supplier bill ${esc(p.supplierInvNo)}</div>` },
           { h: 'Date', c: p => fmtDate(p.date) },
-          { h: 'Supplier', c: p => esc(sup(p.supplierId)?.name) },
-          { h: 'GRN', c: p => esc(p.grnNo) },
+          { h: 'Supplier', c: p => `<a href="#" data-nav="folder/${esc(p.supplierId)}">${esc(sup(p.supplierId)?.name)}</a>` },
+          { h: 'Source', c: p => (p.grnNo ? esc(p.grnNo) : pill(p.source || 'Manual')) + (p.files?.length ? ` <span class="muted ic-inline" title="Bill copy saved">${icon('clip')}</span>` : '') },
           { h: 'Amount', r: 1, c: p => money(p.total) },
           { h: 'Paid', r: 1, c: p => money(p.paid) },
           { h: 'Balance', r: 1, c: p => `<span class="${balance(p) > 0 ? 'strong' : 'muted'}">${money(balance(p))}</span>` },
           { h: 'Due date', c: p => fmtDate(p.due) },
           { h: 'Status', c: p => pill(piStatus(p)) },
-          { h: '', c: p => actBtn('view-pi', p.no, 'View', 'ghost') + (balance(p) > 0.5 ? ' ' + actBtn('pay-pi', p.no, 'Pay') : '') },
+          { h: '', c: p => rowActs(actBtn('view-pi', p.no, 'View', 'ghost'), balance(p) > 0.5 && actBtn('pay-pi', p.no, 'Pay'), actBtn('edit-pi', p.no, 'Edit', 'ghost'), actBtn('del-pi', p.no, 'Delete', 'ghost danger')) },
         ],
       })}`;
   };
+
+  // ---------- Bill upload / entry (purchase) ----------
+  // entry = { source, files:[names], supplierId, supplierName, gstin, billNo, date, lines:[...], printed:{...}, csv }
+  let entry = null;
+  let uploadFor = ''; // supplier chosen from a supplier folder's "Upload bill"
+  const withUploadFor = e => { if (uploadFor && sup(uploadFor)) e.supplierId = uploadFor; uploadFor = ''; return e; };
+  let entryBusy = false;
+  let pendingFiles = [];
+  const ENTRY_COLS = [
+    ['name', 'Item name', 'text', 210], ['company', 'Company', 'text', 110], ['mfg', 'MFG name', 'text', 90], ['pack', 'Pack', 'text', 80],
+    ['hsn', 'HSN', 'text', 90], ['batch', 'Batch', 'text', 120], ['exp', 'Exp (MM/YY)', 'text', 76], ['qty', 'Qty', 'num', 64], ['free', 'Free', 'num', 56],
+    ['rate', 'Rate', 'num', 84], ['mrp', 'MRP', 'num', 84], ['cd', 'CD%', 'num', 56], ['td', 'TD%', 'num', 56], ['gst', 'GST%', 'num', 56], ['amount', 'Amount (bill)', 'num', 92],
+  ];
+  const CSV_HEAD = ['ITEM NAME', 'COMPANY', 'MFG NAME', 'PACK', 'HSN', 'BATCH', 'EXP', 'QTY', 'FREE', 'RATE', 'MRP', 'CD%', 'TD%', 'GST%', 'AMOUNT'];
+  const blankLine = () => ({ name: '', company: '', mfg: '', pack: '', hsn: '', batch: '', exp: '', qty: 0, free: 0, rate: 0, mrp: 0, cd: 0, td: 0, gst: 12, amount: 0 });
+  const newEntry = (source, extra = {}) => ({ source, files: [], supplierId: '', supplierName: '', gstin: '', billNo: '', date: todayIso, lines: [], printed: null, ...extra });
+
+  function checkLine(l) {
+    const msgs = []; let level = 'ok';
+    const bad = m => { msgs.push(m); level = 'bad'; };
+    const warn = m => { msgs.push(m); if (level !== 'bad') level = 'warn'; };
+    if (!String(l.name).trim()) bad('Item name missing');
+    if (!String(l.batch).trim()) bad('Batch missing');
+    const ex = expToIso(l.exp);
+    if (!ex) bad('Expiry must be MM/YY'); else if (expDays(ex) < 0) warn('Already expired'); else if (expDays(ex) <= 90) warn('Expires within 90 days');
+    if (num(l.qty) + num(l.free) <= 0) bad('Qty is 0');
+    if (num(l.qty) > 0 && num(l.rate) <= 0) bad('Rate missing');
+    if (num(l.mrp) > 0 && num(l.rate) > num(l.mrp)) warn('Rate is above MRP');
+    if (![0, 5, 12, 18, 28].includes(num(l.gst))) warn(`GST ${l.gst}% is unusual`);
+    if (l.hsn && !/^\d{4,8}$/.test(String(l.hsn).trim())) warn('HSN should be 4–8 digits');
+    const calc = round2(num(l.qty) * num(l.rate));
+    if (num(l.amount) > 0 && Math.abs(calc - num(l.amount)) > Math.max(1, calc * 0.01)) warn(`Qty × Rate = ${dec(calc)}, bill says ${dec(l.amount)}`);
+    const p = findProductByName(l.name);
+    const info = p ? 'Existing product' : (String(l.name).trim() ? 'New product will be created' : '');
+    if (p) { const b = db.batches.find(x => x.productId === p.id && norm(x.batch) === norm(l.batch)); if (b) msgs.push('Adds to existing batch'); }
+    return { level, msgs, info };
+  }
+  const levelPill = lv => pill(lv === 'ok' ? 'OK' : lv === 'warn' ? 'Check' : 'Error');
+  const lineCheckHtml = l => { const c = checkLine(l); return `${levelPill(c.level)}<div class="small muted check-msg">${esc([c.info, ...c.msgs].filter(Boolean).join(' · '))}</div>`; };
+
+  function entrySummary() {
+    const checks = entry.lines.map(checkLine);
+    const t = billCalc(entry.lines);
+    const errors = checks.filter(c => c.level === 'bad').length, warns = checks.filter(c => c.level === 'warn').length;
+    const printed = entry.printed;
+    const cmp = (label, calc, pr) => pr ? `<div>${label} <b class="num">${dec(calc)}</b> <span class="small ${Math.abs(calc - pr) <= Math.max(1, pr * 0.005) ? 'ok-text' : 'bad-text'}">bill ${dec(pr)}</span></div>` : `<div>${label} <b class="num">${dec(calc)}</b></div>`;
+    return `<div class="entry-summary">
+      <div class="checks"><span>${pill('OK')} ${checks.length - errors - warns}</span><span>${pill('Check')} ${warns}</span><span>${pill('Error')} ${errors}</span></div>
+      <div class="totals wrap">
+        ${cmp('Gross', t.gross, printed?.gross)}
+        ${cmp('Less CD', t.cd, printed?.cd)}
+        <div>Less TD <b class="num">${dec(t.td)}</b></div>
+        ${cmp('CGST', t.cgst, printed?.cgst)}
+        ${cmp('SGST', t.sgst, printed?.sgst)}
+        <div class="grand">Net ${money2(t.total)}${printed?.net ? ` <span class="small ${Math.abs(t.total - printed.net) <= 2 ? 'ok-text' : 'bad-text'}">bill ${dec(printed.net)}</span>` : ''}</div>
+      </div></div>`;
+  }
+
+  VIEWS.billentry = () => {
+    const hasKey = !!getApiKey();
+    const upload = `
+      <section class="card">
+        <div class="card-head"><h2 class="card-title">1 · Upload the bill</h2><span class="hint">Photo (JPG, PNG, WEBP) or PDF · several pages allowed</span></div>
+        <div class="card-body">
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="billFiles" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden>
+            <div class="dz-icon">${icon('upload')}</div>
+            <div class="strong">Drop bill pages here or click to choose</div>
+            <div class="small muted" id="fileList">${pendingFiles.length ? pendingFiles.map(f => esc(f.name)).join(', ') : 'No file chosen'}</div>
+            ${uploadFor && sup(uploadFor) ? `<div class="small">${icon('folder')} Will be filed under <b>${esc(sup(uploadFor).name)}</b></div>` : ''}
+          </label>
+          <div class="toolbar" style="margin-top:14px">
+            <button type="button" class="btn primary" data-act="entry-ai" ${entryBusy ? 'disabled' : ''}>${icon('spark')}${entryBusy ? 'Reading bill…' : 'Read bill with AI'}</button>
+            <label class="btn">${icon('file')}Import CSV<input type="file" id="csvFile" accept=".csv,text/csv" hidden></label>
+            ${actBtn('entry-manual', '', icon('plus') + 'Enter manually')}
+            ${actBtn('entry-template', '', 'CSV template', 'ghost')}
+          </div>
+          <div class="small muted" style="margin-top:10px">${hasKey
+            ? 'AI reading uses your Anthropic API key saved in Settings on this computer. The bill is sent to Anthropic to be read.'
+            : `AI reading needs an Anthropic API key. <a href="#" data-act="open-settings" data-id="">Add it in Settings</a>. You can still import a CSV or type the bill in.`}</div>
+          ${entryBusy ? '<div class="progress"><div></div></div>' : ''}
+        </div>
+      </section>`;
+    if (!entry) return upload + `<section class="card"><div class="empty">Upload a bill, import a CSV, or choose “Enter manually” to start.</div></section>`;
+
+    const supOpts = [['', entry.supplierName ? `New supplier: ${entry.supplierName}` : '— New supplier —'], ...db.suppliers.map(s => [s.id, s.name])];
+    const details = `
+      <section class="card">
+        <div class="card-head"><h2 class="card-title">2 · Bill details</h2>${pill(entry.source)}${entry.files.length ? `<span class="hint">${esc(entry.files.join(', '))}</span>` : ''}<div class="spacer"></div>${actBtn('entry-clear', '', 'Discard', 'ghost danger')}</div>
+        <div class="card-body"><div class="form-grid g4">
+          <div class="field"><label>Supplier *</label><select data-eh="supplierId">${supOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === entry.supplierId ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="field ${entry.supplierId ? 'hidden' : ''}" id="newSupName"><label>New supplier name *</label><input data-eh="supplierName" value="${esc(entry.supplierName)}"></div>
+          <div class="field ${entry.supplierId ? 'hidden' : ''}" id="newSupGst"><label>Supplier GSTIN</label><input data-eh="gstin" value="${esc(entry.gstin)}" style="text-transform:uppercase"></div>
+          <div class="field"><label>Supplier bill no. *</label><input data-eh="billNo" value="${esc(entry.billNo)}"></div>
+          <div class="field"><label>Bill date *</label><input type="date" data-eh="date" value="${esc(entry.date)}" max="${todayIso}"></div>
+        </div>
+        <div class="toolbar" style="margin-top:14px">
+          <label class="btn sm">${icon('clip')}Attach bill copy<input type="file" id="entryAttach" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden></label>
+          <span class="small muted" id="entryFilesNote">${(entry.fileObjs || []).length ? `Will be filed in the supplier’s folder: ${esc(entry.fileObjs.map(f => f.name).join(', '))}` : 'Optional — the bill photo/PDF is kept in the supplier’s folder on this computer.'}</span>
+        </div></div>
+      </section>`;
+
+    const grid = `
+      <section class="card">
+        <div class="card-head"><h2 class="card-title">3 · Check every line</h2><span class="hint">${entry.lines.length} lines · edit any cell</span><div class="spacer"></div>
+          <div class="toolbar">${actBtn('entry-csv', '', 'Download CSV', 'ghost')}${actBtn('entry-add-row', '', icon('plus') + 'Add row')}</div></div>
+        <div class="bulk-bar" id="entryBulk">
+          <span class="bulk-n" id="eSelN">${entrySelText()}</span>
+          <label class="bf"><span>CD%</span><input id="ebCd" inputmode="decimal" placeholder="—"></label>
+          <label class="bf"><span>TD%</span><input id="ebTd" inputmode="decimal" placeholder="—"></label>
+          <label class="bf"><span>GST%</span><input id="ebGst" inputmode="decimal" placeholder="—" list="dl-gst"></label>
+          ${actBtn('entry-bulk', '', 'Apply', 'primary')}
+          ${actBtn('entry-del-sel', '', 'Delete ticked', 'ghost danger')}
+          <span class="small muted bulk-hint">Tick rows to give them the same discount or GST. With nothing ticked, the value goes on every row.</span>
+        </div>
+        <div class="table-wrap"><table class="entry-grid">
+          <thead><tr><th><input type="checkbox" class="cb" data-eselall ${entry.lines.length && entry.lines.every(l => l.sel) ? 'checked' : ''} aria-label="Tick all rows"></th><th>SN</th>${ENTRY_COLS.map(([, h, t]) => `<th class="${t === 'num' ? 'r' : ''}">${h}</th>`).join('')}<th class="r">Qty × Rate</th><th>Check</th><th></th></tr></thead>
+          <tbody id="entryBody">${entry.lines.map((l, i) => entryRow(l, i)).join('')}</tbody>
+        </table></div>
+        <div class="card-body" id="entrySummary">${entrySummary()}</div>
+        <div class="card-foot">
+          <div class="small muted">New products are created automatically. Stock added here is marked “Needs check” until you confirm it in Stock Details.</div>
+          <button type="button" class="btn gold" data-act="entry-commit">${icon('check')}Add to stock &amp; save bill</button>
+        </div>
+      </section>`;
+    return upload + details + grid;
+  };
+  function entryRow(l, i) {
+    const c = checkLine(l);
+    return `<tr data-row="${i}" class="lv-${c.level}"><td><input type="checkbox" class="cb" data-esel="${i}" ${l.sel ? 'checked' : ''} aria-label="Tick row ${i + 1}"></td><td class="muted">${i + 1}</td>${ENTRY_COLS.map(([k, , t, w]) =>
+      `<td><input data-e="${i}|${k}" value="${esc(t === 'num' ? (l[k] || l[k] === 0 ? l[k] : '') : l[k])}" ${t === 'num' ? 'inputmode="decimal" class="r"' : ''} style="width:${w}px" ${k === 'name' ? 'list="dl-products"' : k === 'company' ? 'list="dl-companies"' : ''}></td>`).join('')}
+      <td class="r num" data-calc>${dec(num(l.qty) * num(l.rate))}</td>
+      <td data-check style="min-width:150px">${lineCheckHtml(l)}</td>
+      <td>${actBtn('entry-del-row', i, '✕', 'ghost danger')}</td></tr>`;
+  }
+  function entrySelText() {
+    const n = entry ? entry.lines.filter(l => l.sel).length : 0;
+    return n ? `${n} row${n === 1 ? '' : 's'} ticked` : 'All rows';
+  }
+  function refreshEntryRow(i) {
+    const tr = $(`#entryBody tr[data-row="${i}"]`); if (!tr) return;
+    const l = entry.lines[i]; const c = checkLine(l);
+    tr.className = 'lv-' + c.level;
+    $('[data-calc]', tr).textContent = dec(num(l.qty) * num(l.rate));
+    $('[data-check]', tr).innerHTML = lineCheckHtml(l);
+    $('#entrySummary').innerHTML = entrySummary();
+  }
+
+  const csvCell = v => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const linesToCsv = lines => [CSV_HEAD.join(','), ...lines.map(l => ENTRY_COLS.map(([k]) => csvCell(l[k])).join(','))].join('\r\n');
+  function parseCsv(text) {
+    const rows = []; let row = [], cell = '', q = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+      else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+      else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    return rows.filter(r => r.some(c => c.trim()));
+  }
+  function csvToLines(text) {
+    const rows = parseCsv(text.replace(/^﻿/, ''));
+    if (!rows.length) return [];
+    const head = rows[0].map(h => norm(h).replace(/[^A-Z%]/g, ''));
+    const want = { ITEMNAME: 'name', ITEM: 'name', PRODUCT: 'name', COMPANY: 'company', MFGNAME: 'mfg', MFG: 'mfg', PACK: 'pack', HSN: 'hsn', BATCH: 'batch', EXP: 'exp', EXPIRY: 'exp', QTY: 'qty', QUANTITY: 'qty', FREE: 'free', RATE: 'rate', MRP: 'mrp', 'CD%': 'cd', CD: 'cd', 'TD%': 'td', TD: 'td', 'GST%': 'gst', GST: 'gst', AMOUNT: 'amount' };
+    const map = head.map(h => want[h] || null);
+    if (!map.includes('name')) throw new Error('The CSV needs an “ITEM NAME” column. Download the template to see the layout.');
+    return rows.slice(1).map(r => {
+      const l = blankLine();
+      map.forEach((k, i) => { if (!k) return; const v = (r[i] ?? '').trim(); l[k] = ['qty', 'free', 'rate', 'mrp', 'cd', 'td', 'gst', 'amount'].includes(k) ? num(v) : v; });
+      return l;
+    }).filter(l => l.name);
+  }
+  function downloadText(name, text, type = 'text/csv') {
+    const blob = new Blob([text], { type: type + ';charset=utf-8' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  // ----- Bill copies (photos/PDFs) kept in this browser's IndexedDB, keyed by purchase invoice number -----
+  const billStore = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('pharmaSuite.billFiles', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('bills');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => { dbp = null; rej(r.error); };
+    }));
+    const run = async (mode, fn) => {
+      const d = await open();
+      return new Promise((res, rej) => {
+        const t = d.transaction('bills', mode); const req = fn(t.objectStore('bills'));
+        t.oncomplete = () => res(req.result); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+      });
+    };
+    return {
+      put: (k, files) => run('readwrite', s => s.put(files.map(f => ({ name: f.name, type: f.type, blob: f })), k)),
+      get: k => run('readonly', s => s.get(k)),
+      del: k => run('readwrite', s => s.delete(k)),
+      clear: () => run('readwrite', s => s.clear()),
+    };
+  })();
+  // Keep document files under `key`; their names are listed on holder[prop]
+  function fileDocs(key, holder, prop, files) {
+    if (!files || !files.length) return;
+    holder[prop] = [...(holder[prop] || []), ...files.map(f => f.name)];
+    billStore.get(key).catch(() => null)
+      .then(old => billStore.put(key, [...(old || []).map(o => new File([o.blob], o.name, { type: o.type })), ...files]))
+      .catch(() => { holder[prop] = (holder[prop] || []).filter(n => !files.some(f => f.name === n)); save(); toast('The file could not be saved in this browser (storage blocked or full).'); render(); });
+  }
+  const fileBillCopies = (pi, files) => fileDocs(pi.no, pi, 'files', files);
+
+  // ----- AI bill reading (Claude API, called from the browser with the user's own key) -----
+  const strS = { type: 'string' }, numS = { type: 'number' };
+  const ITEM_KEYS = ['item_name', 'company', 'mfg_name', 'pack', 'hsn', 'batch', 'expiry', 'qty', 'free', 'rate', 'mrp', 'cd_pct', 'td_pct', 'gst_pct', 'amount'];
+  const BILL_SCHEMA = {
+    type: 'object', additionalProperties: false,
+    required: ['seller_name', 'seller_gstin', 'buyer_name', 'bill_no', 'bill_date', 'items', 'totals'],
+    properties: {
+      seller_name: strS, seller_gstin: strS, buyer_name: strS, bill_no: strS,
+      bill_date: { type: 'string', description: 'YYYY-MM-DD, or empty if not printed' },
+      items: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false, required: ITEM_KEYS,
+          properties: {
+            item_name: strS, company: strS, mfg_name: strS, pack: strS, hsn: strS, batch: strS,
+            expiry: { type: 'string', description: 'MM/YY' },
+            qty: numS, free: numS, rate: numS, mrp: numS, cd_pct: numS, td_pct: numS, gst_pct: numS, amount: numS,
+          },
+        },
+      },
+      totals: {
+        type: 'object', additionalProperties: false, required: ['gross', 'cd', 'td', 'cgst', 'sgst', 'igst', 'net'],
+        properties: { gross: numS, cd: numS, td: numS, cgst: numS, sgst: numS, igst: numS, net: numS },
+      },
+    },
+  };
+  const EXTRACT_PROMPT = `These pages are one bill (tax invoice) from an Indian pharmaceutical distributor. Read the header and every item row.
+
+- seller_name and seller_gstin: the firm that issued the bill (usually at the top left). buyer_name: the party it is billed to (after "M/S").
+- items: one entry per printed item row, in the printed order, across all pages. Keep rows that repeat an item with a different batch as separate entries. Leave out total and tax-summary rows.
+- Copy item names, company, MFG name, pack, HSN and batch exactly as printed. Write expiry as MM/YY.
+- Write numbers as plain numbers, without currency symbols or thousands separators. CD% and TD% are discount percentages.
+- If a value is not printed, use an empty string for text and 0 for numbers. Do not calculate or guess values that are not printed.
+- totals: the printed gross amount, CD and TD discount amounts (as positive numbers), CGST, SGST, IGST and net amount; 0 where not printed.
+- bill_date: the bill date as YYYY-MM-DD. Indian bills print dates as DD/MM/YY.`;
+
+  let sdkPromise = null;
+  const loadSdk = () => sdkPromise || (sdkPromise = import(SDK_URL).then(m => m.default || m.Anthropic).catch(e => { sdkPromise = null; throw e; }));
+  const fileToBase64 = f => new Promise((res, rej) => {
+    const rd = new FileReader();
+    rd.onload = () => res(String(rd.result).split(',')[1]);
+    rd.onerror = () => rej(rd.error);
+    rd.readAsDataURL(f);
+  });
+  const LIC_SCHEMA = {
+    type: 'object', additionalProperties: false,
+    required: ['firm_name', 'proprietor_name', 'address', 'locality', 'sub_tehsil', 'tehsil', 'district', 'pincode', 'phone', 'gstin', 'dl_form_20', 'dl_form_21', 'valid_upto', 'fssai_no', 'fssai_valid_upto'],
+    properties: {
+      firm_name: strS, proprietor_name: strS, phone: strS, gstin: strS,
+      address: { type: 'string', description: 'House/shop number, street and landmark only' },
+      locality: { type: 'string', description: 'Village, town or locality' }, sub_tehsil: strS, tehsil: strS, district: strS,
+      pincode: { type: 'string', description: '6-digit PIN code' },
+      fssai_no: { type: 'string', description: '14-digit FSSAI licence or registration number' },
+      fssai_valid_upto: { type: 'string', description: 'YYYY-MM-DD, or empty if not printed' },
+      dl_form_20: { type: 'string', description: 'Licence number on Form 20 / 20B (or 20C / 20F)' },
+      dl_form_21: { type: 'string', description: 'Licence number on Form 21 / 21B (or 21C)' },
+      valid_upto: { type: 'string', description: 'YYYY-MM-DD, or empty if not printed' },
+    },
+  };
+  const LIC_PROMPT = `These files are documents of an Indian pharmacy business: drug licence certificates (Form 20 and 21 for retail, 20B and 21B for wholesale, or similar forms), an FSSAI food licence or registration certificate, and/or a GST registration certificate. Read them and return the business details.
+
+- firm_name: the name of the firm or shop. On a GST certificate prefer the trade name; otherwise use the legal name.
+- proprietor_name: the proprietor, partner or registered pharmacist.
+- Split the premises address: address = house/shop number, street and landmark; locality = village, town or locality; sub_tehsil, tehsil and district as printed ("Teh." means tehsil, "Distt." means district); pincode = the 6-digit PIN.
+- gstin: the 15-character GSTIN.
+- dl_form_20: the licence number granted on Form 20 or 20B (or 20C / 20F). dl_form_21: the licence number on Form 21 or 21B (or 21C). If one certificate shows both numbers, split them.
+- fssai_no: the 14-digit FSSAI licence or registration number. fssai_valid_upto: its validity date as YYYY-MM-DD.
+- valid_upto: the drug licence validity or expiry date as YYYY-MM-DD. If the licences show different dates, use the earliest. Indian documents print dates as DD/MM/YYYY.
+- phone: a phone number, if printed.
+
+Copy text exactly as printed. Use an empty string for anything that is not printed. Do not guess.`;
+
+  const extractBill = files => callClaudeJson(files, EXTRACT_PROMPT, BILL_SCHEMA, 32000);
+  const extractLicence = files => callClaudeJson(files, LIC_PROMPT, LIC_SCHEMA, 4000);
+  async function callClaudeJson(files, prompt, schema, maxTokens) {
+    const Anthropic = await loadSdk();
+    const client = new Anthropic({ apiKey: getApiKey(), dangerouslyAllowBrowser: true });
+    const content = [];
+    for (const f of files) {
+      const data = await fileToBase64(f);
+      if (f.type === 'application/pdf') content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } });
+      else content.push({ type: 'image', source: { type: 'base64', media_type: f.type, data } });
+    }
+    content.push({ type: 'text', text: prompt });
+    try {
+      const stream = client.beta.messages.stream({
+        model: 'claude-opus-5-5',
+        max_tokens: maxTokens,
+        betas: ['server-side-fallback-2026-07-01'],
+        fallbacks: 'default',
+        output_config: { format: { type: 'json_schema', schema } },
+        messages: [{ role: 'user', content }],
+      });
+      const msg = await stream.finalMessage();
+      if (msg.stop_reason === 'refusal') throw new Error('The AI declined to read this file. Try a clearer photo, or enter the details by hand.');
+      if (msg.stop_reason === 'max_tokens') throw new Error('The file is too long to read in one go. Upload fewer pages at a time.');
+      const text = msg.content.filter(b => b.type === 'text').map(b => b.text).join('');
+      return JSON.parse(text);
+    } catch (err) {
+      if (err instanceof Anthropic.AuthenticationError) throw new Error('The API key was not accepted. Check it in Settings.');
+      if (err instanceof Anthropic.PermissionDeniedError) throw new Error('This API key is not allowed to use the model. Check your Anthropic account.');
+      if (err instanceof Anthropic.RateLimitError) throw new Error('Too many requests right now. Wait a minute and try again.');
+      if (err instanceof Anthropic.BadRequestError) throw new Error('The file could not be read: ' + (err.message || 'bad request') + '. Try a JPG/PNG photo or a smaller PDF.');
+      if (err instanceof Anthropic.APIConnectionError) throw new Error('Could not reach Anthropic. Check your internet connection.');
+      if (err instanceof Anthropic.APIError) throw new Error('Anthropic returned an error: ' + (err.message || err.status));
+      if (err instanceof SyntaxError) throw new Error('The AI reply could not be understood. Please try again.');
+      throw err;
+    }
+  }
+  function entryFromExtraction(x, files) {
+    const e = newEntry('AI', { files: files.map(f => f.name), fileObjs: files.slice() });
+    e.supplierName = (x.seller_name || '').trim();
+    e.gstin = (x.seller_gstin || '').trim().toUpperCase();
+    const match = db.suppliers.find(s => (e.gstin && norm(s.gstin) === norm(e.gstin)) || norm(s.name) === norm(e.supplierName));
+    e.supplierId = match ? match.id : '';
+    e.billNo = (x.bill_no || '').trim();
+    e.date = /^\d{4}-\d{2}-\d{2}$/.test(x.bill_date || '') && x.bill_date <= todayIso ? x.bill_date : todayIso;
+    e.lines = (x.items || []).map(it => ({
+      name: it.item_name || '', company: it.company || '', mfg: it.mfg_name || '', pack: it.pack || '', hsn: String(it.hsn || ''), batch: it.batch || '',
+      exp: it.expiry || '', qty: num(it.qty), free: num(it.free), rate: num(it.rate), mrp: num(it.mrp), cd: num(it.cd_pct), td: num(it.td_pct), gst: num(it.gst_pct), amount: num(it.amount),
+    }));
+    e.printed = x.totals || null;
+    e.csv = linesToCsv(e.lines);
+    return e;
+  }
 
   let searchQuery = '';
   VIEWS.search = () => {
     const q = searchQuery.toLowerCase();
     const has = (...v) => v.join(' ').toLowerCase().includes(q);
     const sections = [
-      ['Products', db.products.filter(p => has(p.name, p.salt, p.id)), p => `${esc(p.name)} <span class="muted small">${esc(p.salt)}</span>`, 'edit-product', p => p.id],
+      ['Products', db.products.filter(p => has(p.name, p.salt, p.id, company(p.companyId)?.name)), p => `${esc(p.name)} <span class="muted small">${esc(company(p.companyId)?.name || '')}</span>`, 'edit-product', p => p.id],
+      ['Stock batches', db.batches.filter(b => avail(b) > 0 && has(b.batch, prod(b.productId)?.name)), b => `${esc(prod(b.productId)?.name)} <span class="muted small">Batch ${esc(b.batch)} · ${isoToExp(b.expiry)} · ${qty(avail(b))}</span>`, 'edit-batch', b => b.id],
       ['Chemists', db.chemists.filter(c => has(c.name, c.owner, c.city, c.id, c.gstin)), c => `${esc(c.name)} <span class="muted small">${esc(c.city)}</span>`, 'view-chemist', c => c.id],
       ['Suppliers', db.suppliers.filter(s => has(s.name, s.contact, s.city, s.id)), s => esc(s.name), 'view-supplier', s => s.id],
-      ['Sales invoices', db.sales.filter(s => has(s.no, chem(s.chemistId)?.name)).slice(0, 20), s => `${s.no} <span class="muted small">${esc(chem(s.chemistId)?.name)} · ${money(s.total)}</span>`, 'view-sale', s => s.no],
+      ['Doctors', (db.doctors || []).filter(d => has(d.name, d.specialization, d.designation, d.mobile, docHosp(d)?.name || d.hospital)).slice(0, 20), d => `${esc(d.name)} <span class="muted small">${esc([d.specialization, docHosp(d)?.name || d.hospital].filter(Boolean).join(' · '))}</span>`, 'view-doctor', d => d.id],
+      ['Hospitals', (db.hospitals || []).filter(h => has(h.name, h.locality, h.tehsil, h.headName, h.pharmName)).slice(0, 20), h => `${esc(h.name)} <span class="muted small">${esc([h.tehsil, h.district].filter(Boolean).join(', '))}</span>`, 'view-hospital', h => h.id],
+      ['Sale bills', db.sales.filter(s => has(s.no, partyName(s))).slice(0, 20), s => `${s.no} <span class="muted small">${esc(partyName(s))} · ${money(s.total)}</span>`, 'view-sale', s => s.no],
       ['Purchase orders', db.pos.filter(p => has(p.no, sup(p.supplierId)?.name)), p => `${p.no} <span class="muted small">${esc(sup(p.supplierId)?.name)}</span>`, 'view-po', p => p.no],
       ['Goods receipts', db.grns.filter(g => has(g.no, g.poNo, g.challan)), g => `${g.no} <span class="muted small">${esc(g.poNo)}</span>`, 'view-grn', g => g.no],
-      ['Purchase invoices', db.pinvoices.filter(p => has(p.no, p.supplierInvNo)), p => `${p.no} <span class="muted small">${esc(p.supplierInvNo)}</span>`, 'view-pi', p => p.no],
+      ['Purchase invoices', db.pinvoices.filter(p => has(p.no, p.supplierInvNo, sup(p.supplierId)?.name)), p => `${p.no} <span class="muted small">${esc(p.supplierInvNo)}</span>`, 'view-pi', p => p.no],
     ].filter(s => s[1].length);
     if (!sections.length) return `<section class="card"><div class="empty">Nothing matches “${esc(searchQuery)}”.</div></section>`;
     return `<div class="grid g-2">${sections.map(([t, rows, label, act, id]) => `
@@ -742,15 +1652,25 @@
 
   // ---------- Render ----------
   let route = 'overview';
+  function renderDatalists() {
+    $('#datalists').innerHTML = `<datalist id="dl-products">${db.products.map(p => `<option value="${esc(p.name)}">`).join('')}</datalist>
+      <datalist id="dl-companies">${db.companies.map(c => `<option value="${esc(c.name)}">`).join('')}</datalist>
+      <datalist id="dl-gst">${[0, 5, 12, 18, 28].map(g => `<option value="${g}">`).join('')}</datalist>`;
+  }
   function render() {
-    const hash = location.hash.replace('#', '');
-    route = VIEWS[hash] && hash !== 'search' ? hash : 'overview';
+    const hash = decodeURIComponent(location.hash.replace('#', ''));
+    if (hash.startsWith('folder/') && sup(hash.slice(7))) {
+      const id = hash.slice(7);
+      if (id !== folderId) ['fbills', 'fitems', 'fsum'].forEach(k => delete listState[k]);
+      folderId = id; route = 'folder';
+    } else route = VIEWS[hash] && !['search', 'folder'].includes(hash) ? hash : 'overview';
     const r = searchQuery.length >= 2 ? 'search' : route;
-    renderNav(r === 'search' ? '' : route);
-    const item = NAV.flatMap(g => g.items).find(i => i[0] === r);
+    renderNav(r === 'search' ? '' : r === 'folder' ? 'suppliers' : route);
+    renderDatalists();
+    const item = r === 'folder' ? ['folder', `Supplier folder · ${sup(folderId).name}`] : NAV.flatMap(g => g.items).find(i => i[0] === r);
     $('#pageTitle').textContent = r === 'search' ? `Search: “${searchQuery}”` : item[1];
     $('#pageSub').textContent = `${SUBTITLES[r]} · ${TODAY.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}`;
-    document.title = `${r === 'search' ? 'Search' : item[1]} · Pharma Suite`;
+    document.title = `${r === 'search' ? 'Search' : item[1]} · ${db.settings.firm.name || 'Pharma Suite'}`;
     Object.keys(lists).forEach(k => delete lists[k]);
     $('#content').innerHTML = VIEWS[r]();
     Object.keys(lists).forEach(fillList);
@@ -758,31 +1678,41 @@
   const refresh = () => { save(); render(); };
 
   // ---------- Modal ----------
-  let modalSubmit = null;
-  function openModal({ title, body, submitLabel = 'Save', onSubmit, wide = false, extraFoot = '' }) {
+  let modalSubmit = null, modalCancel = null;
+  function openModal({ title, body, submitLabel = 'Save', onSubmit, onCancel, size = '', extraFoot = '' }) {
     $('#modalTitle').textContent = title;
     $('#modalBody').innerHTML = `<form id="mform" novalidate>${body}</form>`;
-    $('.modal').style.maxWidth = wide ? '920px' : '720px';
+    $('.modal').className = 'modal ' + size;
     $('#modalFoot').innerHTML = `${extraFoot}<button type="button" class="btn" data-close>${onSubmit ? 'Cancel' : 'Close'}</button>${onSubmit ? `<button type="button" class="btn primary" data-submit>${submitLabel}</button>` : ''}`;
-    modalSubmit = onSubmit || null;
+    modalSubmit = onSubmit || null; modalCancel = onCancel || null; licPending = [];
+    if ($('#hospResults')) refreshHospitalSelect();
     $('#modalBack').classList.add('open');
-    const first = $('#mform input:not([readonly]), #mform select');
+    const first = $('#mform input:not([readonly]):not([type=hidden]), #mform select');
     if (first) setTimeout(() => first.focus(), 30);
   }
-  function closeModal() { $('#modalBack').classList.remove('open'); modalSubmit = null; }
+  function closeModal(cancelled = true) {
+    if (!$('#modalBack').classList.contains('open')) return;
+    $('#modalBack').classList.remove('open');
+    const c = modalCancel; modalSubmit = null; modalCancel = null;
+    if (cancelled && c) c();
+  }
   function submitModal() {
     const form = $('#mform');
     if (!form.checkValidity()) { form.reportValidity(); return; }
     const data = Object.fromEntries(new FormData(form).entries());
     const result = modalSubmit && modalSubmit(data, form);
     if (result === false) return;
-    closeModal(); refresh();
+    closeModal(false); refresh();
     if (typeof result === 'string') toast(result);
+  }
+  function confirmModal(title, text, label, onYes) {
+    openModal({ title, body: `<p style="margin:0">${text}</p>`, submitLabel: label, size: 'sm', onSubmit: onYes });
+    $('#modalFoot [data-submit]').classList.add('danger-solid');
   }
   let toastTimer;
   function toast(msg) {
     const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3800);
   }
 
   const field = (label, name, { type = 'text', value = '', required = false, full = false, attrs = '', options = null } = {}) => `
@@ -791,321 +1721,1264 @@
       ? `<select id="f-${name}" name="${name}" ${required ? 'required' : ''} ${attrs}>${options.map(o => { const [v, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(l)}</option>`; }).join('')}</select>`
       : `<input id="f-${name}" name="${name}" type="${type}" value="${esc(value)}" ${required ? 'required' : ''} ${attrs}>`}
     </div>`;
-  const GSTIN_RE = '[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]';
+  const numAttrs = (step = '0.01') => `min="0" step="${step}" inputmode="decimal"`;
+  const GSTIN_RE = '[0-9]{2}[A-Za-z]{5}[0-9]{4}[A-Za-z][1-9A-Za-z][Zz][0-9A-Za-z]';
   const detailGrid = pairs => `<div class="detail-grid">${pairs.map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>`;
-  const totalsBlock = d => `<div class="totals"><div>Subtotal <b class="num">${money2(d.sub)}</b></div><div>GST <b class="num">${money2(d.gst)}</b></div><div class="grand">Total <span class="num">${money2(d.total)}</span></div></div>`;
   const miniTable = (cols, rows) => `<div class="lines"><div class="table-wrap">${table(cols, rows)}</div></div>`;
+  const GST_OPTS = [[0, '0%'], [5, '5%'], [12, '12%'], [18, '18%'], [28, '28%']];
 
-  // Line editor (sales and purchase orders)
-  function lineRow(mode, l = {}) {
-    const opts = [...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''}>${esc(p.name)} — ${esc(p.pack)}</option>`).join('');
+  // ---------- Address (district first, then tehsil, sub-tehsil, village/locality) ----------
+  const HP_DISTRICTS = ['Bilaspur', 'Chamba', 'Hamirpur', 'Kangra', 'Kinnaur', 'Kullu', 'Lahaul and Spiti', 'Mandi', 'Shimla', 'Sirmaur', 'Solan', 'Una'];
+  const addrHolders = () => [db.settings.firm, ...db.chemists, ...db.suppliers];
+  const placeCity = x => x.locality || x.tehsil || x.district || '';
+  const addrText = x => {
+    if (!x) return '';
+    const parts = [x.address, x.locality, x.subTehsil && `Sub-Teh. ${x.subTehsil}`, x.tehsil && `Teh. ${x.tehsil}`, x.district && `Distt. ${x.district}`].filter(Boolean);
+    if (!x.district && !x.tehsil && !x.locality && x.city && !String(x.address || '').includes(x.city)) parts.push(x.city);
+    return parts.join(', ') + (x.pincode ? ` - ${x.pincode}` : '');
+  };
+  // Tehsil / locality suggestions come from your own records and from the hospital directory
+  const usedValues = (key, district) => [...new Set([...addrHolders(), ...(key === 'tehsil' || key === 'locality' || key === 'district' ? (db.hospitals || []) : [])]
+    .filter(h => !district || h.district === district).map(h => h[key]).filter(Boolean))].sort();
+
+  // ---------- Hospital directory ----------
+  const HOSP_TYPES = ['Medical College', 'Medical University', 'AIIMS', 'Zonal Hospital', 'Regional Hospital', 'District Hospital', 'Civil Hospital', 'Sub-Divisional Hospital', 'CHC', 'PHC', 'ESI', 'Ayurvedic Hospital', 'Other Govt Hospital', 'Private Hospital', 'Other'];
+  const hospRank = t => { const i = HOSP_TYPES.indexOf(t); return i < 0 ? 99 : i; };
+  const hospById = id => (db.hospitals || []).find(h => h.id === id);
+  const hospSort = (a, b) => hospRank(a.type) - hospRank(b.type) || a.name.localeCompare(b.name);
+  const hospitalName = x => (x?.hospitalId && hospById(x.hospitalId)?.name) || x?.hospital || '';
+  const seedHospitals = () => (window.HP_HOSPITALS?.rows || []).map(r => Object.fromEntries(window.HP_HOSPITALS.keys.map((k, i) => [k, r[i]])));
+  const nearChemists = h => db.chemists.filter(c => c.hospitalId === h.id || (!c.hospitalId && c.hospital && norm(c.hospital) === norm(h.name)));
+  // Options for the "Nearby hospital" dropdown: the chosen tehsil first, then the rest of the district
+  function hospitalOptions(district, tehsil, selId) {
+    const opt = (h) => `<option value="${esc(h.id)}" ${h.id === selId ? 'selected' : ''}>${esc(h.name)}${h.locality && !norm(h.name).includes(norm(h.locality)) ? ' — ' + esc(h.locality) : ''} (${esc(h.type)})</option>`;
+    if (!district) {
+      const sel = hospById(selId);
+      return `<option value="">— choose the district first —</option>${sel ? opt(sel) : ''}<option value="__other" ${selId === '__other' ? 'selected' : ''}>+ Hospital not in the list…</option>`;
+    }
+    const hs = (db.hospitals || []).filter(h => norm(h.district) === norm(district)).sort(hospSort);
+    const near = tehsil ? hs.filter(h => norm(h.tehsil) === norm(tehsil)) : [];
+    const rest = hs.filter(h => !near.includes(h));
+    const sel = hospById(selId);
+    const outside = sel && !hs.includes(sel) ? `<optgroup label="Other district${sel.district ? ': ' + esc(sel.district) : ''}">${opt(sel)}</optgroup>` : '';
+    return `<option value="">— None —</option>${outside}
+      ${near.length ? `<optgroup label="In ${esc(tehsil)} (${near.length})">${near.map(opt).join('')}</optgroup>` : ''}
+      ${rest.length ? `<optgroup label="${near.length ? 'Elsewhere in ' : ''}${esc(district)} district (${rest.length})">${rest.map(opt).join('')}</optgroup>` : ''}
+      <option value="__other" ${selId === '__other' ? 'selected' : ''}>+ Hospital not in the list…</option>`;
+  }
+  // Hospital picker: a search box and a visible list of hospitals. With no search, it lists the chosen
+  // district (that tehsil first), or the whole directory by district; typing searches all of Himachal.
+  const hospSearchBox = (mode, label) => `<div class="field full hosp-search" data-area="${mode}">
+      <label for="hospSearch">${label}</label>
+      <div class="hosp-picked" id="hospPicked"></div>
+      <div class="hosp-panel">
+        <div class="hosp-search-wrap">${icon('search')}<input id="hospSearch" autocomplete="off" placeholder="Search by hospital name, village, tehsil or district — e.g. Ghumarwin, CHC Bharari, IGMC"></div>
+        <div class="hosp-list-head"><span class="small muted" id="hospHint"></span><span class="spacer"></span>
+          <button type="button" class="btn sm ghost" data-hosp-none>No hospital</button>
+          <button type="button" class="btn sm ghost" data-hosp-other>+ Not in the list</button></div>
+        <div class="hosp-results" id="hospResults" role="listbox" aria-label="Hospitals"></div>
+      </div>
+    </div>`;
+  function hospSearchResults(q, limit = 80) {
+    const words = norm(q).split(' ').filter(Boolean);
+    if (!words.length) return [];
+    const dist = norm($('#mform [name="district"]')?.value);
+    const hay = h => norm([h.name, h.locality, h.tehsil, h.district, h.type, h.pincode].join(' '));
+    return (db.hospitals || []).filter(h => { const t = hay(h); return words.every(w => t.includes(w)); })
+      .sort((a, b) => (norm(b.district) === dist) - (norm(a.district) === dist) || norm(b.name).startsWith(words[0]) - norm(a.name).startsWith(words[0]) || hospSort(a, b))
+      .slice(0, limit);
+  }
+  const hospRow = (h, selId) => `<button type="button" class="hosp-res ${h.id === selId ? 'selected' : ''}" data-pick-hosp="${esc(h.id)}" role="option" aria-selected="${h.id === selId}">
+      <span class="hosp-res-main"><span class="strong">${esc(h.name)}</span> ${pill(h.type)}</span>
+      <span class="small muted">${esc([h.locality && !norm(h.name).includes(norm(h.locality)) ? h.locality : '', h.tehsil && 'Teh. ' + h.tehsil, h.district].filter(Boolean).join(' · '))}</span>
+    </button>`;
+  function renderHospResults() {
+    const box = $('#hospResults'); if (!box) return;
+    const q = ($('#hospSearch')?.value || '').trim();
+    const dist = $('#mform [name="district"]')?.value.trim() || '';
+    const teh = $('#mform [name="tehsil"]')?.value.trim() || '';
+    const selId = $('#f-hospitalId')?.value || '';
+    const groups = []; let hint;
+    if (q) {
+      const rs = hospSearchResults(q);
+      groups.push(['', rs]);
+      hint = rs.length ? `${rs.length}${rs.length === 80 ? '+' : ''} match${rs.length === 1 ? '' : 'es'} for “${q}” across Himachal` : `No hospital matches “${q}”.`;
+    } else if (dist) {
+      const hs = (db.hospitals || []).filter(h => norm(h.district) === norm(dist)).sort(hospSort);
+      const near = teh ? hs.filter(h => norm(h.tehsil) === norm(teh)) : [];
+      if (near.length) groups.push([`In ${teh} (${near.length})`, near]);
+      groups.push([`${near.length ? 'Elsewhere in' : 'All of'} ${dist} district (${hs.length - near.length})`, hs.filter(h => !near.includes(h))]);
+      hint = hs.length ? `${hs.length} hospitals in ${dist}${near.length ? `, ${teh} first` : ''}` : `No hospitals saved for “${dist}” yet.`;
+    } else {
+      const by = {};
+      (db.hospitals || []).forEach(h => { (by[h.district || 'District not known'] = by[h.district || 'District not known'] || []).push(h); });
+      Object.keys(by).sort((a, b) => (a === 'District not known') - (b === 'District not known') || a.localeCompare(b)).forEach(d => groups.push([`${d} (${by[d].length})`, by[d].sort(hospSort)]));
+      hint = `All ${(db.hospitals || []).length} hospitals — fill in the district above to see only that area`;
+    }
+    box.innerHTML = groups.filter(([, rows]) => rows.length).map(([title, rows]) => `${title ? `<div class="hosp-grp">${esc(title)}</div>` : ''}${rows.map(h => hospRow(h, selId)).join('')}`).join('')
+      || '<div class="small muted hosp-more">Nothing to show. Choose “+ Not in the list” to add the hospital.</div>';
+    const first = box.querySelector('.hosp-res.selected') || box.querySelector('.hosp-res');
+    if (first) first.classList.add('active');
+    $('#hospHint').textContent = hint;
+    const sel = hospById(selId);
+    $('#hospPicked').innerHTML = selId === '__other'
+      ? `<span class="pill warn">Not in the list</span> <span class="small">Type its name below — it will be added to the directory.</span>`
+      : sel ? `${icon('tick')}<span><span class="strong">${esc(sel.name)}</span> <span class="small muted">${esc([sel.type, sel.tehsil && 'Teh. ' + sel.tehsil, sel.district].filter(Boolean).join(' · '))}</span></span>`
+      : '<span class="small muted">No hospital selected — pick one from the list below.</span>';
+    $('#hospPicked').classList.toggle('on', !!sel);
+  }
+  function pickHospital(id) {
+    const h = hospById(id); if (!h) return;
+    const always = $('.hosp-search')?.dataset.area === 'always';
+    const dEl = $('#mform [name="district"]'), tEl = $('#mform [name="tehsil"]');
+    if (dEl && h.district && (always || !dEl.value.trim())) { dEl.value = h.district; refreshAddrLists(); }
+    if (tEl && h.tehsil && (always || !tEl.value.trim())) tEl.value = h.tehsil;
+    const sel = $('#f-hospitalId');
+    sel.innerHTML = hospitalOptions(dEl?.value.trim(), tEl?.value.trim(), h.id);
+    sel.value = h.id;
+    $('#hospSearch').value = '';
+    refreshHospitalSelect();
+    $('#hospResults .hosp-res.selected')?.scrollIntoView({ block: 'nearest' });
+  }
+  function setHospitalChoice(v) {
+    const sel = $('#f-hospitalId'); if (!sel) return;
+    sel.value = v;
+    $('#hospOtherWrap')?.classList.toggle('hidden', v !== '__other');
+    renderHospResults();
+    if (v === '__other') $('#f-hospitalOther')?.focus();
+  }
+  function refreshHospitalSelect() {
+    const sel = $('#f-hospitalId'); if (!sel) return;
+    const keep = sel.value;
+    sel.innerHTML = hospitalOptions($('#mform [name="district"]')?.value.trim(), $('#mform [name="tehsil"]')?.value.trim(), keep);
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+    $('#hospOtherWrap')?.classList.toggle('hidden', sel.value !== '__other');
+    renderHospResults();
+  }
+  const dlOptions = vals => vals.map(v => `<option value="${esc(v)}">`).join('');
+  const addrFields = (x, required) => `
+    <div class="field full form-sec">Address</div>
+    ${field('District', 'district', { value: x.district || '', required, attrs: 'list="dl-a-district" autocomplete="off"' })}
+    ${field('Tehsil', 'tehsil', { value: x.tehsil || '', required, attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+    ${field('Sub-tehsil', 'subTehsil', { value: x.subTehsil || '', attrs: 'list="dl-a-subTehsil" autocomplete="off"' })}
+    ${field('Village / locality', 'locality', { value: x.locality || '', required, attrs: 'list="dl-a-locality" autocomplete="off"' })}
+    ${field('House / shop no., street, landmark', 'address', { value: x.address || '', full: true })}
+    ${field('PIN code', 'pincode', { value: x.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6" title="6-digit PIN code"' })}
+    ${hospSearchBox('empty', 'Nearby hospital')}
+    <div class="hidden"><select id="f-hospitalId" name="hospitalId" aria-hidden="true" tabindex="-1">${hospitalOptions(x.district, x.tehsil, x.hospitalId || (x.hospital && ((db.hospitals || []).find(h => norm(h.name) === norm(x.hospital))?.id || '__other')) || '')}</select></div>
+    <div class="field ${x.hospital && !x.hospitalId && !(db.hospitals || []).some(h => norm(h.name) === norm(x.hospital)) ? '' : 'hidden'}" id="hospOtherWrap"><label for="f-hospitalOther">Hospital name (it will be added to the directory)</label><input id="f-hospitalOther" name="hospitalOther" value="${esc(x.hospital && !x.hospitalId ? x.hospital : '')}"></div>
+    <datalist id="dl-a-district">${dlOptions([...new Set([...HP_DISTRICTS, ...usedValues('district')])].sort())}</datalist>
+    ${['tehsil', 'subTehsil', 'locality'].map(k => `<datalist id="dl-a-${k}">${dlOptions(usedValues(k, x.district))}</datalist>`).join('')}`;
+  // When the district or tehsil changes, suggest only that area's tehsils, villages and hospitals
+  function refreshAddrLists() {
+    const d = $('#mform [name="district"]')?.value.trim();
+    ['tehsil', 'subTehsil', 'locality'].forEach(k => { const el = $(`#dl-a-${k}`); if (el) el.innerHTML = dlOptions(usedValues(k, d)); });
+    refreshHospitalSelect();
+  }
+  const readAddr = d => {
+    const a = { district: (d.district || '').trim(), tehsil: (d.tehsil || '').trim(), subTehsil: (d.subTehsil || '').trim(), locality: (d.locality || '').trim(), address: (d.address || '').trim(), pincode: (d.pincode || '').trim(), hospitalId: '', hospital: '' };
+    Object.assign(a, resolveHospital(d, a));
+    a.city = placeCity(a);
+    return a;
+  };
+  // The hospital chosen in a form's dropdown; "+ not in the list" adds it to the directory
+  function resolveHospital(d, area) {
+    if (d.hospitalId === '__other') {
+      const name = String(d.hospitalOther || '').trim();
+      if (!name) return { hospitalId: '', hospital: '' };
+      let h = (db.hospitals || []).find(x => norm(x.name) === norm(name) && (!area.district || x.district === area.district));
+      if (!h) { h = { id: nextId('H', db.hospitals, 4), name, type: 'Other', district: area.district || '', tehsil: area.tehsil || '', locality: area.locality || '', pincode: area.pincode || '', source: 'Added by you' }; db.hospitals.push(h); }
+      return { hospitalId: h.id, hospital: h.name };
+    }
+    const h = d.hospitalId && hospById(d.hospitalId);
+    return h ? { hospitalId: h.id, hospital: h.name } : { hospitalId: '', hospital: '' };
+  }
+  const addrOk = d => {
+    if (d.pincode && !/^[1-9]\d{5}$/.test(String(d.pincode).trim())) { toast('PIN code must be 6 digits.'); return false; }
+    if (d.fssai && !/^\d{14}$/.test(String(d.fssai).trim())) { toast('FSSAI licence number must be 14 digits.'); return false; }
+    return true;
+  };
+
+  // ---------- Licences (drug licence 1 & 2, GSTIN, FSSAI, validity) ----------
+  const dlText = x => [x?.dl1, x?.dl2].filter(Boolean).join(', ');
+  const licValid = x => {
+    if (!x?.dlValid) return '—';
+    const d = daysFrom(x.dlValid);
+    return `${fmtDate(x.dlValid)}${d < 0 ? ' ' + pill('Expired') : d <= 60 ? ' ' + pill('Near expiry') : ''}`;
+  };
+  const fssaiValid = x => {
+    if (!x?.fssaiValid) return '—';
+    const d = daysFrom(x.fssaiValid);
+    return `${fmtDate(x.fssaiValid)}${d < 0 ? ' ' + pill('Expired') : d <= 60 ? ' ' + pill('Near expiry') : ''}`;
+  };
+  const soon = v => v && daysFrom(v) <= 60;
+  const licCell = x => `<span class="small">${esc(x.dl1 || '—')}<br>${esc(x.dl2 || '')}${x.fssai ? `<br><span class="muted">FSSAI</span> ${esc(x.fssai)}` : ''}</span>${soon(x.dlValid) || soon(x.fssaiValid) ? `<div>${pill([x.dlValid, x.fssaiValid].some(v => v && daysFrom(v) < 0) ? 'Expired' : 'Near expiry')}</div>` : ''}`;
+  const licFields = (x, required) => `
+    <div class="field full form-sec">Licences</div>
+    ${field('GSTIN', 'gstin', { value: x.gstin || '', attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN, e.g. 02ABCDE1234F1Z5" style="text-transform:uppercase"` })}
+    ${field('Drug licence 1 (Form 20 / 20B)', 'dl1', { value: x.dl1 || '', required })}
+    ${field('Drug licence 2 (Form 21 / 21B)', 'dl2', { value: x.dl2 || '' })}
+    ${field('Drug licence valid upto', 'dlValid', { type: 'date', value: x.dlValid || '' })}
+    ${field('FSSAI licence / registration no.', 'fssai', { value: x.fssai || '', attrs: 'inputmode="numeric" maxlength="14" pattern="[0-9]{14}" title="14-digit FSSAI number"' })}
+    ${field('FSSAI valid upto', 'fssaiValid', { type: 'date', value: x.fssaiValid || '' })}`;
+  const readLic = d => ({ gstin: (d.gstin || '').trim().toUpperCase(), dl1: (d.dl1 || '').trim(), dl2: (d.dl2 || '').trim(), dlValid: d.dlValid || '', fssai: (d.fssai || '').trim(), fssaiValid: d.fssaiValid || '' });
+  const licReadBox = kind => `<div class="lic-box">
+      <div class="cta-icon">${icon('spark')}</div>
+      <div style="flex:1;min-width:200px"><div class="strong">Fill from drug licence / FSSAI / GST certificate</div>
+        <div class="small muted" id="licNote">Add photos or PDFs of the drug licences, FSSAI licence and GST certificate. AI reads them and fills the details below — check them before saving. The files are kept with this record.</div></div>
+      <label class="btn sm">${icon('clip')}Choose files<input type="file" id="licFiles" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden></label>
+      <button type="button" class="btn sm primary" data-lic-read="${kind}">${icon('spark')}Read with AI</button>
+    </div>`;
+  let licPending = [];
+  const licHolder = (kind, id) => kind === 'firm' ? db.settings.firm : kind === 'chemist' ? chem(id) : sup(id);
+  const licDocsBtn = (kind, id) => { const h = licHolder(kind, id); return h?.licFiles?.length ? `<button type="button" class="btn sm ghost" data-act="open-docs" data-id="lic:${kind}:${esc(id)}">${icon('clip')}${h.licFiles.length} file${h.licFiles.length === 1 ? '' : 's'}</button>` : '<span class="muted">None saved</span>'; };
+  function fileLicence(kind, id) {
+    const files = licPending; licPending = [];
+    const h = licHolder(kind, id);
+    if (h && files.length) fileDocs(`lic:${kind}:${id}`, h, 'licFiles', files);
+  }
+  async function readLicenceIntoForm(btn) {
+    if (!licPending.length) { toast('Choose the licence or GST certificate files first.'); return; }
+    if (!getApiKey()) { toast('Reading with AI needs your Anthropic API key (Settings). The chosen files will still be saved with this record.'); return; }
+    const files = licPending.slice();
+    btn.disabled = true; const label = btn.innerHTML; btn.textContent = 'Reading…';
+    try {
+      const x = await extractLicence(files);
+      const phone = String(x.phone || '').replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '');
+      const valid = /^\d{4}-\d{2}-\d{2}$/.test(x.valid_upto || '') ? x.valid_upto : '';
+      const fValid = /^\d{4}-\d{2}-\d{2}$/.test(x.fssai_valid_upto || '') ? x.fssai_valid_upto : '';
+      const values = { name: x.firm_name, owner: x.proprietor_name, contact: x.proprietor_name, district: x.district, tehsil: x.tehsil, subTehsil: x.sub_tehsil, locality: x.locality, address: x.address, pincode: String(x.pincode || '').replace(/\D/g, ''), gstin: String(x.gstin || '').toUpperCase(), dl1: x.dl_form_20, dl2: x.dl_form_21, dlValid: valid, fssai: String(x.fssai_no || '').replace(/\s/g, ''), fssaiValid: fValid, phone };
+      const filled = [];
+      Object.entries(values).forEach(([name, v]) => {
+        const el = $(`#mform [name="${name}"]`); v = String(v || '').trim();
+        if (!el || !v) return;
+        if (name === 'phone' && el.pattern && !new RegExp(`^(?:${el.pattern})$`).test(v)) return;
+        el.value = v; el.classList.add('filled'); filled.push(el.closest('.field')?.querySelector('label')?.textContent.replace(' *', '') || name);
+      });
+      const note = $('#licNote');
+      refreshAddrLists();
+      if (note) note.textContent = filled.length ? `Filled from ${files.map(f => f.name).join(', ')}: ${filled.join(', ')}. Check the highlighted boxes, then save.` : 'Nothing could be read from these files. Enter the details by hand.';
+      toast(filled.length ? `${filled.length} details filled — check them before saving.` : 'No details found in these files.');
+    } catch (err) {
+      toast(err.message || 'Could not read the files.');
+    } finally {
+      if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+    }
+  }
+  function migrate(d) {
+    const fix = x => {
+      if (!x) return;
+      if (x.dl != null && !x.dl1 && !x.dl2) { const [a, ...rest] = String(x.dl).split(/\s*,\s*/); x.dl1 = a || ''; x.dl2 = rest.join(', '); }
+      delete x.dl;
+    };
+    (d.chemists || []).forEach(fix); (d.suppliers || []).forEach(fix);
+    // Old single-line addresses → district / tehsil / locality
+    const splitAddr = x => {
+      if (!x || x.district || x.tehsil || x.locality) return;
+      const a = String(x.address || '');
+      const teh = /Teh\.?\s*([^,]+)/i.exec(a)?.[1]?.trim() || '';
+      const pin = /\b([1-9]\d{5})\b/.exec(a)?.[1] || '';
+      const dist = HP_DISTRICTS.find(n => new RegExp(`\\b${n}\\b`, 'i').test(a)) || TOWN_DISTRICT[x.city] || TOWN_DISTRICT[teh] || '';
+      const first = a.split(',')[0].trim();
+      Object.assign(x, {
+        district: dist, tehsil: teh || (x.city && x.city !== dist ? x.city : ''), subTehsil: '',
+        locality: (teh && first && !/teh/i.test(first) ? first : '') || x.city || '', pincode: x.pincode || pin, hospital: x.hospital || '',
+        address: teh || pin ? '' : a,
+      });
+      x.city = placeCity(x) || x.city || '';
+    };
+    [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(splitAddr);
+    // Hospital directory (added later): start from the bundled Himachal list and link saved hospital names to it
+    if (!Array.isArray(d.hospitals)) { d.hospitals = seedHospitals(); d.hospitalsRev = 2; }
+    // Corrected starting list (rev 2): fix names in saved copies, leaving rows the user has edited alone, and add new rows
+    if ((d.hospitalsRev || 1) < 2) {
+      const ids = new Set(d.hospitals.map(h => h.id)), names = new Set(d.hospitals.map(h => norm(h.name)));
+      seedHospitals().forEach(s => {
+        const h = d.hospitals.find(x => x.id === s.id);
+        if (h && h.source === s.source && h.source === 'HPPCB list' && (h.name !== s.name || h.district !== s.district)) {
+          Object.assign(h, { name: s.name, district: s.district, tehsil: s.tehsil, locality: s.locality });
+          [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || []), ...(d.doctors || [])].forEach(x => { if (x && x.hospitalId === h.id) x.hospital = h.name; });
+        } else if (!h && !ids.has(s.id) && !names.has(norm(s.name))) d.hospitals.push(s);
+      });
+      d.hospitalsRev = 2;
+    }
+    if (!Array.isArray(d.doctors)) d.doctors = [];
+    [d.settings?.firm, ...(d.chemists || []), ...(d.suppliers || [])].forEach(x => {
+      if (!x || x.hospitalId || !x.hospital) return;
+      const h = d.hospitals.find(h => norm(h.name) === norm(x.hospital));
+      if (h) x.hospitalId = h.id;
+    });
+    return d;
+  }
+
+  // Printable bill (same layout as the paper bill)
+  function billDoc({ title, no, date, partyHtml, extraHead = '', lines, t, paid, showBank = false }) {
+    const f = db.settings.firm;
+    const slabs = Object.entries(t.slabs || {}).filter(([, s]) => s.taxable).sort((a, b) => b[0] - a[0]);
+    return `<div class="bill">
+      <div class="bill-title">${title}</div>
+      <div class="bill-head">
+        <div><div class="bill-firm">${esc(f.name)}</div><div>${esc(addrText(f))}</div><div>Ph: ${esc(f.phone)}</div><div>GST NO: ${esc(f.gstin)}</div><div>DL NO: ${esc(f.dl1)}${f.dl2 ? ', ' + esc(f.dl2) : ''}</div>${f.fssai ? `<div>FSSAI NO: ${esc(f.fssai)}</div>` : ''}</div>
+        <div><div><b>Bill no:</b> ${esc(no)}</div><div><b>Date:</b> ${fmtDate(date)}</div>${extraHead}</div>
+        <div>${partyHtml}</div>
+      </div>
+      <div class="table-wrap"><table class="bill-table">
+        <thead><tr><th>SN</th><th>Item name</th><th>Company</th><th>MFG</th><th>Pack</th><th>HSN</th><th>Batch</th><th>Exp</th><th class="r">Qty</th><th class="r">Free</th><th class="r">Rate</th><th class="r">MRP</th><th class="r">CD%</th><th class="r">TD%</th><th class="r">GST%</th><th class="r">Amount</th></tr></thead>
+        <tbody>${lines.map((l, i) => { const p = prod(l.productId); return `<tr><td>${i + 1}</td><td class="strong">${esc(p?.name || l.name)}</td><td>${esc(company(p?.companyId)?.name || '')}</td><td>${esc(p?.mfg || '')}</td><td>${esc(p?.pack || '')}</td><td>${esc(p?.hsn || '')}</td><td>${esc(l.batch || '')}</td><td>${l.expiry ? isoToExp(l.expiry) : ''}</td><td class="r">${dec(l.qty)}</td><td class="r">${dec(l.free)}</td><td class="r">${dec(l.rate)}</td><td class="r">${dec(l.mrp)}</td><td class="r">${dec(l.cd)}</td><td class="r">${dec(l.td)}</td><td class="r">${dec(l.gst)}</td><td class="r">${dec(calcLine(l).amount)}</td></tr>`; }).join('')}</tbody>
+      </table></div>
+      <div class="bill-foot">
+        <table class="bill-slabs"><thead><tr><th>GST%</th><th class="r">Taxable</th><th class="r">CGST</th><th class="r">SGST</th></tr></thead>
+          <tbody>${slabs.map(([k, s]) => `<tr><td>${k}%</td><td class="r">${dec(s.taxable)}</td><td class="r">${dec(s.gst / 2)}</td><td class="r">${dec(s.gst / 2)}</td></tr>`).join('')}</tbody></table>
+        <table class="bill-totals"><tbody>
+          <tr><td>Gross amount</td><td class="r">${dec(t.gross)}</td></tr>
+          <tr><td>Less CD</td><td class="r">-${dec(t.cd)}</td></tr>
+          <tr><td>Less TD</td><td class="r">-${dec(t.td)}</td></tr>
+          <tr><td>CGST</td><td class="r">${dec(t.cgst)}</td></tr>
+          <tr><td>SGST</td><td class="r">${dec(t.sgst)}</td></tr>
+          <tr><td>Round off</td><td class="r">${dec(t.roundOff)}</td></tr>
+          <tr class="net"><td>Net amount</td><td class="r">${dec(t.total)}</td></tr>
+          ${paid != null ? `<tr><td>Received / paid</td><td class="r">${dec(paid)}</td></tr><tr><td>Balance</td><td class="r">${dec(Math.max(0, t.total - paid))}</td></tr>` : ''}
+        </tbody></table>
+      </div>
+      ${showBank ? `<div class="small muted">E. &amp; O.E. · Goods once sold will be taken back only as per terms.</div>` : ''}
+    </div>`;
+  }
+
+  // ---------- Sale editor ----------
+  function saleRowHtml(l = {}) {
+    const opts = [...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => { const q = sellableQty(p.id); return `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''} ${q <= 0 && p.id !== l.productId ? 'disabled' : ''}>${esc(p.name)}${q <= 0 ? ' (no stock)' : ''}</option>`; }).join('');
     return `<tr data-line>
-      <td style="min-width:220px"><select data-f="productId"><option value="">Select product</option>${opts}</select></td>
-      ${mode === 'sale' ? '<td class="r small muted" data-avl>—</td>' : ''}
-      <td style="width:90px"><input data-f="qty" type="number" min="1" step="1" value="${l.qty || ''}"></td>
-      <td style="width:110px"><input data-f="rate" type="number" min="0" step="0.01" value="${l.rate ?? ''}"></td>
-      <td class="r small muted" data-gst>—</td>
+      <td><input type="checkbox" class="cb" data-lsel aria-label="Tick line"></td>
+      <td style="min-width:210px"><select data-f="productId"><option value="">Select item</option>${opts}</select></td>
+      <td style="min-width:170px"><select data-f="batchId"></select></td>
+      <td class="small" data-exp>—</td>
+      <td><input data-f="qty" type="number" min="0" step="1" value="${l.qty || ''}" style="width:64px"></td>
+      <td><input data-f="free" type="number" min="0" step="1" value="${l.free || ''}" style="width:56px"></td>
+      <td><input data-f="rate" type="number" min="0" step="0.01" value="${l.rate ?? ''}" style="width:86px"></td>
+      <td class="r small" data-mrp>—</td>
+      <td><input data-f="cd" type="number" min="0" max="100" step="0.01" value="${l.cd ?? ''}" style="width:58px"></td>
+      <td><input data-f="td" type="number" min="0" max="100" step="0.01" value="${l.td ?? ''}" style="width:58px"></td>
+      <td class="r small" data-gst>—</td>
       <td class="r num" data-amt>—</td>
       <td><button type="button" class="btn ghost sm" data-rm-line aria-label="Remove line">✕</button></td>
     </tr>`;
   }
-  function linesBlock(mode, lines) {
-    const rows = (lines && lines.length ? lines : [{}]).map(l => lineRow(mode, l)).join('');
-    return `<div class="lines"><div class="table-wrap"><table>
-      <thead><tr><th>Product</th>${mode === 'sale' ? '<th class="r">Saleable</th>' : ''}<th>Qty</th><th>Rate ₹</th><th class="r">GST</th><th class="r">Amount</th><th></th></tr></thead>
-      <tbody id="lineBody" data-mode="${mode}">${rows}</tbody></table></div>
-      <div class="add-line"><button type="button" class="btn sm" data-add-line>+ Add line</button></div></div>
-      <div class="totals"><div>Subtotal <b id="tSub" class="num">₹0</b></div><div>GST <b id="tGst" class="num">₹0</b></div><div class="grand">Total <span id="tTot" class="num">₹0</span></div></div>`;
+  function fillBatchOptions(tr, keepBatchId) {
+    const pid = $('[data-f=productId]', tr).value;
+    const sel = $('[data-f=batchId]', tr);
+    const bs = pid ? sellableBatches(pid) : [];
+    if (keepBatchId && !bs.some(b => b.id === keepBatchId)) { const kb = batchById(keepBatchId); if (kb) bs.unshift(kb); }
+    sel.innerHTML = bs.length ? bs.map(b => `<option value="${b.id}" ${b.id === keepBatchId ? 'selected' : ''}>${esc(b.batch)} · ${isoToExp(b.expiry)} · ${qty(avail(b))} avl</option>`).join('') : '<option value="">No stock</option>';
   }
-  function readLines() {
-    return $$('#lineBody tr[data-line]').map(tr => ({
-      productId: $('[data-f=productId]', tr).value,
-      qty: Math.floor(+$('[data-f=qty]', tr).value || 0),
-      rate: round2(+$('[data-f=rate]', tr).value || 0),
-    })).filter(l => l.productId && l.qty > 0);
+  function partyDefaults() {
+    const type = $('#mform [name=ptype]:checked')?.value;
+    if (type === 'chemist') { const c = chem($('#f-chemistId')?.value); return { cd: c ? c.cd || 0 : db.settings.defaultCd || 0, td: c ? c.td || 0 : 0 }; }
+    return { cd: 0, td: 0 };
   }
-  function recalcLines() {
+  function recalcSale() {
     const body = $('#lineBody'); if (!body) return;
-    const mode = body.dataset.mode;
+    const used = {};
     $$('tr[data-line]', body).forEach(tr => {
+      const b = batchById($('[data-f=batchId]', tr).value);
       const p = prod($('[data-f=productId]', tr).value);
-      const q = +$('[data-f=qty]', tr).value || 0, rate = +$('[data-f=rate]', tr).value || 0;
-      if (mode === 'sale') { const avl = p ? sellableQty(p.id) : null; const c = $('[data-avl]', tr); c.textContent = p ? qty(avl) : '—'; c.style.color = p && q > avl ? 'var(--bad)' : ''; }
-      $('[data-gst]', tr).textContent = p ? p.gst + '%' : '—';
-      $('[data-amt]', tr).textContent = p && q ? money2(q * rate) : '—';
+      const l = readSaleRow(tr);
+      $('[data-exp]', tr).textContent = b ? isoToExp(b.expiry) : '—';
+      $('[data-mrp]', tr).textContent = b ? dec(b.mrp) : '—';
+      $('[data-gst]', tr).textContent = b ? dec(b.gst ?? p?.gst) + '%' : '—';
+      $('[data-amt]', tr).textContent = p && l.qty ? dec(calcLine(l).amount) : '—';
+      if (b) { used[b.id] = (used[b.id] || 0) + l.qty + l.free; }
+      const over = b && used[b.id] > avail(b);
+      $('[data-f=qty]', tr).classList.toggle('invalid', !!over);
     });
-    const t = lineTotals(readLines());
-    $('#tSub').textContent = money2(t.sub); $('#tGst').textContent = money2(t.gst); $('#tTot').textContent = money2(t.total);
+    const t = billCalc(readSaleLines());
+    $('#tGross').textContent = dec(t.gross); $('#tCd').textContent = dec(t.cd); $('#tTd').textContent = dec(t.td);
+    $('#tGst').textContent = dec(t.gst); $('#tRo').textContent = dec(t.roundOff); $('#tTot').textContent = money2(t.total);
+  }
+  function updateSaleSel() {
+    const boxes = $$('#lineBody [data-lsel]'); const n = boxes.filter(c => c.checked).length;
+    const el = $('#sbN'); if (el) el.textContent = n ? `${n} ticked line${n === 1 ? '' : 's'}` : 'All lines';
+    const all = $('[data-lselall]'); if (all) { all.checked = n > 0 && n === boxes.length; all.indeterminate = n > 0 && n < boxes.length; }
+  }
+  function readSaleRow(tr) {
+    const b = batchById($('[data-f=batchId]', tr).value);
+    const p = prod($('[data-f=productId]', tr).value);
+    return {
+      productId: p?.id || '', batchId: b?.id || '', batch: b?.batch || '', expiry: b?.expiry || '',
+      qty: Math.floor(num($('[data-f=qty]', tr).value)), free: Math.floor(num($('[data-f=free]', tr).value)),
+      rate: round2(num($('[data-f=rate]', tr).value)), mrp: b?.mrp || p?.mrp || 0,
+      cd: num($('[data-f=cd]', tr).value), td: num($('[data-f=td]', tr).value), gst: b ? (b.gst ?? p?.gst) : (p?.gst || 0),
+    };
+  }
+  const readSaleLines = () => $$('#lineBody tr[data-line]').map(readSaleRow).filter(l => l.productId && l.batchId && l.qty + l.free > 0);
+
+  function deductLine(l) {
+    const b = batchById(l.batchId);
+    let need = l.qty + (l.free || 0);
+    const fromQty = Math.min(b.qty, need); b.qty -= fromQty; need -= fromQty;
+    const fromFree = Math.min(b.free || 0, need); b.free = (b.free || 0) - fromFree;
+    l.alloc = { fromQty, fromFree };
+  }
+  function restoreLine(l) {
+    const a = l.alloc || { fromQty: l.qty + (l.free || 0), fromFree: 0 };
+    let b = batchById(l.batchId);
+    if (!b) {
+      const p = prod(l.productId); if (!p) return;
+      b = { id: l.batchId || uid(), productId: l.productId, batch: l.batch, expiry: l.expiry, qty: 0, free: 0, rate: p.pts, mrp: l.mrp, cd: 0, td: 0, gst: l.gst, source: 'Restored from deleted bill', verified: false };
+      db.batches.push(b);
+    }
+    b.qty += a.fromQty; b.free = (b.free || 0) + a.fromFree;
+  }
+
+  function saleModal(existing, preset = {}) {
+    // When editing, put the bill's stock back first; it is taken again on save (or re-applied on cancel).
+    if (existing) existing.lines.forEach(restoreLine);
+    const s = existing || { party: { type: 'chemist', chemistId: preset.chemistId || '' }, date: todayIso, lines: preset.lines || [], paid: 0, mode: 'Credit' };
+    const chemOpts = [['', 'Select chemist'], ...db.chemists.filter(c => c.status === 'Active' || c.id === s.party.chemistId).map(c => [c.id, `${c.name} — ${c.city}`])];
+    const isChem = s.party.type === 'chemist';
+    openModal({
+      title: existing ? `Edit sale bill ${existing.no}` : preset.orderId ? `Sale bill for order ${preset.orderId}` : 'New sale bill', size: 'xl', submitLabel: existing ? 'Save changes' : 'Create bill',
+      body: `
+        <div class="seg"><label><input type="radio" name="ptype" value="chemist" ${isChem ? 'checked' : ''}> Chemist (B2B)</label><label><input type="radio" name="ptype" value="individual" ${!isChem ? 'checked' : ''}> Individual / walk-in (B2C)</label></div>
+        <div class="form-grid g4">
+          <div class="field ${isChem ? '' : 'hidden'}" data-pt="chemist"><label for="f-chemistId">Chemist</label><select id="f-chemistId" name="chemistId">${chemOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === (s.party.chemistId || '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="field ${isChem ? 'hidden' : ''}" data-pt="individual"><label for="f-cname">Customer name</label><input id="f-cname" name="cname" value="${esc(s.party.name || '')}"></div>
+          <div class="field ${isChem ? 'hidden' : ''}" data-pt="individual"><label for="f-cphone">Mobile</label><input id="f-cphone" name="cphone" type="tel" value="${esc(s.party.phone || '')}"></div>
+          ${field('Bill date', 'date', { type: 'date', value: s.date, required: true, attrs: `max="${todayIso}"` })}
+          ${field('Term', 'mode', { value: s.mode || 'Credit', options: ['Credit', 'Cash', 'UPI', 'Card'] })}
+        </div>
+        <div id="chemInfo" class="small muted"></div>
+        <div class="lines"><div class="table-wrap"><table>
+          <thead><tr><th><input type="checkbox" class="cb" data-lselall aria-label="Tick all lines"></th><th>Item</th><th>Batch</th><th>Exp</th><th>Qty</th><th>Free</th><th>Rate ₹</th><th class="r">MRP</th><th>CD%</th><th>TD%</th><th class="r">GST</th><th class="r">Amount</th><th></th></tr></thead>
+          <tbody id="lineBody">${(s.lines.length ? s.lines : [{}]).map(saleRowHtml).join('')}</tbody></table></div>
+          <div class="add-line bulk-inline"><button type="button" class="btn sm" data-add-line>+ Add line</button>
+            <span class="spacer"></span>
+            <span class="small strong" id="sbN">All lines</span>
+            <label class="bf"><span>CD%</span><input id="sbCd" inputmode="decimal" placeholder="—"></label>
+            <label class="bf"><span>TD%</span><input id="sbTd" inputmode="decimal" placeholder="—"></label>
+            <button type="button" class="btn sm primary" data-sbulk>Apply discount</button></div></div>
+        <div class="totals wrap"><div>Gross <b id="tGross" class="num">0</b></div><div>Less CD <b id="tCd" class="num">0</b></div><div>Less TD <b id="tTd" class="num">0</b></div><div>GST <b id="tGst" class="num">0</b></div><div>Round off <b id="tRo" class="num">0</b></div><div class="grand">Net <span id="tTot" class="num">₹0</span></div></div>
+        <div class="form-grid g4">${field('Payment received (₹)', 'paid', { type: 'number', value: s.paid || 0, attrs: numAttrs() })}</div>
+        <div class="small muted">Stock is taken from the batch you pick (earliest expiry is picked first). Qty is taken before free goods.</div>`,
+      onCancel: existing ? () => existing.lines.forEach(deductLine) : null,
+      onSubmit: d => {
+        const lines = readSaleLines();
+        if (!lines.length) { toast('Add at least one item with a quantity.'); return false; }
+        const type = d.ptype;
+        if (type === 'chemist' && !d.chemistId) { toast('Choose a chemist, or switch to Individual.'); return false; }
+        if (type === 'individual' && !String(d.cname || '').trim()) { toast('Enter the customer’s name.'); return false; }
+        const need = {};
+        lines.forEach(l => { need[l.batchId] = (need[l.batchId] || 0) + l.qty + l.free; });
+        for (const bid in need) {
+          const b = batchById(bid);
+          if (need[bid] > avail(b)) { toast(`Batch ${b.batch} of ${prod(b.productId).name} has only ${qty(avail(b))} in stock.`); return false; }
+        }
+        lines.forEach(deductLine);
+        const t = billCalc(lines);
+        const party = type === 'chemist' ? { type, chemistId: d.chemistId } : { type, name: d.cname.trim(), phone: (d.cphone || '').trim() };
+        const paid = Math.min(t.total, round2(num(d.paid)));
+        if (existing) {
+          Object.assign(existing, { date: d.date, party, lines, ...t, paid, mode: d.mode });
+          return `${existing.no} updated — stock adjusted.`;
+        }
+        const no = nextNo('SMS-', db.sales);
+        db.sales.push({ no, date: d.date, party, lines, ...t, paid, mode: d.mode, ...(preset.orderId ? { orderId: preset.orderId } : {}) });
+        if (preset.orderId) setOrder(preset.orderId, { status: 'Billed', saleNo: no });
+        const c = type === 'chemist' ? chem(d.chemistId) : null;
+        return c && chemOutstanding(c.id) > c.creditLimit ? `${no} created. Note: ${c.name} is now above their credit limit.` : `${no} created for ${money(t.total)} — stock deducted.`;
+      },
+    });
+    $$('#lineBody tr[data-line]').forEach((tr, i) => { if (s.lines[i]) fillBatchOptions(tr, s.lines[i].batchId); });
+    recalcSale();
+    const showInfo = () => {
+      const c = chem($('#f-chemistId').value);
+      $('#chemInfo').innerHTML = c ? `Credit limit ${money(c.creditLimit)} · outstanding ${money(chemOutstanding(c.id))} · terms ${c.terms} days · default CD ${dec(c.cd)}%` : '';
+    };
+    $('#f-chemistId').addEventListener('change', () => {
+      showInfo();
+      const d = partyDefaults();
+      $$('#lineBody tr[data-line]').forEach(tr => { if ($('[data-f=productId]', tr).value) { $('[data-f=cd]', tr).value = d.cd; $('[data-f=td]', tr).value = d.td; } });
+      recalcSale();
+    });
+    $$('#mform [name=ptype]').forEach(r => r.addEventListener('change', () => {
+      const t = $('#mform [name=ptype]:checked').value;
+      $$('#mform [data-pt]').forEach(el => el.classList.toggle('hidden', el.dataset.pt !== t));
+      $('#f-mode').value = t === 'individual' ? 'Cash' : 'Credit';
+    }));
+    showInfo();
+  }
+
+  // ---------- Simple line editor (purchase orders) ----------
+  function poRowHtml(l = {}) {
+    const opts = [...db.products].sort((a, b) => a.name.localeCompare(b.name)).map(p => `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+    return `<tr data-line>
+      <td style="min-width:220px"><select data-f="productId"><option value="">Select item</option>${opts}</select></td>
+      <td><input data-f="qty" type="number" min="1" step="1" value="${l.qty || ''}" style="width:80px"></td>
+      <td><input data-f="rate" type="number" min="0" step="0.01" value="${l.rate ?? ''}" style="width:96px"></td>
+      <td class="r small" data-gst>—</td><td class="r num" data-amt>—</td>
+      <td><button type="button" class="btn ghost sm" data-rm-line aria-label="Remove line">✕</button></td></tr>`;
+  }
+  const readPoLines = () => $$('#lineBody tr[data-line]').map(tr => {
+    const p = prod($('[data-f=productId]', tr).value);
+    return { productId: p?.id || '', qty: Math.floor(num($('[data-f=qty]', tr).value)), rate: round2(num($('[data-f=rate]', tr).value)), gst: p?.gst || 0 };
+  }).filter(l => l.productId && l.qty > 0);
+  function recalcPo() {
+    $$('#lineBody tr[data-line]').forEach(tr => {
+      const p = prod($('[data-f=productId]', tr).value); const q = num($('[data-f=qty]', tr).value), r = num($('[data-f=rate]', tr).value);
+      $('[data-gst]', tr).textContent = p ? dec(p.gst) + '%' : '—';
+      $('[data-amt]', tr).textContent = p && q ? dec(q * r) : '—';
+    });
+    const t = billCalc(readPoLines());
+    $('#tGross').textContent = dec(t.gross); $('#tGst').textContent = dec(t.gst); $('#tTot').textContent = money2(t.total);
   }
 
   // GRN line editor (driven by a purchase order)
   function grnLines(poNo) {
     const po = db.pos.find(p => p.no === poNo);
     if (!po) return '<div class="muted">Select a purchase order to see its items.</div>';
-    const defExp = iso(new Date(TODAY.getFullYear() + 2, TODAY.getMonth(), 1)).slice(0, 7);
     const rows = po.lines.map((l, i) => {
       const p = prod(l.productId); const rec = receivedQty(po.no, l.productId); const pend = Math.max(0, l.qty - rec);
+      const dis = pend ? '' : 'disabled';
       return `<tr data-gline="${i}" data-pending="${pend}">
-        <td><span class="strong">${esc(p?.name)}</span><div class="small muted">Ordered ${qty(l.qty)} · received ${qty(rec)} · rate ${money2(l.rate)}</div></td>
+        <td><span class="strong">${esc(p?.name)}</span><div class="small muted">Ordered ${qty(l.qty)} · received ${qty(rec)}</div></td>
         <td class="r">${qty(pend)}</td>
-        <td style="width:120px"><input data-g="batch" placeholder="Batch no." ${pend ? '' : 'disabled'}></td>
-        <td style="width:140px"><input data-g="expiry" type="month" value="${defExp}" min="${todayIso.slice(0, 7)}" ${pend ? '' : 'disabled'}></td>
-        <td style="width:100px"><input data-g="qty" type="number" min="0" max="${pend}" step="1" value="${pend}" ${pend ? '' : 'disabled'}></td>
+        <td><input data-g="batch" placeholder="Batch" style="width:110px" ${dis}></td>
+        <td><input data-g="exp" placeholder="MM/YY" style="width:70px" ${dis}></td>
+        <td><input data-g="qty" type="number" min="0" max="${pend}" step="1" value="${pend}" style="width:70px" ${dis}></td>
+        <td><input data-g="free" type="number" min="0" step="1" value="0" style="width:56px" ${dis}></td>
+        <td><input data-g="rate" type="number" min="0" step="0.01" value="${l.rate}" style="width:84px" ${dis}></td>
+        <td><input data-g="mrp" type="number" min="0" step="0.01" value="${p?.mrp ?? ''}" style="width:84px" ${dis}></td>
+        <td><input data-g="cd" type="number" min="0" step="0.01" value="0" style="width:56px" ${dis}></td>
       </tr>`;
     }).join('');
-    return `<div class="lines"><div class="table-wrap"><table><thead><tr><th>Product</th><th class="r">Pending</th><th>Batch</th><th>Expiry</th><th>Qty received</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    return `<div class="lines"><div class="table-wrap"><table><thead><tr><th>Item</th><th class="r">Pending</th><th>Batch</th><th>Exp</th><th>Qty</th><th>Free</th><th>Rate</th><th>MRP</th><th>CD%</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+
+  // Add received/purchased lines to stock
+  function addToStock(lines, { supplierId, source, verified }) {
+    lines.forEach(l => {
+      const b = db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch));
+      if (b) {
+        b.qty += l.qty; b.free = (b.free || 0) + (l.free || 0);
+        Object.assign(b, { rate: l.rate, mrp: l.mrp || b.mrp, cd: l.cd, td: l.td, gst: l.gst, expiry: l.expiry || b.expiry, source, supplierId });
+        if (!verified) b.verified = false;
+      } else {
+        db.batches.push({ id: uid(), productId: l.productId, batch: l.batch, expiry: l.expiry, qty: l.qty, free: l.free || 0, rate: l.rate, mrp: l.mrp, cd: l.cd || 0, td: l.td || 0, gst: l.gst, supplierId, source, verified });
+      }
+    });
+  }
+  // Take stock back out (used when deleting a GRN or an uploaded bill)
+  function removeFromStock(lines) {
+    const short = [];
+    lines.forEach(l => {
+      const b = db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch));
+      const need = l.qty + (l.free || 0);
+      if (!b || avail(b) < need) short.push(`${prod(l.productId)?.name || l.name} (${l.batch})`);
+    });
+    if (short.length) return short;
+    lines.forEach(l => {
+      const b = db.batches.find(x => x.productId === l.productId && norm(x.batch) === norm(l.batch));
+      let need = l.qty + (l.free || 0);
+      const fq = Math.min(b.qty, need); b.qty -= fq; need -= fq; b.free = (b.free || 0) - need;
+    });
+    return [];
   }
 
   // ---------- Actions ----------
   const ACTIONS = {};
 
-  ACTIONS['new-sale'] = () => {
-    const chemOpts = [['', 'Select chemist'], ...db.chemists.filter(c => c.status === 'Active').map(c => [c.id, `${c.name} — ${c.city}`])];
-    openModal({
-      title: 'New sales invoice', wide: true, submitLabel: 'Create invoice',
-      body: `<div class="form-grid">
-          ${field('Chemist', 'chemistId', { required: true, options: chemOpts })}
-          ${field('Invoice date', 'date', { type: 'date', value: todayIso, required: true, attrs: `max="${todayIso}"` })}
-        </div>
-        <div id="chemInfo" class="small muted"></div>
-        ${linesBlock('sale')}
-        <div class="form-grid">${field('Payment received now (₹)', 'paid', { type: 'number', value: 0, attrs: 'min="0" step="0.01"' })}</div>
-        <div class="small muted">Stock is taken from the earliest-expiring batch first. Only chemists marked Active can be billed.</div>`,
-      onSubmit: d => {
-        const lines = readLines();
-        if (!lines.length) { toast('Add at least one product with a quantity.'); return false; }
-        const need = {};
-        lines.forEach(l => { need[l.productId] = (need[l.productId] || 0) + l.qty; });
-        for (const pid in need) {
-          if (need[pid] > sellableQty(pid)) { toast(`Only ${qty(sellableQty(pid))} of ${prod(pid).name} in saleable stock.`); return false; }
-        }
-        lines.forEach(l => {
-          let left = l.qty; l.batches = [];
-          db.batches.filter(b => b.productId === l.productId && b.qty > 0 && expDays(b.expiry) >= 0)
-            .sort((a, b) => a.expiry.localeCompare(b.expiry))
-            .forEach(b => { if (!left) return; const take = Math.min(left, b.qty); b.qty -= take; left -= take; l.batches.push({ batch: b.batch, qty: take }); });
-        });
-        const t = lineTotals(lines);
-        const no = nextNo('SI-', db.sales);
-        const c = chem(d.chemistId);
-        db.sales.push({ no, date: d.date, chemistId: d.chemistId, lines, ...t, paid: Math.min(t.total, round2(+d.paid || 0)) });
-        const over = chemOutstanding(c.id) > c.creditLimit;
-        return over ? `${no} created. Note: ${c.name} is now above their credit limit.` : `${no} created for ${money(t.total)}.`;
-      },
-    });
-    recalcLines();
-    $('#f-chemistId').addEventListener('change', e => {
-      const c = chem(e.target.value);
-      $('#chemInfo').innerHTML = c ? `Credit limit ${money(c.creditLimit)} · outstanding ${money(chemOutstanding(c.id))} · terms ${c.terms} days` : '';
-    });
-  };
-
+  // Sales
+  ACTIONS['new-sale'] = () => saleModal(null);
+  ACTIONS['edit-sale'] = no => { const s = db.sales.find(x => x.no === no); if (s) saleModal(s); };
   ACTIONS['view-sale'] = no => {
     const s = db.sales.find(x => x.no === no); if (!s) return;
-    const c = chem(s.chemistId);
+    const c = s.party.type === 'chemist' ? chem(s.party.chemistId) : null;
+    const partyHtml = c
+      ? `<div class="strong">M/S: ${esc(c.name)}</div><div>${esc(addrText(c))}</div><div>DL NO: ${esc(dlText(c) || '—')}</div>${c.fssai ? `<div>FSSAI NO: ${esc(c.fssai)}</div>` : ''}<div>GST NO: ${esc(c.gstin || '—')}</div><div>Mob: ${esc(c.phone)}</div>`
+      : `<div class="strong">${esc(s.party.name)}</div><div>Mob: ${esc(s.party.phone || '—')}</div><div class="small muted">Individual customer</div>`;
     openModal({
-      title: `Sales invoice ${s.no}`, wide: true,
-      extraFoot: balance(s) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-sale" data-id="${s.no}" style="margin-right:auto">Record payment</button>` : '',
-      body: `${detailGrid([['Chemist', esc(c?.name)], ['City', esc(c?.city)], ['Date', fmtDate(s.date)], ['GSTIN', esc(c?.gstin || '—')], ['Drug licence', esc(c?.dl)], ['Status', pill(saleStatus(s))]])}
-        ${miniTable([
-          { h: 'Product', c: l => esc(prod(l.productId)?.name) },
-          { h: 'Batch', c: l => (l.batches || []).map(b => `${esc(b.batch)} (${qty(b.qty)})`).join(', ') || '—' },
-          { h: 'Qty', r: 1, c: l => qty(l.qty) },
-          { h: 'Rate', r: 1, c: l => money2(l.rate) },
-          { h: 'GST', r: 1, c: l => (prod(l.productId)?.gst ?? 0) + '%' },
-          { h: 'Amount', r: 1, c: l => money2(l.qty * l.rate) },
-        ], s.lines)}
-        ${totalsBlock(s)}
-        <div class="totals"><div>Received <b class="num">${money2(s.paid)}</b></div><div>Balance <b class="num">${money2(balance(s))}</b></div></div>`,
+      title: `Sale bill ${s.no}`, size: 'xl',
+      extraFoot: `<div class="foot-left">${balance(s) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-sale" data-id="${s.no}">Record payment</button>` : ''}<button type="button" class="btn" data-act="print" data-id="">Print</button><button type="button" class="btn" data-act="edit-sale" data-id="${s.no}">Edit</button></div>`,
+      body: billDoc({ title: 'SALE BILL', no: s.no, date: s.date, partyHtml, extraHead: `<div><b>Term:</b> ${esc(s.mode || 'Credit')}</div><div><b>Status:</b> ${saleStatus(s)}</div>`, lines: s.lines, t: s, paid: s.paid, showBank: true }),
     });
   };
-
   ACTIONS['pay-sale'] = no => {
     const s = db.sales.find(x => x.no === no); if (!s) return;
     openModal({
-      title: `Receive payment · ${s.no}`, submitLabel: 'Save payment',
-      body: `${detailGrid([['Chemist', esc(chem(s.chemistId)?.name)], ['Invoice total', money2(s.total)], ['Balance', money2(balance(s))]])}
+      title: `Receive payment · ${s.no}`, submitLabel: 'Save payment', size: 'sm',
+      body: `${detailGrid([['Party', esc(partyName(s))], ['Bill total', money2(s.total)], ['Balance', money2(balance(s))]])}
         <div class="form-grid">
           ${field('Amount (₹)', 'amount', { type: 'number', value: balance(s), required: true, attrs: `min="0.01" max="${balance(s)}" step="0.01"` })}
           ${field('Mode', 'mode', { options: ['UPI', 'NEFT / RTGS', 'Cheque', 'Cash'] })}
         </div>`,
-      onSubmit: d => { s.paid = round2((s.paid || 0) + Math.min(+d.amount, balance(s))); return `Payment of ${money(+d.amount)} recorded on ${s.no}.`; },
+      onSubmit: d => { const a = Math.min(num(d.amount), balance(s)); s.paid = round2((s.paid || 0) + a); return `Payment of ${money(a)} recorded on ${s.no}.`; },
+    });
+  };
+  ACTIONS['del-sale'] = no => {
+    const s = db.sales.find(x => x.no === no); if (!s) return;
+    confirmModal(`Delete ${s.no}?`, `This removes the bill for <b>${esc(partyName(s))}</b> (${money(s.total)}) and puts its ${s.lines.length} item line(s) back into stock. This cannot be undone.`, 'Delete bill', () => {
+      s.lines.forEach(restoreLine); db.sales = db.sales.filter(x => x !== s); return `${no} deleted — stock returned.`;
     });
   };
 
+  // Products & masters
   function productForm(p = {}) {
-    const isNew = !p.id;
     return `<div class="form-grid">
-      ${field('Product name', 'name', { value: p.name || '', required: true })}
-      ${field('Salt / composition', 'salt', { value: p.salt || '', required: true })}
-      ${field('Company / supplier', 'supplierId', { value: p.supplierId, required: true, options: db.suppliers.map(s => [s.id, s.name]) })}
-      ${field('Category', 'category', { value: p.category || 'Tablet', options: ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Gel', 'Sachet', 'Liquid', 'Drops', 'Ointment', 'Device', 'Other'] })}
-      ${field('Pack size', 'pack', { value: p.pack || '', required: true, attrs: 'placeholder="e.g. 10 Tab"' })}
-      ${field('HSN code', 'hsn', { value: p.hsn || '3004', required: true, attrs: 'pattern="[0-9]{4,8}"' })}
-      ${field('GST rate', 'gst', { value: p.gst ?? 5, options: [[0, '0%'], [5, '5%'], [12, '12%'], [18, '18%']] })}
-      ${field('MRP (₹)', 'mrp', { type: 'number', value: p.mrp ?? '', required: true, attrs: 'min="0" step="0.01"' })}
-      ${field('PTR — rate to chemist (₹)', 'ptr', { type: 'number', value: p.ptr ?? '', required: true, attrs: 'min="0" step="0.01"' })}
-      ${field('PTS — purchase rate (₹)', 'pts', { type: 'number', value: p.pts ?? '', required: true, attrs: 'min="0" step="0.01"' })}
-      ${field('Reorder level (units)', 'reorder', { type: 'number', value: p.reorder ?? 100, required: true, attrs: 'min="0" step="1"' })}
-    </div>
-    ${isNew ? `<div class="card-title" style="font-size:15px">Opening stock <span class="small muted">(optional)</span></div>
-    <div class="form-grid">
-      ${field('Batch no.', 'obatch')}
-      ${field('Expiry', 'oexpiry', { type: 'month' })}
-      ${field('Quantity', 'oqty', { type: 'number', attrs: 'min="0" step="1"' })}
-    </div>` : ''}`;
+      ${field('Item name', 'name', { value: p.name || '', required: true, full: true })}
+      ${field('Company / brand', 'company', { value: company(p.companyId)?.name || '', required: true, attrs: 'list="dl-companies"' })}
+      ${field('MFG name', 'mfg', { value: p.mfg || '' })}
+      ${field('Category', 'categoryId', { value: p.categoryId || defaultCategoryId(), options: db.categories.map(c => [c.id, c.name]) })}
+      ${field('Form', 'form', { value: p.form || 'Tablet', options: db.forms.map(f => f.name) })}
+      ${field('Pack', 'pack', { value: p.pack || '', required: true, attrs: 'placeholder="e.g. 10TAB, 100ML"' })}
+      ${field('HSN code', 'hsn', { value: p.hsn || '30049099', required: true, attrs: 'pattern="[0-9]{4,8}"' })}
+      ${field('Salt / composition', 'salt', { value: p.salt || '' })}
+      ${field('GST %', 'gst', { value: p.gst ?? 12, options: GST_OPTS })}
+      ${field('MRP (₹)', 'mrp', { type: 'number', value: p.mrp ?? '', required: true, attrs: numAttrs() })}
+      ${field('Sale rate to chemist (₹)', 'ptr', { type: 'number', value: p.ptr ?? '', required: true, attrs: numAttrs() })}
+      ${field('Purchase rate (₹)', 'pts', { type: 'number', value: p.pts ?? '', required: true, attrs: numAttrs() })}
+      ${field('Reorder level', 'reorder', { type: 'number', value: p.reorder ?? 10, required: true, attrs: numAttrs('1') })}
+    </div>`;
   }
   function readProduct(d, p) {
     Object.assign(p, {
-      name: d.name.trim(), salt: d.salt.trim(), supplierId: d.supplierId, category: d.category, pack: d.pack.trim(), hsn: d.hsn.trim(),
-      gst: +d.gst, mrp: round2(+d.mrp), ptr: round2(+d.ptr), pts: round2(+d.pts), reorder: Math.floor(+d.reorder),
+      name: norm(d.name), companyId: findOrCreateCompany(d.company), mfg: d.mfg.trim(), categoryId: d.categoryId, form: d.form, pack: d.pack.trim(), hsn: d.hsn.trim(), salt: (d.salt || '').trim(),
+      gst: num(d.gst), mrp: round2(num(d.mrp)), ptr: round2(num(d.ptr)), pts: round2(num(d.pts)), reorder: Math.floor(num(d.reorder)),
     });
   }
+  const productCheck = (d, self) => {
+    if (num(d.ptr) > num(d.mrp)) { toast('Sale rate cannot be above MRP.'); return false; }
+    const dup = findProductByName(d.name); if (dup && dup !== self) { toast(`${dup.name} already exists.`); return false; }
+    return true;
+  };
   ACTIONS['new-product'] = () => openModal({
     title: 'Add product', body: productForm(), submitLabel: 'Add product',
-    onSubmit: d => {
-      if (+d.ptr > +d.mrp || +d.pts > +d.ptr) { toast('Rates should follow PTS ≤ PTR ≤ MRP.'); return false; }
-      const p = { id: nextNo('P', db.products, 'id').replace(/^P(\d+)$/, (m, n) => 'P' + n.padStart(3, '0')) };
-      readProduct(d, p); db.products.push(p);
-      if (d.obatch && d.oexpiry && +d.oqty > 0) db.batches.push({ id: uid(), productId: p.id, batch: d.obatch.trim(), expiry: d.oexpiry, qty: Math.floor(+d.oqty) });
-      return `${p.name} added.`;
-    },
+    onSubmit: d => { if (!productCheck(d, null)) return false; const p = { id: nextId('P', db.products) }; readProduct(d, p); db.products.push(p); return `${p.name} added. Use “Add stock” to enter its batches.`; },
   });
   ACTIONS['edit-product'] = id => {
     const p = prod(id); if (!p) return;
+    openModal({ title: `Edit ${p.name}`, body: productForm(p), onSubmit: d => { if (!productCheck(d, p)) return false; readProduct(d, p); return `${p.name} updated.`; } });
+  };
+  ACTIONS['del-product'] = id => {
+    const p = prod(id); if (!p) return;
+    const inStock = db.batches.some(b => b.productId === id && avail(b) > 0);
+    const used = db.sales.some(s => s.lines.some(l => l.productId === id)) || db.pos.some(o => o.lines.some(l => l.productId === id)) || db.grns.some(g => g.lines.some(l => l.productId === id)) || db.pinvoices.some(i => (i.lines || []).some(l => l.productId === id));
+    if (inStock || used) { toast(`${p.name} has stock or appears on bills, so it can’t be deleted. Set its stock to zero or keep it.`); return; }
+    confirmModal(`Delete ${p.name}?`, 'The product and its empty batches will be removed. This cannot be undone.', 'Delete product', () => {
+      db.products = db.products.filter(x => x !== p); db.batches = db.batches.filter(b => b.productId !== id); return `${p.name} deleted.`;
+    });
+  };
+  ACTIONS['master-add'] = kind => openModal({
+    title: `Add ${MASTER_LABEL[kind][1]}`, size: 'sm', body: `<div class="form-grid">${field('Name', 'name', { required: true, full: true })}</div>`,
+    onSubmit: d => {
+      const name = kind === 'companies' ? norm(d.name) : d.name.trim();
+      if (db[kind].some(m => norm(m.name) === norm(name))) { toast(`${name} already exists.`); return false; }
+      db[kind].push({ id: nextId({ companies: 'M', categories: 'K', forms: 'F' }[kind], db[kind], 2), name }); return `${name} added.`;
+    },
+  });
+  ACTIONS['master-edit'] = v => {
+    const [kind, id] = v.split('|'); const m = db[kind].find(x => x.id === id); if (!m) return;
     openModal({
-      title: `Edit ${p.name}`, body: productForm(p),
+      title: `Edit ${MASTER_LABEL[kind][1]}`, size: 'sm', body: `<div class="form-grid">${field('Name', 'name', { value: m.name, required: true, full: true })}</div>`,
       onSubmit: d => {
-        if (+d.ptr > +d.mrp || +d.pts > +d.ptr) { toast('Rates should follow PTS ≤ PTR ≤ MRP.'); return false; }
-        readProduct(d, p); return `${p.name} updated.`;
+        const name = kind === 'companies' ? norm(d.name) : d.name.trim();
+        if (db[kind].some(x => x !== m && norm(x.name) === norm(name))) { toast(`${name} already exists.`); return false; }
+        if (kind === 'forms') db.products.filter(p => p.form === m.name).forEach(p => { p.form = name; });
+        m.name = name; return `${name} saved.`;
       },
     });
   };
+  ACTIONS['master-del'] = v => {
+    const [kind, id] = v.split('|'); const m = db[kind].find(x => x.id === id); if (!m) return;
+    const n = masterUsage[kind](id);
+    if (n) { toast(`${m.name} is used by ${n} product(s). Change those products first.`); return; }
+    confirmModal(`Delete ${m.name}?`, 'This cannot be undone.', 'Delete', () => { db[kind] = db[kind].filter(x => x !== m); return `${m.name} deleted.`; });
+  };
 
-  ACTIONS['new-chemist'] = () => openModal({
-    title: 'Onboard a chemist', submitLabel: 'Onboard',
-    body: `<div class="form-grid">
-      ${field('Firm name', 'name', { required: true })}
-      ${field('Owner / pharmacist', 'owner', { required: true })}
-      ${field('Mobile', 'phone', { type: 'tel', required: true, attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
-      ${field('City', 'city', { required: true })}
-      ${field('Drug licence no. (20B / 21B)', 'dl', { required: true })}
-      ${field('GSTIN', 'gstin', { attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN, e.g. 08ABCDE1234F1Z5" style="text-transform:uppercase"` })}
-      ${field('Credit limit (₹)', 'creditLimit', { type: 'number', value: 100000, required: true, attrs: 'min="0" step="1000"' })}
-      ${field('Payment terms (days)', 'terms', { type: 'number', value: 30, required: true, attrs: 'min="0" step="1"' })}
-      ${field('Address', 'address', { full: true })}
-    </div>
-    <div class="small muted">New chemists start as “Pending verification”. Activate them after checking the drug licence to allow billing.</div>`,
-    onSubmit: d => {
-      const id = 'C' + String(Math.max(0, ...db.chemists.map(c => +c.id.slice(1))) + 1).padStart(3, '0');
-      db.chemists.push({ id, name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, city: d.city.trim(), dl: d.dl.trim(), gstin: (d.gstin || '').toUpperCase(), creditLimit: +d.creditLimit, terms: +d.terms, address: d.address, joined: todayIso, status: 'Pending verification' });
-      return `${d.name} onboarded — pending verification.`;
-    },
-  });
+  // Stock batches
+  function batchForm(b = {}) {
+    const isNew = !b.id;
+    return `<div class="form-grid g3">
+      ${isNew ? field('Item', 'productId', { required: true, full: true, value: b.productId || '', options: [['', 'Select item'], ...[...db.products].sort((x, y) => x.name.localeCompare(y.name)).map(p => [p.id, p.name])] }) : `<div class="field full"><label>Item</label><div class="strong">${esc(prod(b.productId)?.name)}</div></div>`}
+      ${field('Batch', 'batch', { value: b.batch || '', required: true })}
+      ${field('Expiry (MM/YY)', 'exp', { value: b.expiry ? isoToExp(b.expiry) : '', required: true, attrs: 'pattern="(0[1-9]|1[0-2])/[0-9]{2}" placeholder="01/28"' })}
+      ${field('Supplier', 'supplierId', { value: b.supplierId || '', options: [['', '—'], ...db.suppliers.map(s => [s.id, s.name])] })}
+      ${field('Qty', 'qty', { type: 'number', value: b.qty ?? '', required: true, attrs: numAttrs('1') })}
+      ${field('Free', 'free', { type: 'number', value: b.free ?? 0, attrs: numAttrs('1') })}
+      ${field('Rate (₹)', 'rate', { type: 'number', value: b.rate ?? '', required: true, attrs: numAttrs() })}
+      ${field('MRP (₹)', 'mrp', { type: 'number', value: b.mrp ?? '', required: true, attrs: numAttrs() })}
+      ${field('CD %', 'cd', { type: 'number', value: b.cd ?? 0, attrs: numAttrs() })}
+      ${field('TD %', 'td', { type: 'number', value: b.td ?? 0, attrs: numAttrs() })}
+      ${field('GST %', 'gst', { value: b.gst ?? 12, options: GST_OPTS })}
+    </div>`;
+  }
+  function readBatch(d, b) {
+    Object.assign(b, { batch: d.batch.trim().toUpperCase(), expiry: expToIso(d.exp), supplierId: d.supplierId, qty: Math.floor(num(d.qty)), free: Math.floor(num(d.free)), rate: round2(num(d.rate)), mrp: round2(num(d.mrp)), cd: num(d.cd), td: num(d.td), gst: num(d.gst) });
+  }
+  ACTIONS['new-batch'] = () => {
+    openModal({
+      title: 'Add stock', size: 'lg', body: batchForm(), submitLabel: 'Add to stock',
+      onSubmit: d => {
+        if (!expToIso(d.exp)) { toast('Expiry must be MM/YY.'); return false; }
+        const exists = db.batches.find(x => x.productId === d.productId && norm(x.batch) === norm(d.batch));
+        if (exists) { toast('This batch already exists — edit it instead.'); return false; }
+        const b = { id: uid(), productId: d.productId, source: 'Manual entry', verified: true }; readBatch(d, b); db.batches.push(b);
+        return `Batch ${b.batch} added to stock.`;
+      },
+    });
+    $('#f-productId').addEventListener('change', e => {
+      const p = prod(e.target.value); if (!p) return;
+      $('#f-rate').value = p.pts; $('#f-mrp').value = p.mrp; $('#f-gst').value = p.gst; $('#f-cd').value = db.settings.defaultCd || 0;
+    });
+  };
+  ACTIONS['edit-batch'] = id => {
+    const b = batchById(id); if (!b) return;
+    openModal({
+      title: `Edit stock · ${prod(b.productId)?.name}`, size: 'lg', body: batchForm(b) + `<label class="check-line"><input type="checkbox" name="verified" ${b.verified ? 'checked' : ''}> Checked against the bill</label>`,
+      onSubmit: d => {
+        if (!expToIso(d.exp)) { toast('Expiry must be MM/YY.'); return false; }
+        if (db.batches.some(x => x !== b && x.productId === b.productId && norm(x.batch) === norm(d.batch))) { toast('Another line already has this batch.'); return false; }
+        readBatch(d, b); b.verified = !!d.verified; return `Batch ${b.batch} updated.`;
+      },
+    });
+  };
+  ACTIONS['del-batch'] = id => {
+    const b = batchById(id); if (!b) return;
+    confirmModal(`Delete batch ${b.batch}?`, `This removes ${qty(avail(b))} units of <b>${esc(prod(b.productId)?.name)}</b> from stock. Bills that used this batch keep their record. This cannot be undone.`, 'Delete batch', () => {
+      db.batches = db.batches.filter(x => x !== b); return `Batch ${b.batch} deleted.`;
+    });
+  };
+  ACTIONS['verify-batch'] = id => { const b = batchById(id); if (!b) return; b.verified = true; refresh(); toast(`Batch ${b.batch} marked checked.`); };
+  ACTIONS['verify-all'] = () => {
+    const list = db.batches.filter(b => !b.verified && avail(b) > 0);
+    confirmModal('Mark all lines checked?', `${list.length} stock lines added from bills will be marked as checked. Only do this after comparing them with the paper bills.`, 'Mark checked', () => { list.forEach(b => { b.verified = true; }); return `${list.length} lines marked checked.`; });
+  };
+
+  // Chemists
+  const chemistForm = (c = {}) => `${licReadBox('chemist')}<div class="form-grid">
+      ${field('Firm name', 'name', { value: c.name || '', required: true })}
+      ${field('Owner / pharmacist', 'owner', { value: c.owner || '', required: true })}
+      ${field('Mobile', 'phone', { type: 'tel', value: c.phone || '', required: true, attrs: 'pattern="[6-9][0-9]{9}" inputmode="numeric" maxlength="10" title="10-digit mobile number"' })}
+      ${field('Email', 'email', { type: 'email', value: c.email || '', attrs: 'autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="used as the portal login ID"' })}
+      ${addrFields(c, true)}
+      ${licFields(c, true)}
+      <div class="field full form-sec">Credit &amp; discount</div>
+      ${field('Credit limit (₹)', 'creditLimit', { type: 'number', value: c.creditLimit ?? 100000, required: true, attrs: numAttrs('1') })}
+      ${field('Payment terms (days)', 'terms', { type: 'number', value: c.terms ?? 14, required: true, attrs: numAttrs('1') })}
+      ${field('Default CD %', 'cd', { type: 'number', value: c.cd ?? db.settings.defaultCd ?? 0, attrs: numAttrs() })}
+      ${field('Default TD %', 'td', { type: 'number', value: c.td ?? 0, attrs: numAttrs() })}
+    </div>`;
+  const readChemist = (d, c) => Object.assign(c, { name: d.name.trim(), owner: d.owner.trim(), phone: d.phone, email: String(d.email || '').trim().toLowerCase(), ...readAddr(d), ...readLic(d), creditLimit: num(d.creditLimit), terms: num(d.terms), cd: num(d.cd), td: num(d.td) });
+  // Portal login section inside the chemist form: optional when onboarding, edits the login when it exists
+  const chemistPortalBlock = (c, isNew) => !SERVER ? '' : `<div class="field full form-sec">Portal login</div>
+    <label class="check-line field full"><input type="checkbox" name="pWant" id="pWant" ${portalLogins[c.id] ? 'checked disabled' : isNew ? 'checked' : ''}> ${portalLogins[c.id] ? 'Has a portal login' : 'Create a portal login for this chemist'}</label>
+    <div id="pBlock" class="field full ${portalLogins[c.id] || isNew ? '' : 'hidden'}">${portalFields(c, portalLogins[c.id])}</div>`;
+  function afterChemistSave(c, d) {
+    if (!SERVER) return;
+    const l = portalLogins[c.id];
+    if (!l && !d.pWant) return;
+    if (l && !d.pPass && String(d.pUser || '').trim().toLowerCase() === l.username && !!d.pActive === l.active) return;
+    if (!l && !d.pPass) { toast(`${c.name} saved without a portal login (no password set).`); return; }
+    savePortalLogin(c, d).then(msg => { render(); if (d.pPass) showNotice(msg); else toast(msg); }).catch(err => toast(`${c.name} was saved, but the login was not: ${err.message}`));
+  }
+  const portalFieldsOk = d => {
+    if (!SERVER || !(d.pWant || d.pUser)) return true;
+    if (!(d.pWant || portalLogins[d._id])) return true;
+    if (!LOGIN_ID_RE.test(String(d.pUser || '').trim().toLowerCase())) { toast('Login ID: an email address, or 3–100 letters, numbers, dot, dash, underscore or @.'); return false; }
+    if (!portalLogins[d._id] && !d.pPass) { toast('Set a password for the new login — fill in the mobile number, or type a password.'); return false; }
+    if (d.pPass && d.pPass.length < 8) { toast('The password must be at least 8 characters.'); return false; }
+    return true;
+  };
+  ACTIONS['new-chemist'] = () => {
+    openModal({
+      title: 'Onboard a chemist', submitLabel: 'Onboard', size: 'lg',
+      body: chemistForm() + `<div class="form-grid"><div class="field full form-sec">Status</div>
+          ${field('Status', 'status', { value: 'Pending verification', options: ['Pending verification', 'Active'] })}
+          <div class="field small muted status-note">Choose “Pending verification” until the drug licence is checked. Only Active chemists can be billed and can sign in to the portal.</div>
+          ${chemistPortalBlock({}, true)}</div>`,
+      onSubmit: d => {
+        if (!addrOk(d) || (d.pWant && !portalFieldsOk(d))) return false;
+        const c = { id: nextId('C', db.chemists), joined: todayIso, status: d.status === 'Active' ? 'Active' : 'Pending verification' };
+        readChemist(d, c); db.chemists.push(c); fileLicence('chemist', c.id);
+        afterChemistSave(c, d);
+        return `${c.name} onboarded — ${c.status.toLowerCase()}.`;
+      },
+    });
+    $('#pWant')?.addEventListener('change', e => { $('#pBlock').classList.toggle('hidden', !e.target.checked); syncLoginDefaults(); });
+  };
+  ACTIONS['edit-chemist'] = id => {
+    const c = chem(id); if (!c) return;
+    openModal({
+      title: `Edit ${c.name}`, size: 'lg', body: chemistForm(c) + (SERVER ? `<div class="form-grid">${chemistPortalBlock(c)}</div>` : ''),
+      onSubmit: d => { if (!addrOk(d) || !portalFieldsOk({ ...d, _id: c.id })) return false; readChemist(d, c); fileLicence('chemist', c.id); afterChemistSave(c, d); return `${c.name} updated.`; },
+    });
+    $('#pWant')?.addEventListener('change', e => $('#pBlock').classList.toggle('hidden', !e.target.checked));
+  };
+  ACTIONS['del-chemist'] = id => {
+    const c = chem(id); if (!c) return;
+    const n = db.sales.filter(s => s.party.chemistId === id).length;
+    if (n) { toast(`${c.name} has ${n} sale bill(s), so it can’t be deleted. Put it on hold instead.`); return; }
+    confirmModal(`Delete ${c.name}?`, 'This cannot be undone.', 'Delete chemist', () => { db.chemists = db.chemists.filter(x => x !== c); return `${c.name} deleted.`; });
+  };
   ACTIONS['view-chemist'] = id => {
     const c = chem(id); if (!c) return;
-    const inv = db.sales.filter(s => s.chemistId === id).sort((a, b) => b.date.localeCompare(a.date));
+    const inv = db.sales.filter(s => s.party.chemistId === id).sort((a, b) => b.date.localeCompare(a.date));
     const btns = [['Active', 'Activate'], ['On hold', 'Put on hold']].filter(([s]) => s !== c.status)
       .map(([s, l]) => `<button type="button" class="btn ${s === 'Active' ? 'primary' : ''}" data-act="chemist-status" data-id="${c.id}|${s}">${l}</button>`).join('');
     openModal({
-      title: c.name, wide: true,
-      extraFoot: `<div style="margin-right:auto;display:flex;gap:8px">${btns}</div>`,
-      body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['City', esc(c.city)], ['Drug licence', esc(c.dl)], ['GSTIN', esc(c.gstin || '—')], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Onboarded', fmtDate(c.joined)]])}
-        <div class="card-title" style="font-size:15px">Invoices (${inv.length})</div>
-        ${miniTable([
-          { h: 'Invoice', c: s => s.no }, { h: 'Date', c: s => fmtDate(s.date) },
-          { h: 'Amount', r: 1, c: s => money(s.total) }, { h: 'Balance', r: 1, c: s => money(balance(s)) }, { h: 'Status', c: s => pill(saleStatus(s)) },
-        ], inv.slice(0, 12))}`,
+      title: c.name, size: 'lg',
+      extraFoot: `<div class="foot-left">${btns}<button type="button" class="btn" data-act="edit-chemist" data-id="${c.id}">Edit</button>${SERVER ? `<button type="button" class="btn" data-act="portal-login" data-id="${c.id}">${portalLogins[c.id] ? 'Portal login' : 'Create portal login'}</button>` : ''}</div>`,
+      body: `${detailGrid([['Owner', esc(c.owner)], ['Mobile', esc(c.phone)], ['Address', esc(addrText(c) || '—')], ['Nearby hospital', esc(c.hospital || '—')], ['Drug licence 1', esc(c.dl1 || '—')], ['Drug licence 2', esc(c.dl2 || '—')], ['Drug licence valid upto', licValid(c)], ['FSSAI no.', esc(c.fssai || '—')], ['FSSAI valid upto', fssaiValid(c)], ['GSTIN', esc(c.gstin || '—')], ['Licence copies', licDocsBtn('chemist', c.id)], ['Status', pill(c.status)], ['Credit limit', money(c.creditLimit)], ['Outstanding', money(chemOutstanding(c.id))], ['Default CD / TD', `${dec(c.cd)}% / ${dec(c.td)}%`], ...(SERVER ? [['Portal login', portalCell(c)], ['Portal orders', String(chemOrders.filter(o => o.chemistId === c.id).length)]] : [])])}
+        <div class="card-title" style="font-size:15px">Bills (${inv.length})</div>
+        ${miniTable([{ h: 'Bill', c: s => s.no }, { h: 'Date', c: s => fmtDate(s.date) }, { h: 'Amount', r: 1, c: s => money(s.total) }, { h: 'Balance', r: 1, c: s => money(balance(s)) }, { h: 'Status', c: s => pill(saleStatus(s)) }], inv.slice(0, 12))}`,
     });
   };
-  ACTIONS['chemist-status'] = v => {
-    const [id, status] = v.split('|'); const c = chem(id); if (!c) return;
-    c.status = status; closeModal(); refresh(); toast(`${c.name} is now ${status}.`);
-  };
-
-  const supplierForm = (s = {}) => `<div class="form-grid">
-    ${field('Supplier name', 'name', { value: s.name || '', required: true })}
-    ${field('Contact person', 'contact', { value: s.contact || '', required: true })}
-    ${field('Mobile', 'phone', { type: 'tel', value: s.phone || '', required: true, attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
-    ${field('City', 'city', { value: s.city || '', required: true })}
-    ${field('GSTIN', 'gstin', { value: s.gstin || '', required: true, attrs: `pattern="${GSTIN_RE}" title="15-character GSTIN" style="text-transform:uppercase"` })}
-    ${field('Drug licence no.', 'dl', { value: s.dl || '', required: true })}
-    ${field('Payment terms (days)', 'terms', { type: 'number', value: s.terms ?? 30, required: true, attrs: 'min="0" step="1"' })}
-  </div>`;
-  ACTIONS['new-supplier'] = () => openModal({
-    title: 'Add supplier', body: supplierForm(), submitLabel: 'Add supplier',
-    onSubmit: d => {
-      const id = 'S' + String(Math.max(0, ...db.suppliers.map(s => +s.id.slice(1))) + 1).padStart(3, '0');
-      db.suppliers.push({ id, name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, city: d.city.trim(), gstin: d.gstin.toUpperCase(), dl: d.dl.trim(), terms: +d.terms });
-      return `${d.name} added.`;
-    },
+  // Hospital directory
+  const hospitalForm = (h = {}) => `<div class="form-grid">
+      ${field('Name', 'name', { value: h.name || '', required: true, full: true, attrs: 'placeholder="e.g. CHC Bharari"' })}
+      ${field('Type', 'type', { value: h.type || 'PHC', options: HOSP_TYPES })}
+      ${field('District', 'district', { value: h.district || '', required: true, attrs: 'list="dl-a-district" autocomplete="off"' })}
+      ${field('Tehsil / block', 'tehsil', { value: h.tehsil || '', attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+      ${field('Village / locality', 'locality', { value: h.locality || '', attrs: 'list="dl-a-locality" autocomplete="off"' })}
+      ${field('PIN code', 'pincode', { value: h.pincode || '', attrs: 'pattern="[1-9][0-9]{5}" inputmode="numeric" maxlength="6"' })}
+      ${field('Hospital phone / landline', 'phone', { value: h.phone || '' })}
+      <div class="field full form-sec">Contacts</div>
+      ${field('Head of hospital (name)', 'headName', { value: h.headName || '', attrs: 'placeholder="e.g. BMO / SMO / Principal"' })}
+      ${field('Head of hospital — mobile', 'headMobile', { type: 'tel', value: h.headMobile || '', attrs: 'pattern=\"[6-9][0-9]{9}\" inputmode=\"numeric\" maxlength=\"10\" title=\"10-digit mobile number\"' })}
+      ${field('Pharmacist (name)', 'pharmName', { value: h.pharmName || '' })}
+      ${field('Pharmacist — mobile', 'pharmMobile', { type: 'tel', value: h.pharmMobile || '', attrs: 'pattern=\"[6-9][0-9]{9}\" inputmode=\"numeric\" maxlength=\"10\" title=\"10-digit mobile number\"' })}
+      <datalist id="dl-a-district">${dlOptions(HP_DISTRICTS)}</datalist>
+      <datalist id="dl-a-tehsil">${dlOptions(usedValues('tehsil', h.district))}</datalist>
+      <datalist id="dl-a-locality">${dlOptions(usedValues('locality', h.district))}</datalist>
+    </div>`;
+  const readHospital = (d, h) => Object.assign(h, { name: d.name.trim(), type: d.type, district: d.district.trim(), tehsil: (d.tehsil || '').trim(), locality: (d.locality || '').trim(), pincode: (d.pincode || '').trim(), phone: (d.phone || '').trim(), headName: (d.headName || '').trim(), headMobile: (d.headMobile || '').trim(), pharmName: (d.pharmName || '').trim(), pharmMobile: (d.pharmMobile || '').trim() });
+  const telLink = v => v ? `<a href="tel:${esc(String(v).replace(/[^\d+]/g, ''))}">${esc(v)}</a>` : '—';
+  const contactHtml = (name, mob) => name || mob ? `${name ? `<span>${esc(name)}</span>` : ''}${mob ? `<div class="small">${telLink(mob)}</div>` : ''}` : '<span class="muted">—</span>';
+  const hospDup = (d, self) => (db.hospitals || []).find(x => x !== self && norm(x.name) === norm(d.name) && norm(x.district) === norm(d.district));
+  ACTIONS['new-hospital'] = () => openModal({
+    title: 'Add hospital / health centre', submitLabel: 'Add', body: hospitalForm(),
+    onSubmit: d => { if (hospDup(d)) { toast(`${d.name} is already in ${d.district}.`); return false; } const h = { id: nextId('H', db.hospitals, 4), source: 'Added by you' }; readHospital(d, h); db.hospitals.push(h); return `${h.name} added.`; },
   });
-  ACTIONS['view-supplier'] = id => {
-    const s = sup(id); if (!s) return;
-    const pos = db.pos.filter(p => p.supplierId === id).sort((a, b) => b.date.localeCompare(a.date));
+  ACTIONS['edit-hospital'] = id => {
+    const h = hospById(id); if (!h) return;
     openModal({
-      title: s.name, wide: true, submitLabel: 'Save changes',
-      body: `${detailGrid([['Payable', money(supPayable(id))], ['Products supplied', db.products.filter(p => p.supplierId === id).length], ['Purchase orders', pos.length]])}
-        ${supplierForm(s)}
-        <div class="card-title" style="font-size:15px">Recent purchase orders</div>
-        ${miniTable([{ h: 'PO', c: p => p.no }, { h: 'Date', c: p => fmtDate(p.date) }, { h: 'Value', r: 1, c: p => money(p.total) }, { h: 'Status', c: p => pill(p.status) }], pos.slice(0, 8))}`,
-      onSubmit: d => { Object.assign(s, { name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, city: d.city.trim(), gstin: d.gstin.toUpperCase(), dl: d.dl.trim(), terms: +d.terms }); return `${s.name} updated.`; },
-    });
-  };
-
-  function poModal(preset = {}) {
-    openModal({
-      title: 'New purchase order', wide: true, submitLabel: 'Create PO',
-      body: `<div class="form-grid">
-          ${field('Supplier', 'supplierId', { required: true, value: preset.supplierId || '', options: [['', 'Select supplier'], ...db.suppliers.map(s => [s.id, s.name])] })}
-          ${field('Expected delivery', 'expected', { type: 'date', value: addDays(todayIso, 7), required: true, attrs: `min="${todayIso}"` })}
-        </div>
-        ${linesBlock('po', preset.lines)}`,
+      title: `Edit ${h.name}`, body: hospitalForm(h),
       onSubmit: d => {
-        const lines = readLines();
-        if (!lines.length) { toast('Add at least one product with a quantity.'); return false; }
-        const no = nextNo('PO-', db.pos);
-        db.pos.push({ no, date: todayIso, expected: d.expected, supplierId: d.supplierId, lines, ...lineTotals(lines), status: 'Open' });
-        return `${no} created for ${money(lineTotals(lines).total)}.`;
+        if (hospDup(d, h)) { toast(`${d.name} is already in ${d.district}.`); return false; }
+        readHospital(d, h); if (h.source === 'HPPCB list' || /verify/i.test(h.source || '')) h.source = 'Checked by you';
+        [...addrHolders(), ...(db.doctors || [])].forEach(x => { if (x.hospitalId === h.id) x.hospital = h.name; });
+        return `${h.name} saved.`;
       },
     });
-    recalcLines();
+  };
+  function deleteHospitals(items) {
+    const ids = new Set(items.map(h => h.id));
+    const linked = [...addrHolders(), ...(db.doctors || [])].filter(x => ids.has(x.hospitalId)).length;
+    confirmModal(`Delete ${items.length === 1 ? items[0].name : items.length + ' hospitals'}?`, `${linked ? `${linked} chemist/supplier record(s) point to ${items.length === 1 ? 'it' : 'them'} (chemists, suppliers or doctors); they will keep the hospital name but no longer link to the directory. ` : ''}This cannot be undone.`, 'Delete', () => {
+      [...addrHolders(), ...(db.doctors || [])].forEach(x => { if (ids.has(x.hospitalId)) x.hospitalId = ''; });
+      db.hospitals = db.hospitals.filter(h => !ids.has(h.id));
+      if (listState.hospitals) listState.hospitals.sel.clear();
+      return `${items.length} deleted.`;
+    });
   }
-  ACTIONS['new-po'] = () => poModal();
+  ACTIONS['del-hospital'] = id => { const h = hospById(id); if (h) deleteHospitals([h]); };
+  ACTIONS['view-hospital'] = id => {
+    const h = hospById(id); if (!h) return;
+    const near = nearChemists(h);
+    const docs = (db.doctors || []).filter(d => d.hospitalId === h.id).sort((a, b) => a.name.localeCompare(b.name));
+    const sameArea = db.chemists.filter(c => !near.includes(c) && h.tehsil && norm(c.tehsil) === norm(h.tehsil) && norm(c.district) === norm(h.district));
+    const chemCols = [{ h: 'Chemist', c: c => `<a href="#" data-act="view-chemist" data-id="${esc(c.id)}">${esc(c.name)}</a>` }, { h: 'Village / locality', c: c => esc(c.locality || c.city || '—') }, { h: 'Mobile', c: c => esc(c.phone) }, { h: 'Status', c: c => pill(c.status) }, { h: 'Outstanding', r: 1, c: c => money(chemOutstanding(c.id)) }];
+    openModal({
+      title: h.name, size: 'lg',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-hospital" data-id="${esc(h.id)}">Edit</button><button type="button" class="btn" data-act="new-doctor" data-id="${esc(h.id)}">Add doctor here</button></div>`,
+      body: `${detailGrid([['Type', pill(h.type)], ['District', esc(h.district || '—')], ['Tehsil / block', esc(h.tehsil || '—')], ['Village / locality', esc(h.locality || '—')], ['PIN', esc(h.pincode || '—')], ['Hospital phone', telLink(h.phone)], ['Head of hospital', contactHtml(h.headName, h.headMobile)], ['Pharmacist', contactHtml(h.pharmName, h.pharmMobile)], ['Source', esc(h.source || '—')]])}
+        <div class="card-title" style="font-size:15px">Doctors working here (${docs.length})</div>
+        ${docs.length ? miniTable([{ h: 'Doctor', c: d => `<a href="#" data-act="view-doctor" data-id="${esc(d.id)}">${esc(d.name)}</a>` }, { h: 'Designation', c: d => esc(d.designation || '—') }, { h: 'Specialization', c: d => esc(d.specialization || '—') }, { h: 'Mobile', c: d => telLink(d.mobile) }], docs) : '<div class="small muted">No doctors saved for this hospital yet.</div>'}
+        <div class="card-title" style="font-size:15px">Chemists with this as nearby hospital (${near.length})</div>
+        ${near.length ? miniTable(chemCols, near) : '<div class="small muted">None yet. Set it as “Nearby hospital” when onboarding or editing a chemist.</div>'}
+        ${sameArea.length ? `<div class="card-title" style="font-size:15px">Other chemists in ${esc(h.tehsil)} (${sameArea.length})</div>${miniTable(chemCols, sameArea)}` : ''}`,
+    });
+  };
+  const HOSP_CSV = ['name', 'type', 'district', 'tehsil', 'locality', 'pincode', 'phone', 'headName', 'headMobile', 'pharmName', 'pharmMobile'];
+  ACTIONS['hosp-export'] = () => downloadText(`hospital-directory-${todayIso}.csv`, [HOSP_CSV.join(','), ...listRows('hospitals').map(h => HOSP_CSV.map(k => csvCell(h[k])).join(','))].join('\r\n'));
+  function importHospitals(text) {
+    const rows = parseCsv(text.replace(/^﻿/, ''));
+    if (rows.length < 2) throw new Error('The CSV has no rows.');
+    const head = rows[0].map(h => h.trim().toLowerCase().replace(/[^a-z]/g, ''));
+    const alias = { name: 'name', hospital: 'name', facility: 'name', facilityname: 'name', type: 'type', facilitytype: 'type', district: 'district', tehsil: 'tehsil', block: 'tehsil', subdistrict: 'tehsil', locality: 'locality', village: 'locality', place: 'locality', pincode: 'pincode', pin: 'pincode', phone: 'phone', landline: 'phone', headname: 'headName', head: 'headName', headofhospital: 'headName', headmobile: 'headMobile', headofhospitalmobile: 'headMobile', pharmname: 'pharmName', pharmacist: 'pharmName', pharmacistname: 'pharmName', pharmmobile: 'pharmMobile', pharmacistmobile: 'pharmMobile' };
+    const map = head.map(h => alias[h] || null);
+    if (!map.includes('name') || !map.includes('district')) throw new Error('The CSV needs at least “name” and “district” columns.');
+    let added = 0, updated = 0;
+    rows.slice(1).forEach(r => {
+      const d = {}; map.forEach((k, i) => { if (k) d[k] = String(r[i] ?? '').trim(); });
+      if (!d.name || !d.district) return;
+      const dist = HP_DISTRICTS.find(x => norm(x) === norm(d.district)) || d.district;
+      const type = HOSP_TYPES.find(t => norm(t) === norm(d.type)) || (/\bPHC\b/i.test(d.type + ' ' + d.name) ? 'PHC' : /\bCHC\b/i.test(d.type + ' ' + d.name) ? 'CHC' : /civil/i.test(d.type + ' ' + d.name) ? 'Civil Hospital' : 'Other');
+      const ex = db.hospitals.find(h => norm(h.name) === norm(d.name) && norm(h.district) === norm(dist));
+      const vals = { name: d.name, type, district: dist, tehsil: d.tehsil || ex?.tehsil || '', locality: d.locality || ex?.locality || '', pincode: d.pincode || ex?.pincode || '', phone: d.phone || ex?.phone || '', headName: d.headName || ex?.headName || '', headMobile: d.headMobile || ex?.headMobile || '', pharmName: d.pharmName || ex?.pharmName || '', pharmMobile: d.pharmMobile || ex?.pharmMobile || '' };
+      if (ex) { Object.assign(ex, vals); updated++; } else { db.hospitals.push({ id: nextId('H', db.hospitals, 4), ...vals, source: 'Imported' }); added++; }
+    });
+    return { added, updated };
+  }
+
+  // Doctors directory
+  const DOC_SPECS = ['Medical Officer (General)', 'General Medicine', 'General Surgery', 'Paediatrics', 'Obstetrics & Gynaecology', 'Orthopaedics', 'ENT', 'Ophthalmology', 'Dermatology', 'Psychiatry', 'Anaesthesia', 'Radiology', 'Pathology', 'Cardiology', 'Neurology', 'Nephrology', 'Gastroenterology', 'Pulmonology / Chest', 'Endocrinology / Diabetes', 'Oncology', 'Urology', 'Community Medicine', 'Dental', 'Ayurveda', 'Homoeopathy', 'Other'];
+  const DOC_DESIGS = ['Medical Officer', 'Senior Medical Officer', 'Block Medical Officer', 'Chief Medical Officer', 'Medical Superintendent', 'Specialist', 'Principal', 'Professor', 'Associate Professor', 'Assistant Professor', 'Senior Resident', 'Junior Resident', 'Dental Officer', 'Ayurvedic Medical Officer', 'Private Practitioner', 'Other'];
+  const doctorById = id => (db.doctors || []).find(d => d.id === id);
+  const doctorForm = (d = {}) => {
+    const dist = docDistrict(d);
+    return `<div class="form-grid">
+      ${field('Doctor name', 'name', { value: d.name || '', required: true, attrs: 'placeholder="e.g. Dr. A. Sharma"' })}
+      ${field('Mobile', 'mobile', { type: 'tel', value: d.mobile || '', attrs: 'pattern="[6-9][0-9]{9}" inputmode="numeric" maxlength="10" title="10-digit mobile number"' })}
+      ${field('Designation', 'designation', { value: d.designation || '', attrs: 'list="dl-doc-desig" autocomplete="off" placeholder="e.g. Medical Officer"' })}
+      ${field('Specialization', 'specialization', { value: d.specialization || '', required: true, attrs: 'list="dl-doc-spec" autocomplete="off" placeholder="e.g. Paediatrics"' })}
+      ${field('Qualification', 'qualification', { value: d.qualification || '', attrs: 'placeholder="e.g. MBBS, MD (Paediatrics)"' })}
+      ${field('Email', 'email', { type: 'email', value: d.email || '' })}
+      <div class="field full form-sec">Working at</div>
+      ${field('District', 'district', { value: dist, attrs: 'list="dl-a-district" autocomplete="off"' })}
+      ${field('Tehsil (optional, to list its hospitals first)', 'tehsil', { value: docHosp(d)?.tehsil || '', attrs: 'list="dl-a-tehsil" autocomplete="off"' })}
+      ${hospSearchBox('always', 'Hospital where they work')}
+      <div class="hidden"><select id="f-hospitalId" name="hospitalId" aria-hidden="true" tabindex="-1">${hospitalOptions(dist, docHosp(d)?.tehsil || '', d.hospitalId || (d.hospital ? '__other' : ''))}</select></div>
+      <div class="field full ${d.hospital && !d.hospitalId ? '' : 'hidden'}" id="hospOtherWrap"><label for="f-hospitalOther">Hospital / clinic name (it will be added to the directory)</label><input id="f-hospitalOther" name="hospitalOther" value="${esc(d.hospital && !d.hospitalId ? d.hospital : '')}"></div>
+      ${field('Notes', 'notes', { value: d.notes || '', full: true, attrs: 'placeholder="OPD days, preferred brands, visit notes…"' })}
+      <datalist id="dl-doc-spec">${dlOptions(DOC_SPECS)}</datalist>
+      <datalist id="dl-doc-desig">${dlOptions(DOC_DESIGS)}</datalist>
+      <datalist id="dl-a-district">${dlOptions(HP_DISTRICTS)}</datalist>
+      <datalist id="dl-a-tehsil">${dlOptions(usedValues('tehsil', dist))}</datalist>
+    </div>`;
+  };
+  function readDoctor(f, d) {
+    const area = { district: (f.district || '').trim(), tehsil: (f.tehsil || '').trim() };
+    const h = resolveHospital(f, area);
+    Object.assign(d, { name: f.name.trim(), mobile: (f.mobile || '').trim(), designation: (f.designation || '').trim(), specialization: (f.specialization || '').trim(), qualification: (f.qualification || '').trim(), email: (f.email || '').trim(), notes: (f.notes || '').trim(), district: hospById(h.hospitalId)?.district || area.district, ...h });
+  }
+  const doctorOk = (f, self) => {
+    if (f.mobile && (db.doctors || []).some(x => x !== self && x.mobile === f.mobile.trim())) { toast(`Mobile ${f.mobile} is already saved for ${(db.doctors || []).find(x => x !== self && x.mobile === f.mobile.trim()).name}.`); return false; }
+    if (f.hospitalId === '__other' && !String(f.hospitalOther || '').trim()) { toast('Type the hospital or clinic name, or pick one from the list.'); return false; }
+    return true;
+  };
+  ACTIONS['new-doctor'] = presetHosp => {
+    const h = hospById(presetHosp);
+    openModal({
+      title: 'Add doctor', size: 'lg', submitLabel: 'Add doctor', body: doctorForm(h ? { hospitalId: h.id, district: h.district } : {}),
+      onSubmit: f => { if (!doctorOk(f)) return false; const d = { id: nextId('D', db.doctors, 4), added: todayIso }; readDoctor(f, d); db.doctors.push(d); return `${d.name} added${d.hospital ? ' at ' + d.hospital : ''}.`; },
+    });
+    refreshHospitalSelect();
+  };
+  ACTIONS['edit-doctor'] = id => {
+    const d = doctorById(id); if (!d) return;
+    openModal({ title: `Edit ${d.name}`, size: 'lg', body: doctorForm(d), onSubmit: f => { if (!doctorOk(f, d)) return false; readDoctor(f, d); return `${d.name} saved.`; } });
+    refreshHospitalSelect();
+  };
+  function deleteDoctors(items) {
+    confirmModal(`Delete ${items.length === 1 ? items[0].name : items.length + ' doctors'}?`, 'This cannot be undone.', 'Delete', () => {
+      const ids = new Set(items.map(d => d.id)); db.doctors = db.doctors.filter(d => !ids.has(d.id));
+      if (listState.doctors) listState.doctors.sel.clear();
+      return `${items.length} deleted.`;
+    });
+  }
+  ACTIONS['del-doctor'] = id => { const d = doctorById(id); if (d) deleteDoctors([d]); };
+  ACTIONS['view-doctor'] = id => {
+    const d = doctorById(id); if (!d) return;
+    const h = docHosp(d);
+    const near = h ? nearChemists(h) : [];
+    openModal({
+      title: d.name, size: 'lg',
+      extraFoot: `<div class="foot-left"><button type="button" class="btn" data-act="edit-doctor" data-id="${esc(d.id)}">Edit</button>${h ? `<button type="button" class="btn" data-act="view-hospital" data-id="${esc(h.id)}">Open hospital</button>` : ''}</div>`,
+      body: `${detailGrid([['Designation', esc(d.designation || '—')], ['Specialization', esc(d.specialization || '—')], ['Qualification', esc(d.qualification || '—')], ['Mobile', telLink(d.mobile)], ['Email', d.email ? `<a href="mailto:${esc(d.email)}">${esc(d.email)}</a>` : '—'], ['Hospital', esc(h?.name || d.hospital || '—')], ['Hospital type', esc(h?.type || '—')], ['District', esc(docDistrict(d) || '—')], ['Tehsil / block', esc(h?.tehsil || '—')]])}
+        ${d.notes ? `<div><div class="small muted">Notes</div><div>${esc(d.notes)}</div></div>` : ''}
+        ${h ? `<div class="card-title" style="font-size:15px">Chemists near ${esc(h.name)} (${near.length})</div>${near.length ? miniTable([{ h: 'Chemist', c: c => `<a href="#" data-act="view-chemist" data-id="${esc(c.id)}">${esc(c.name)}</a>` }, { h: 'Village / locality', c: c => esc(c.locality || c.city || '—') }, { h: 'Mobile', c: c => telLink(c.phone) }], near) : '<div class="small muted">No chemist has this hospital as nearby hospital yet.</div>'}` : ''}`,
+    });
+  };
+  const DOC_CSV = ['name', 'designation', 'specialization', 'qualification', 'mobile', 'email', 'hospital', 'district', 'notes'];
+  ACTIONS['doc-export'] = () => downloadText(`doctors-directory-${todayIso}.csv`, [DOC_CSV.join(','), ...listRows('doctors').map(d => DOC_CSV.map(k => csvCell(k === 'hospital' ? (docHosp(d)?.name || d.hospital) : k === 'district' ? docDistrict(d) : d[k])).join(','))].join('\r\n'));
+  function importDoctors(text) {
+    const rows = parseCsv(text.replace(/^﻿/, ''));
+    if (rows.length < 2) throw new Error('The CSV has no rows.');
+    const head = rows[0].map(h => h.trim().toLowerCase().replace(/[^a-z]/g, ''));
+    const alias = { name: 'name', doctor: 'name', doctorname: 'name', designation: 'designation', post: 'designation', specialization: 'specialization', specialisation: 'specialization', speciality: 'specialization', specialty: 'specialization', qualification: 'qualification', degree: 'qualification', mobile: 'mobile', phone: 'mobile', mobileno: 'mobile', email: 'email', hospital: 'hospital', hospitalname: 'hospital', workingat: 'hospital', district: 'district', notes: 'notes' };
+    const map = head.map(h => alias[h] || null);
+    if (!map.includes('name')) throw new Error('The CSV needs a “name” column.');
+    let added = 0, updated = 0, newHosp = 0;
+    rows.slice(1).forEach(r => {
+      const f = {}; map.forEach((k, i) => { if (k) f[k] = String(r[i] ?? '').trim(); });
+      if (!f.name) return;
+      const mobile = f.mobile ? f.mobile.replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '') : '';
+      const district = HP_DISTRICTS.find(x => norm(x) === norm(f.district)) || f.district || '';
+      let h = f.hospital ? (db.hospitals || []).filter(x => norm(x.name) === norm(f.hospital)).sort((a, b) => (norm(b.district) === norm(district)) - (norm(a.district) === norm(district)))[0] : null;
+      if (f.hospital && !h) { h = { id: nextId('H', db.hospitals, 4), name: f.hospital, type: 'Other', district, tehsil: '', locality: '', pincode: '', source: 'Imported with doctors' }; db.hospitals.push(h); newHosp++; }
+      const vals = { name: f.name, designation: f.designation || '', specialization: f.specialization || '', qualification: f.qualification || '', mobile, email: f.email || '', notes: f.notes || '', hospitalId: h?.id || '', hospital: h?.name || '', district: h?.district || district };
+      const ex = (db.doctors || []).find(x => (mobile && x.mobile === mobile) || (norm(x.name) === norm(f.name) && x.hospitalId === vals.hospitalId));
+      if (ex) { Object.keys(vals).forEach(k => { if (vals[k]) ex[k] = vals[k]; }); updated++; } else { db.doctors.push({ id: nextId('D', db.doctors, 4), added: todayIso, ...vals }); added++; }
+    });
+    return { added, updated, newHosp };
+  }
+
+  // Chemist orders
+  const orderById = id => chemOrders.find(o => o.id === id);
+  async function setOrder(id, body, msg) {
+    try {
+      const o = await api('POST', `api/orders/${encodeURIComponent(id)}`, body);
+      chemOrders = chemOrders.map(x => x.id === o.id ? o : x);
+      refresh(); if (msg) toast(msg);
+    } catch (err) { toast(err.message); }
+  }
+  ACTIONS['orders-refresh'] = async () => { await loadOrders(); render(); toast('Orders refreshed.'); };
+  ACTIONS['order-status'] = v => {
+    const [id, status] = v.split('|'); const o = orderById(id); if (!o) return;
+    if (status === 'Rejected') {
+      openModal({
+        title: `Reject ${id}?`, size: 'sm', submitLabel: 'Reject order',
+        body: `<div class="form-grid">${field('Reason shown to the chemist', 'reply', { full: true, value: o.reply || '' })}</div>`,
+        onSubmit: d => { setOrder(id, { status, reply: d.reply }, `${id} rejected.`); },
+      });
+      $('#modalFoot [data-submit]').classList.add('danger-solid');
+      return;
+    }
+    setOrder(id, { status }, `${id} marked ${status}.`);
+  };
+  ACTIONS['view-order'] = id => {
+    const o = orderById(id); if (!o) return;
+    const c = chem(o.chemistId);
+    const open = ['New', 'Accepted', 'Arranging'].includes(o.status);
+    const shortLines = o.lines.filter(l => l.productId && orderShort(l) > 0);
+    openModal({
+      title: `Order ${o.id} · ${c?.name || o.chemistId}`, size: 'lg',
+      extraFoot: open ? `<div class="foot-left">
+        <button type="button" class="btn primary" data-act="order-bill" data-id="${esc(o.id)}">Make sale bill</button>
+        ${shortLines.length ? `<button type="button" class="btn" data-act="order-po" data-id="${esc(o.id)}">Purchase order for short items</button>` : ''}
+        ${o.status !== 'Arranging' ? `<button type="button" class="btn" data-act="order-status" data-id="${esc(o.id)}|Arranging">Mark arranging</button>` : ''}
+        ${o.status === 'New' ? `<button type="button" class="btn" data-act="order-status" data-id="${esc(o.id)}|Accepted">Accept</button>` : ''}
+        <button type="button" class="btn ghost danger" data-act="order-status" data-id="${esc(o.id)}|Rejected">Reject</button></div>` : '',
+      body: `${detailGrid([['Chemist', esc(c?.name || o.chemistId)], ['Address', esc(addrText(c) || '—')], ['Mobile', esc(c?.phone || '—')], ['Placed', new Date(o.created).toLocaleString('en-IN')], ['Status', pill(o.status)], ['Sale bill', esc(o.saleNo || '—')]])}
+        ${o.note ? `<div><div class="small muted">Chemist’s note</div><div>${esc(o.note)}</div></div>` : ''}
+        ${miniTable([
+          { h: 'Item', c: l => `<span class="strong">${esc(l.name)}</span><div class="small muted">${esc([l.pack, l.company].filter(Boolean).join(' · '))}${l.productId ? '' : ' · not in your product list'}</div>${l.note ? `<div class="small">${esc(l.note)}</div>` : ''}` },
+          { h: 'Ordered', r: 1, c: l => qty(l.qty) },
+          { h: 'In stock now', r: 1, c: l => l.productId ? qty(sellableQty(l.productId)) : '—' },
+          { h: '', c: l => orderShort(l) > 0 ? pill(l.productId ? `Short ${qty(orderShort(l))}` : 'Not stocked') : pill('In stock') },
+        ], o.lines)}
+        ${o.reply ? `<div class="small"><b>Your reply:</b> ${esc(o.reply)}</div>` : ''}
+        <div class="small muted">${o.history.map(h => `${h.status} by ${h.by} · ${new Date(h.at).toLocaleString('en-IN')}`).join('<br>')}</div>`,
+    });
+  };
+  ACTIONS['order-bill'] = id => {
+    const o = orderById(id); if (!o) return;
+    const c = chem(o.chemistId);
+    if (!c) { toast('This chemist no longer exists.'); return; }
+    if (c.status !== 'Active') { toast(`${c.name} is ${c.status}. Activate them before billing.`); return; }
+    const lines = o.lines.filter(l => l.productId && sellableQty(l.productId) > 0).map(l => {
+      const p = prod(l.productId); const b = sellableBatches(p.id)[0];
+      return { productId: p.id, batchId: b.id, qty: Math.min(l.qty, avail(b)), free: 0, rate: p.ptr, cd: c.cd || 0, td: c.td || 0 };
+    });
+    if (!lines.length) { toast('None of the ordered items are in stock yet. Use “Purchase order for short items” or mark it Arranging.'); return; }
+    const left = o.lines.length - lines.length;
+    saleModal(null, { chemistId: c.id, lines, orderId: o.id });
+    toast(left ? `${left} item(s) are not in stock and were left out. Quantities are limited to the first batch — add lines for more.` : 'Check the batches and quantities, then create the bill.');
+  };
+  ACTIONS['order-po'] = id => {
+    const o = orderById(id); if (!o) return;
+    const lines = o.lines.filter(l => l.productId && orderShort(l) > 0).map(l => ({ productId: l.productId, qty: orderShort(l), rate: prod(l.productId)?.pts || 0 }));
+    if (!lines.length) { toast('Nothing is short on this order.'); return; }
+    if (o.status !== 'Arranging') setOrder(o.id, { status: 'Arranging' });
+    poModal(null, { lines });
+  };
+
+  // Chemist portal logins (server mode)
+  const portalCell = c => {
+    if (!SERVER) return '<span class="muted small">Server only</span>';
+    const l = portalLogins[c.id];
+    if (!l) return actBtn('portal-login', c.id, 'Create login', 'ghost');
+    return `<span class="small strong">${esc(l.username)}</span> ${l.active ? pill('Active') : pill('Off')}<div class="small muted">${l.lastLogin ? 'Last in ' + fmtDate(l.lastLogin.slice(0, 10)) : 'Never signed in'}${l.mustChange ? ' · must set own password' : ''}</div>`;
+  };
+  const LOGIN_ID_RE = /^[a-z0-9._@+-]{3,100}$/;
+  const defaultLoginId = c => String(c.email || '').trim().toLowerCase() || '';
+  const portalFields = (c, l) => `
+    <div class="small muted">The chemist signs in to the portal with these to see your stock and place orders. By default the <b>login ID is their email</b> and the <b>password is their mobile number</b>.${c.status && c.status !== 'Active' ? ' <b>The login works only after the chemist is Active.</b>' : ''}</div>
+    <div class="form-grid g3">
+      ${field('Login ID (email)', 'pUser', { value: l?.username || defaultLoginId(c), attrs: `autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="filled from Email" data-auto="${l ? '0' : '1'}"` })}
+      ${field(l ? 'New password (leave empty to keep)' : 'Password (mobile number)', 'pPass', { value: l ? '' : (c.phone || ''), attrs: `autocomplete="new-password" placeholder="${l ? '' : 'filled from Mobile'}" data-auto="${l ? '0' : '1'}"` })}
+      <div class="field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="pActive" ${!l || l.active ? 'checked' : ''}> Login switched on</label></div>
+      <div class="field full"><label class="check-line"><input type="checkbox" name="pTemp" ${l ? '' : 'checked'}> Ask the chemist to set their own password at first sign-in <span class="muted small">(recommended — a mobile number is easy for others to know)</span></label></div>
+    </div>`;
+  // While onboarding, keep Login ID = Email and Password = Mobile until the admin types something else
+  function syncLoginDefaults() {
+    const u = $('#f-pUser'), p = $('#f-pPass');
+    if (u && u.dataset.auto === '1') u.value = String($('#mform [name="email"]')?.value || '').trim().toLowerCase();
+    if (p && p.dataset.auto === '1') p.value = String($('#mform [name="phone"]')?.value || '').trim();
+  }
+  async function savePortalLogin(c, d) {
+    const body = { username: String(d.pUser || '').trim().toLowerCase(), active: !!d.pActive };
+    if (d.pPass) { body.password = d.pPass; body.mustChange = !!d.pTemp; }
+    await api('PUT', `api/logins/${encodeURIComponent(c.id)}`, body);
+    await loadLogins();
+    return d.pPass ? `Portal login for ${c.name}: login ID “${body.username}”, password “${d.pPass}”${d.pPass === c.phone ? ' (their mobile number)' : ''}.${body.mustChange ? ' They will be asked to set their own password when they first sign in.' : ''} Share it with them privately.` : `Login for ${c.name} updated.`;
+  }
+  ACTIONS['portal-login'] = id => {
+    const c = chem(id); if (!c) return;
+    if (!SERVER) { toast('Chemist logins need the server. Start it with “node server.js”.'); return; }
+    const l = portalLogins[c.id];
+    openModal({
+      title: `${l ? 'Edit' : 'Create'} portal login · ${c.name}`, size: 'lg', submitLabel: l ? 'Save login' : 'Create login',
+      extraFoot: l ? `<div class="foot-left"><button type="button" class="btn ghost danger" data-act="portal-remove" data-id="${esc(c.id)}">Remove login</button></div>` : '',
+      body: portalFields(c, l),
+      onSubmit: d => {
+        if (!portalFieldsOk({ ...d, pWant: 'on', _id: c.id })) return false;
+        savePortalLogin(c, d).then(msg => { closeModal(false); refresh(); showNotice(msg); }).catch(err => toast(err.message));
+        return false;
+      },
+    });
+  };
+  ACTIONS['portal-remove'] = id => {
+    const c = chem(id); if (!c) return;
+    confirmModal(`Remove the portal login of ${c.name}?`, 'They will be signed out and can no longer see stock or place orders. Their past orders stay.', 'Remove login', () => {
+      api('DELETE', `api/logins/${encodeURIComponent(id)}`).then(loadLogins).then(() => { refresh(); toast(`Login of ${c.name} removed.`); }).catch(err => toast(err.message));
+    });
+  };
+  // A message that stays until it is closed (used to show a new password once)
+  function showNotice(msg) {
+    openModal({ title: 'Done', size: 'sm', body: `<p style="margin:0">${esc(msg)}</p>` });
+  }
+  ACTIONS['change-password'] = () => openModal({
+    title: 'Change your password', size: 'sm', submitLabel: 'Change password',
+    body: `<div class="form-grid">${field('Current password', 'current', { type: 'password', required: true, full: true, attrs: 'autocomplete="current-password"' })}${field('New password (8+ characters)', 'password', { type: 'password', required: true, full: true, attrs: 'autocomplete="new-password" minlength="8"' })}${field('Repeat new password', 'confirm', { type: 'password', required: true, full: true, attrs: 'autocomplete="new-password"' })}</div>`,
+    onSubmit: d => {
+      if (d.password !== d.confirm) { toast('The new passwords do not match.'); return false; }
+      api('POST', 'api/password', { current: d.current, password: d.password }).then(() => { closeModal(false); toast('Password changed.'); }).catch(err => toast(err.message));
+      return false;
+    },
+  });
+
+  ACTIONS['chemist-status'] = v => {
+    const [id, status] = v.split('|'); const c = chem(id); if (!c) return;
+    c.status = status; closeModal(false); refresh(); toast(`${c.name} is now ${status}.`);
+  };
+
+  // Suppliers
+  const supplierForm = (s = {}) => `${licReadBox('supplier')}<div class="form-grid">
+    ${field('Supplier name', 'name', { value: s.name || '', required: true })}
+    ${field('Contact person', 'contact', { value: s.contact || '' })}
+    ${field('Mobile', 'phone', { type: 'tel', value: s.phone || '', attrs: 'pattern="[6-9][0-9]{9}" title="10-digit mobile number"' })}
+    ${field('Payment terms (days)', 'terms', { type: 'number', value: s.terms ?? 30, required: true, attrs: numAttrs('1') })}
+    ${addrFields(s, false)}
+    ${licFields(s, false)}
+  </div>`;
+  const readSupplier = (d, s) => Object.assign(s, { name: d.name.trim(), contact: d.contact.trim(), phone: d.phone, ...readAddr(d), ...readLic(d), terms: num(d.terms) });
+  ACTIONS['new-supplier'] = () => openModal({ title: 'Add supplier', body: supplierForm(), submitLabel: 'Add supplier', onSubmit: d => { if (!addrOk(d)) return false; const s = { id: nextId('S', db.suppliers) }; readSupplier(d, s); db.suppliers.push(s); fileLicence('supplier', s.id); return `${s.name} added.`; } });
+  ACTIONS['edit-supplier'] = id => { const s = sup(id); if (!s) return; openModal({ title: `Edit ${s.name}`, body: supplierForm(s), onSubmit: d => { if (!addrOk(d)) return false; readSupplier(d, s); fileLicence('supplier', s.id); return `${s.name} updated.`; } }); };
+  ACTIONS['del-supplier'] = id => {
+    const s = sup(id); if (!s) return;
+    const n = db.pos.filter(p => p.supplierId === id).length + db.grns.filter(g => g.supplierId === id).length + db.pinvoices.filter(p => p.supplierId === id).length;
+    if (n) { toast(`${s.name} has ${n} purchase document(s), so it can’t be deleted.`); return; }
+    confirmModal(`Delete ${s.name}?`, 'This cannot be undone.', 'Delete supplier', () => { db.suppliers = db.suppliers.filter(x => x !== s); return `${s.name} deleted.`; });
+  };
+  const goFolder = id => {
+    if (!sup(id)) return;
+    searchQuery = ''; $('#globalSearch').value = '';
+    if (location.hash === '#folder/' + id) render(); else location.hash = 'folder/' + id;
+    window.scrollTo(0, 0);
+  };
+  ACTIONS['view-supplier'] = goFolder;
+
+  // Supplier folder: bill copies
+  ACTIONS['open-bill-file'] = no => ACTIONS['open-docs'](no);
+  ACTIONS['open-docs'] = async key => {
+    try {
+      const files = await billStore.get(key);
+      if (!files || !files.length) { toast('The file is not in this browser. It may have been saved on another computer or cleared.'); return; }
+      files.forEach(f => {
+        const url = URL.createObjectURL(f.blob);
+        const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        if (!/^(image\/|application\/pdf)/.test(f.type)) a.download = f.name;
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+      });
+    } catch { toast('Could not open the file — browser storage is blocked.'); }
+  };
+  ACTIONS['attach-bill'] = no => {
+    const p = db.pinvoices.find(x => x.no === no); if (!p) return;
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.multiple = true; inp.accept = 'image/jpeg,image/png,image/webp,image/gif,application/pdf';
+    inp.addEventListener('change', () => {
+      const files = [...inp.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
+      if (!files.length) { toast('Choose a JPG, PNG, WEBP or PDF up to 25 MB.'); return; }
+      fileBillCopies(p, files); refresh(); toast(`Bill copy filed with ${p.no}.`);
+    });
+    inp.click();
+  };
+  ACTIONS['upload-for'] = sid => {
+    if (entry && entry.lines.length && !confirm('Discard the bill you are checking now?')) return;
+    const s = sup(sid);
+    entry = null; uploadFor = s ? s.id : '';
+    location.hash = 'billentry';
+    toast(s ? `Upload, import or type the bill. It will be filed under ${s.name}.` : 'Upload the bill.');
+  };
+
+  // Purchase orders
+  function poModal(existing, preset = {}) {
+    const po = existing || { supplierId: preset.supplierId || '', expected: addDays(todayIso, 7), lines: preset.lines || [] };
+    openModal({
+      title: existing ? `Edit ${existing.no}` : 'New purchase order', size: 'lg', submitLabel: existing ? 'Save changes' : 'Create PO',
+      body: `<div class="form-grid">
+          ${field('Supplier', 'supplierId', { required: true, value: po.supplierId, options: [['', 'Select supplier'], ...db.suppliers.map(s => [s.id, s.name])] })}
+          ${field('Expected delivery', 'expected', { type: 'date', value: po.expected, required: true })}
+        </div>
+        <div class="lines"><div class="table-wrap"><table>
+          <thead><tr><th>Item</th><th>Qty</th><th>Rate ₹</th><th class="r">GST</th><th class="r">Amount</th><th></th></tr></thead>
+          <tbody id="lineBody" data-mode="po">${(po.lines.length ? po.lines : [{}]).map(poRowHtml).join('')}</tbody></table></div>
+          <div class="add-line"><button type="button" class="btn sm" data-add-line>+ Add line</button></div></div>
+        <div class="totals"><div>Amount <b id="tGross" class="num">0</b></div><div>GST <b id="tGst" class="num">0</b></div><div class="grand">Total <span id="tTot" class="num">₹0</span></div></div>`,
+      onSubmit: d => {
+        const lines = readPoLines();
+        if (!lines.length) { toast('Add at least one item with a quantity.'); return false; }
+        if (existing) { Object.assign(existing, { supplierId: d.supplierId, expected: d.expected, lines, ...billCalc(lines) }); return `${existing.no} updated.`; }
+        const no = nextNo('PO-', db.pos);
+        db.pos.push({ no, date: todayIso, expected: d.expected, supplierId: d.supplierId, lines, ...billCalc(lines), status: 'Open' });
+        return `${no} created for ${money(billCalc(lines).total)}.`;
+      },
+    });
+    recalcPo();
+  }
+  ACTIONS['new-po'] = () => poModal(null);
+  ACTIONS['edit-po'] = no => { const po = db.pos.find(p => p.no === no); if (po) poModal(po); };
   ACTIONS['reorder-po'] = pid => {
     const p = prod(pid); if (!p) return;
-    poModal({ supplierId: p.supplierId, lines: [{ productId: p.id, qty: Math.max(1, p.reorder * 2 - sellableQty(p.id)), rate: p.pts }] });
+    const lastSup = db.batches.filter(b => b.productId === pid && b.supplierId).map(b => b.supplierId).pop() || '';
+    poModal(null, { supplierId: lastSup, lines: [{ productId: p.id, qty: Math.max(1, p.reorder * 2 - sellableQty(p.id)), rate: p.pts }] });
   };
   ACTIONS['view-po'] = no => {
     const po = db.pos.find(p => p.no === no); if (!po) return;
     const open = po.status === 'Open' || po.status === 'Partially received';
+    const hasGrn = db.grns.some(g => g.poNo === po.no);
     openModal({
-      title: `Purchase order ${po.no}`, wide: true,
-      extraFoot: open ? `<div style="margin-right:auto;display:flex;gap:8px"><button type="button" class="btn primary" data-act="receive-po" data-id="${po.no}">Receive goods</button>${po.status === 'Open' ? `<button type="button" class="btn" data-act="cancel-po" data-id="${po.no}">Cancel PO</button>` : ''}</div>` : '',
+      title: `Purchase order ${po.no}`, size: 'lg',
+      extraFoot: open ? `<div class="foot-left"><button type="button" class="btn primary" data-act="receive-po" data-id="${po.no}">Receive goods</button>${po.status === 'Open' && !hasGrn ? `<button type="button" class="btn" data-act="edit-po" data-id="${po.no}">Edit</button><button type="button" class="btn" data-act="cancel-po" data-id="${po.no}">Cancel PO</button>` : ''}</div>` : '',
       body: `${detailGrid([['Supplier', esc(sup(po.supplierId)?.name)], ['Order date', fmtDate(po.date)], ['Expected', fmtDate(po.expected)], ['Status', pill(po.status)], ['GRNs', db.grns.filter(g => g.poNo === po.no).map(g => g.no).join(', ') || '—']])}
         ${miniTable([
-          { h: 'Product', c: l => esc(prod(l.productId)?.name) },
+          { h: 'Item', c: l => esc(prod(l.productId)?.name) },
           { h: 'Ordered', r: 1, c: l => qty(l.qty) },
           { h: 'Received', r: 1, c: l => qty(receivedQty(po.no, l.productId)) },
-          { h: 'Rate', r: 1, c: l => money2(l.rate) },
-          { h: 'Amount', r: 1, c: l => money2(l.qty * l.rate) },
+          { h: 'Rate', r: 1, c: l => dec(l.rate) },
+          { h: 'Amount', r: 1, c: l => dec(l.qty * l.rate) },
         ], po.lines)}
-        ${totalsBlock(po)}`,
+        <div class="totals"><div>Amount <b class="num">${dec(po.gross)}</b></div><div>GST <b class="num">${dec(po.gst)}</b></div><div class="grand">Total ${money2(po.total)}</div></div>`,
     });
   };
   ACTIONS['cancel-po'] = no => {
     const po = db.pos.find(p => p.no === no); if (!po) return;
-    if (!confirm(`Cancel ${po.no}? This cannot be undone.`)) return;
-    po.status = 'Cancelled'; closeModal(); refresh(); toast(`${po.no} cancelled.`);
+    confirmModal(`Cancel ${po.no}?`, 'The order will be marked Cancelled. This cannot be undone.', 'Cancel PO', () => { po.status = 'Cancelled'; return `${po.no} cancelled.`; });
+  };
+  ACTIONS['del-po'] = no => {
+    const po = db.pos.find(p => p.no === no); if (!po) return;
+    if (db.grns.some(g => g.poNo === no)) { toast('Goods were received against this PO, so it can’t be deleted.'); return; }
+    confirmModal(`Delete ${po.no}?`, 'This cannot be undone.', 'Delete PO', () => { db.pos = db.pos.filter(x => x !== po); return `${no} deleted.`; });
   };
 
+  // Goods receipt
   function grnModal(poNo = '') {
     const openPos = db.pos.filter(p => p.status === 'Open' || p.status === 'Partially received');
     if (!openPos.length) { toast('No open purchase orders to receive against.'); return; }
     if (!poNo || !openPos.some(p => p.no === poNo)) poNo = openPos[0].no;
     openModal({
-      title: 'New goods receipt (GRN)', wide: true, submitLabel: 'Save GRN & add to stock',
-      body: `<div class="form-grid">
+      title: 'New goods receipt (GRN)', size: 'xl', submitLabel: 'Save GRN & add to stock',
+      body: `<div class="form-grid g3">
           ${field('Purchase order', 'poNo', { required: true, value: poNo, options: openPos.map(p => [p.no, `${p.no} — ${sup(p.supplierId)?.name}`]) })}
           ${field('Receipt date', 'date', { type: 'date', value: todayIso, required: true, attrs: `max="${todayIso}"` })}
           ${field('Supplier challan / delivery note', 'challan', { required: true })}
@@ -1116,24 +2989,22 @@
         const po = db.pos.find(p => p.no === d.poNo);
         const lines = [];
         for (const tr of $$('#grnLines tr[data-gline]')) {
-          const l = po.lines[+tr.dataset.gline]; const pend = +tr.dataset.pending;
-          const q = Math.floor(+$('[data-g=qty]', tr).value || 0);
-          if (!q) continue;
-          const batch = $('[data-g=batch]', tr).value.trim(); const expiry = $('[data-g=expiry]', tr).value;
-          const name = prod(l.productId)?.name;
-          if (q > pend) { toast(`${name}: only ${qty(pend)} pending on this PO.`); return false; }
-          if (!batch || !expiry) { toast(`${name}: enter batch number and expiry.`); return false; }
-          lines.push({ productId: l.productId, batch, expiry, qty: q, rate: l.rate });
+          const pl = po.lines[+tr.dataset.gline]; const pend = +tr.dataset.pending;
+          const q = Math.floor(num($('[data-g=qty]', tr).value)); const fr = Math.floor(num($('[data-g=free]', tr).value));
+          if (!q && !fr) continue;
+          const p = prod(pl.productId);
+          const batch = $('[data-g=batch]', tr).value.trim().toUpperCase(); const expiry = expToIso($('[data-g=exp]', tr).value);
+          if (q > pend) { toast(`${p.name}: only ${qty(pend)} pending on this PO.`); return false; }
+          if (!batch || !expiry) { toast(`${p.name}: enter batch and expiry as MM/YY.`); return false; }
+          lines.push({ productId: pl.productId, batch, expiry, qty: q, free: fr, rate: round2(num($('[data-g=rate]', tr).value)), mrp: round2(num($('[data-g=mrp]', tr).value)) || p.mrp, cd: num($('[data-g=cd]', tr).value), td: 0, gst: p.gst });
         }
         if (!lines.length) { toast('Enter a received quantity for at least one item.'); return false; }
-        lines.forEach(l => {
-          const b = db.batches.find(x => x.productId === l.productId && x.batch === l.batch);
-          if (b) b.qty += l.qty; else db.batches.push({ id: uid(), productId: l.productId, batch: l.batch, expiry: l.expiry, qty: l.qty });
-        });
+        addToStock(lines, { supplierId: po.supplierId, source: 'GRN', verified: true });
         const no = nextNo('GRN-', db.grns);
-        db.grns.push({ no, date: d.date, poNo: po.no, supplierId: po.supplierId, challan: d.challan.trim(), lines, ...lineTotals(lines), invoiced: '' });
+        db.grns.push({ no, date: d.date, poNo: po.no, supplierId: po.supplierId, challan: d.challan.trim(), lines, ...billCalc(lines), invoiced: '' });
+        db.batches.filter(b => b.source === 'GRN' && lines.some(l => l.productId === b.productId && norm(l.batch) === norm(b.batch))).forEach(b => { b.source = no; });
         po.status = po.lines.every(l => receivedQty(po.no, l.productId) >= l.qty) ? 'Received' : 'Partially received';
-        return `${no} saved — ${qty(lines.reduce((a, l) => a + l.qty, 0))} units added to stock.`;
+        return `${no} saved — ${qty(lines.reduce((a, l) => a + l.qty + l.free, 0))} units added to stock.`;
       },
     });
     $('#f-poNo').addEventListener('change', e => { $('#grnLines').innerHTML = grnLines(e.target.value); });
@@ -1142,82 +3013,241 @@
   ACTIONS['receive-po'] = no => grnModal(no);
   ACTIONS['view-grn'] = no => {
     const g = db.grns.find(x => x.no === no); if (!g) return;
+    const s = sup(g.supplierId);
     openModal({
-      title: `Goods receipt ${g.no}`, wide: true,
-      extraFoot: !g.invoiced ? `<button type="button" class="btn primary" data-act="invoice-grn" data-id="${g.no}" style="margin-right:auto">Add purchase invoice</button>` : '',
-      body: `${detailGrid([['Supplier', esc(sup(g.supplierId)?.name)], ['Date', fmtDate(g.date)], ['Purchase order', esc(g.poNo)], ['Challan', esc(g.challan || '—')], ['Invoice', g.invoiced ? esc(g.invoiced) : pill('Awaiting invoice')]])}
-        ${miniTable([
-          { h: 'Product', c: l => esc(prod(l.productId)?.name) }, { h: 'Batch', c: l => esc(l.batch) }, { h: 'Expiry', c: l => fmtMonth(l.expiry) },
-          { h: 'Qty', r: 1, c: l => qty(l.qty) }, { h: 'Rate', r: 1, c: l => money2(l.rate) }, { h: 'Amount', r: 1, c: l => money2(l.qty * l.rate) },
-        ], g.lines)}
-        ${totalsBlock(g)}`,
+      title: `Goods receipt ${g.no}`, size: 'xl',
+      extraFoot: !g.invoiced ? `<div class="foot-left"><button type="button" class="btn primary" data-act="invoice-grn" data-id="${g.no}">Add purchase invoice</button></div>` : '',
+      body: billDoc({ title: 'GOODS RECEIPT NOTE', no: g.no, date: g.date, partyHtml: `<div class="strong">Supplier: ${esc(s?.name)}</div><div>GST NO: ${esc(s?.gstin || '—')}</div><div>PO: ${esc(g.poNo)} · Challan: ${esc(g.challan || '—')}</div><div>Invoice: ${esc(g.invoiced || 'Awaiting')}</div>`, lines: g.lines, t: g }),
+    });
+  };
+  ACTIONS['del-grn'] = no => {
+    const g = db.grns.find(x => x.no === no); if (!g) return;
+    if (g.invoiced) { toast('Delete the purchase invoice for this GRN first.'); return; }
+    confirmModal(`Delete ${g.no}?`, `This takes the ${g.lines.length} received line(s) back out of stock and re-opens ${esc(g.poNo)}. This cannot be undone.`, 'Delete GRN', () => {
+      const short = removeFromStock(g.lines);
+      if (short.length) { toast(`Some of this stock is already sold: ${short.join(', ')}. The GRN can’t be deleted.`); return false; }
+      db.grns = db.grns.filter(x => x !== g);
+      const po = db.pos.find(p => p.no === g.poNo);
+      if (po && po.status !== 'Cancelled') po.status = db.grns.some(x => x.poNo === po.no) ? 'Partially received' : 'Open';
+      return `${no} deleted — stock removed.`;
     });
   };
 
+  // Purchase invoices
   function piModal(grnNo = '') {
     const open = db.grns.filter(g => !g.invoiced);
-    if (!open.length) { toast('Every goods receipt already has an invoice.'); return; }
+    if (!open.length) { toast('Every goods receipt already has an invoice. To enter a bill without a PO, use Bill Upload / Entry.'); return; }
     if (!grnNo || !open.some(g => g.no === grnNo)) grnNo = open[0].no;
     const info = no => {
       const g = db.grns.find(x => x.no === no); const s = sup(g.supplierId);
-      return `${detailGrid([['Supplier', esc(s?.name)], ['GRN date', fmtDate(g.date)], ['Terms', s?.terms + ' days']])}${totalsBlock(g)}`;
+      return `${detailGrid([['Supplier', esc(s?.name)], ['GRN date', fmtDate(g.date)], ['Terms', (s?.terms ?? 30) + ' days']])}<div class="totals"><div>Gross <b class="num">${dec(g.gross)}</b></div><div>GST <b class="num">${dec(g.gst)}</b></div><div class="grand">Net ${money2(g.total)}</div></div>`;
     };
     openModal({
-      title: 'New purchase invoice', submitLabel: 'Save invoice',
+      title: 'Purchase invoice for a GRN', submitLabel: 'Save invoice',
       body: `<div class="form-grid">
           ${field('Goods receipt', 'grnNo', { required: true, value: grnNo, options: open.map(g => [g.no, `${g.no} — ${sup(g.supplierId)?.name} — ${money(g.total)}`]) })}
           ${field('Supplier bill number', 'supplierInvNo', { required: true })}
           ${field('Bill date', 'date', { type: 'date', value: todayIso, required: true, attrs: `max="${todayIso}"` })}
-          ${field('Paid now (₹)', 'paid', { type: 'number', value: 0, attrs: 'min="0" step="0.01"' })}
+          ${field('Paid now (₹)', 'paid', { type: 'number', value: 0, attrs: numAttrs() })}
         </div>
-        <div id="piInfo">${info(grnNo)}</div>
-        <div class="small muted">Amount is taken from the goods receipt. Due date follows the supplier’s payment terms.</div>`,
+        <div id="piInfo">${info(grnNo)}</div>`,
       onSubmit: d => {
         const g = db.grns.find(x => x.no === d.grnNo); const s = sup(g.supplierId);
         const no = nextNo('PI-', db.pinvoices);
-        db.pinvoices.push({ no, supplierInvNo: d.supplierInvNo.trim(), date: d.date, due: addDays(d.date, s?.terms || 30), supplierId: g.supplierId, grnNo: g.no, sub: g.sub, gst: g.gst, total: g.total, paid: Math.min(g.total, round2(+d.paid || 0)) });
+        const t = billCalc(g.lines);
+        db.pinvoices.push({ no, supplierInvNo: d.supplierInvNo.trim(), date: d.date, due: addDays(d.date, s?.terms ?? 30), supplierId: g.supplierId, grnNo: g.no, source: 'GRN', ...t, paid: Math.min(t.total, round2(num(d.paid))) });
         g.invoiced = no;
-        return `${no} saved — due ${fmtDate(addDays(d.date, s?.terms || 30))}.`;
+        return `${no} saved — due ${fmtDate(addDays(d.date, s?.terms ?? 30))}.`;
       },
     });
     $('#f-grnNo').addEventListener('change', e => { $('#piInfo').innerHTML = info(e.target.value); });
   }
   ACTIONS['new-pi'] = () => piModal();
   ACTIONS['invoice-grn'] = no => piModal(no);
+  const piLines = p => p.lines || db.grns.find(x => x.no === p.grnNo)?.lines || [];
   ACTIONS['view-pi'] = no => {
     const p = db.pinvoices.find(x => x.no === no); if (!p) return;
-    const g = db.grns.find(x => x.no === p.grnNo);
+    const s = sup(p.supplierId);
     openModal({
-      title: `Purchase invoice ${p.no}`, wide: true,
-      extraFoot: balance(p) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-pi" data-id="${p.no}" style="margin-right:auto">Record payment</button>` : '',
-      body: `${detailGrid([['Supplier', esc(sup(p.supplierId)?.name)], ['Supplier bill', esc(p.supplierInvNo)], ['Bill date', fmtDate(p.date)], ['Due date', fmtDate(p.due)], ['GRN', esc(p.grnNo)], ['Status', pill(piStatus(p))]])}
-        ${g ? miniTable([
-          { h: 'Product', c: l => esc(prod(l.productId)?.name) }, { h: 'Batch', c: l => esc(l.batch) },
-          { h: 'Qty', r: 1, c: l => qty(l.qty) }, { h: 'Rate', r: 1, c: l => money2(l.rate) }, { h: 'Amount', r: 1, c: l => money2(l.qty * l.rate) },
-        ], g.lines) : ''}
-        ${totalsBlock(p)}
-        <div class="totals"><div>Paid <b class="num">${money2(p.paid)}</b></div><div>Balance <b class="num">${money2(balance(p))}</b></div></div>`,
+      title: `Purchase invoice ${p.no}`, size: 'xl',
+      extraFoot: `<div class="foot-left">${balance(p) > 0.5 ? `<button type="button" class="btn gold" data-act="pay-pi" data-id="${p.no}">Record payment</button>` : ''}<button type="button" class="btn" data-act="print" data-id="">Print</button></div>`,
+      body: billDoc({ title: 'PURCHASE BILL', no: `${p.no} (supplier bill ${p.supplierInvNo})`, date: p.date, partyHtml: `<div class="strong">Supplier: ${esc(s?.name)}</div><div>GST NO: ${esc(s?.gstin || '—')}</div><div>Due: ${fmtDate(p.due)} · ${piStatus(p)}</div><div>Source: ${esc(p.grnNo || p.source || 'Manual')}</div>`, lines: piLines(p), t: p, paid: p.paid }),
+    });
+  };
+  ACTIONS['edit-pi'] = no => {
+    const p = db.pinvoices.find(x => x.no === no); if (!p) return;
+    openModal({
+      title: `Edit ${p.no}`, size: 'sm',
+      body: `<div class="form-grid">
+        ${field('Supplier bill number', 'supplierInvNo', { value: p.supplierInvNo, required: true })}
+        ${field('Bill date', 'date', { type: 'date', value: p.date, required: true, attrs: `max="${todayIso}"` })}
+        ${field('Due date', 'due', { type: 'date', value: p.due, required: true })}
+        ${field('Paid so far (₹)', 'paid', { type: 'number', value: p.paid || 0, attrs: `min="0" max="${p.total}" step="0.01"` })}
+      </div><div class="small muted">To change the items, edit the stock lines in Stock Details.</div>`,
+      onSubmit: d => { Object.assign(p, { supplierInvNo: d.supplierInvNo.trim(), date: d.date, due: d.due, paid: Math.min(p.total, round2(num(d.paid))) }); return `${p.no} updated.`; },
+    });
+  };
+  ACTIONS['del-pi'] = no => {
+    const p = db.pinvoices.find(x => x.no === no); if (!p) return;
+    const direct = !!p.lines;
+    confirmModal(`Delete ${p.no}?`, direct
+      ? `This bill was entered directly, so its ${p.lines.length} line(s) will also be taken back out of stock. This cannot be undone.`
+      : `The goods receipt ${esc(p.grnNo)} will go back to “Awaiting invoice”. Stock is not changed. This cannot be undone.`, 'Delete invoice', () => {
+      if (direct) { const short = removeFromStock(p.lines); if (short.length) { toast(`Some of this stock is already sold: ${short.join(', ')}. The bill can’t be deleted.`); return false; } }
+      else { const g = db.grns.find(x => x.no === p.grnNo); if (g) g.invoiced = ''; }
+      db.pinvoices = db.pinvoices.filter(x => x !== p);
+      if (p.files?.length) billStore.del(no).catch(() => {});
+      return `${no} deleted.`;
     });
   };
   ACTIONS['pay-pi'] = no => {
     const p = db.pinvoices.find(x => x.no === no); if (!p) return;
     openModal({
-      title: `Pay supplier · ${p.no}`, submitLabel: 'Save payment',
+      title: `Pay supplier · ${p.no}`, submitLabel: 'Save payment', size: 'sm',
       body: `${detailGrid([['Supplier', esc(sup(p.supplierId)?.name)], ['Bill total', money2(p.total)], ['Balance', money2(balance(p))]])}
         <div class="form-grid">
           ${field('Amount (₹)', 'amount', { type: 'number', value: balance(p), required: true, attrs: `min="0.01" max="${balance(p)}" step="0.01"` })}
           ${field('Mode', 'mode', { options: ['NEFT / RTGS', 'UPI', 'Cheque', 'Cash'] })}
         </div>`,
-      onSubmit: d => { p.paid = round2((p.paid || 0) + Math.min(+d.amount, balance(p))); return `Payment of ${money(+d.amount)} recorded on ${p.no}.`; },
+      onSubmit: d => { const a = Math.min(num(d.amount), balance(p)); p.paid = round2((p.paid || 0) + a); return `Payment of ${money(a)} recorded on ${p.no}.`; },
     });
   };
+
+  // Bill upload / entry
+  ACTIONS['entry-ai'] = async () => {
+    if (entryBusy) return;
+    if (!pendingFiles.length) { toast('Choose the bill photo(s) or PDF first.'); return; }
+    if (!getApiKey()) { toast('Add your Anthropic API key in Settings first.'); ACTIONS['open-settings'](); return; }
+    if (entry && entry.lines.length && !confirm('Replace the bill you are checking now with this upload?')) return;
+    entryBusy = true; render();
+    try {
+      const files = pendingFiles.slice();
+      const x = await extractBill(files);
+      entry = withUploadFor(entryFromExtraction(x, files));
+      pendingFiles = [];
+      toast(entry.lines.length ? `Read ${entry.lines.length} lines. Check them below, then add to stock.` : 'No item rows were found on this bill.');
+    } catch (err) {
+      toast(err.message || 'Could not read the bill.');
+    } finally {
+      entryBusy = false; if (route === 'billentry') render();
+    }
+  };
+  ACTIONS['entry-manual'] = () => {
+    if (entry && entry.lines.length && !confirm('Discard the bill you are checking now?')) return;
+    entry = withUploadFor(newEntry('Manual')); entry.lines = [blankLine()]; render();
+  };
+  const entryTargets = () => { const t = entry.lines.filter(l => l.sel); return t.length ? t : entry.lines; };
+  ACTIONS['entry-bulk'] = () => {
+    if (!entry) return;
+    const vals = {}; const said = [];
+    for (const [id, k, label] of [['#ebCd', 'cd', 'CD%'], ['#ebTd', 'td', 'TD%'], ['#ebGst', 'gst', 'GST%']]) {
+      const raw = $(id).value.trim(); if (raw === '') continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0 || v > 100) { toast(`${label} must be a number from 0 to 100.`); $(id).focus(); return; }
+      vals[k] = v; said.push(`${label} ${dec(v)}`);
+    }
+    if (!said.length) { toast('Type a CD%, TD% or GST% value to apply.'); $('#ebCd').focus(); return; }
+    const rows = entryTargets();
+    rows.forEach(l => Object.assign(l, vals));
+    render();
+    toast(`${said.join(', ')} set on ${rows.length === entry.lines.length ? 'all ' : ''}${rows.length} row${rows.length === 1 ? '' : 's'}.`);
+  };
+  ACTIONS['entry-del-sel'] = () => {
+    if (!entry) return;
+    const n = entry.lines.filter(l => l.sel).length;
+    if (!n) { toast('Tick the rows you want to delete.'); return; }
+    entry.lines = entry.lines.filter(l => !l.sel); render(); toast(`${n} row${n === 1 ? '' : 's'} deleted.`);
+  };
+  ACTIONS['entry-template'] = () => downloadText('purchase-bill-template.csv', CSV_HEAD.join(',') + '\r\nBASUGINE PEN,LUPIN,LUPIN,1PACK,90183100,A25036CL,01/29,1,0,823.57,1153.00,2.00,0,12,823.57\r\n');
+  ACTIONS['entry-csv'] = () => { if (entry) downloadText(`bill-${(entry.billNo || 'draft').replace(/[^\w-]+/g, '_')}.csv`, linesToCsv(entry.lines)); };
+  ACTIONS['entry-add-row'] = () => { entry.lines.push(blankLine()); render(); const ins = $$('#entryBody tr:last-child input'); if (ins[0]) ins[0].focus(); };
+  ACTIONS['entry-del-row'] = i => { entry.lines.splice(+i, 1); render(); };
+  ACTIONS['entry-clear'] = () => confirmModal('Discard this bill?', 'Nothing has been added to stock yet. The lines you are checking will be cleared.', 'Discard', () => { entry = null; return 'Bill discarded.'; });
+  ACTIONS['entry-commit'] = () => {
+    if (!entry) return;
+    const lines = entry.lines.filter(l => String(l.name).trim());
+    if (!lines.length) { toast('There are no item lines to add.'); return; }
+    const errs = lines.map((l, i) => [i + 1, checkLine(l)]).filter(([, c]) => c.level === 'bad');
+    if (errs.length) { toast(`Fix the errors on line ${errs.map(e => e[0]).slice(0, 6).join(', ')} first.`); return; }
+    if (!entry.supplierId && !entry.supplierName.trim()) { toast('Choose the supplier or enter a new supplier name.'); return; }
+    if (!entry.billNo.trim()) { toast('Enter the supplier bill number.'); return; }
+    if (!entry.date) { toast('Enter the bill date.'); return; }
+    const existingSup = entry.supplierId ? sup(entry.supplierId) : db.suppliers.find(s => norm(s.name) === norm(entry.supplierName));
+    if (existingSup && db.pinvoices.some(p => p.supplierId === existingSup.id && norm(p.supplierInvNo) === norm(entry.billNo))) { toast(`Bill ${entry.billNo} from ${existingSup.name} is already saved.`); return; }
+    const t = billCalc(lines);
+    const newProducts = lines.filter(l => !findProductByName(l.name)).map(l => norm(l.name));
+    const uniqNew = [...new Set(newProducts)];
+    confirmModal('Add this bill to stock?', `${lines.length} lines · net ${money2(t.total)}${uniqNew.length ? ` · ${uniqNew.length} new product(s) will be created` : ''}${existingSup ? '' : ` · new supplier “${esc(entry.supplierName)}”`}. The stock lines will be marked “Needs check”.`, 'Add to stock', () => {
+      let s = existingSup;
+      if (!s) { s = { id: nextId('S', db.suppliers), name: entry.supplierName.trim(), contact: '', phone: '', city: '', gstin: entry.gstin.toUpperCase(), dl1: '', dl2: '', dlValid: '', terms: 30 }; db.suppliers.push(s); }
+      const stockLines = lines.map(l => {
+        let p = findProductByName(l.name);
+        if (!p) {
+          p = { id: nextId('P', db.products), name: norm(l.name), companyId: findOrCreateCompany(l.company), mfg: l.mfg || '', categoryId: defaultCategoryId(), form: guessForm(l.name, l.pack), pack: l.pack, hsn: String(l.hsn || ''), salt: '', gst: num(l.gst), mrp: num(l.mrp), ptr: salePtr(l.mrp, l.gst), pts: num(l.rate), reorder: 10 };
+          db.products.push(p);
+        } else {
+          p.pts = num(l.rate) || p.pts; if (num(l.mrp)) p.mrp = num(l.mrp); if (!p.mfg && l.mfg) p.mfg = l.mfg;
+        }
+        return { productId: p.id, name: p.name, batch: String(l.batch).trim().toUpperCase(), expiry: expToIso(l.exp), qty: Math.floor(num(l.qty)), free: Math.floor(num(l.free)), rate: num(l.rate), mrp: num(l.mrp), cd: num(l.cd), td: num(l.td), gst: num(l.gst) };
+      });
+      const no = nextNo('PI-', db.pinvoices);
+      addToStock(stockLines, { supplierId: s.id, source: `${no} · bill ${entry.billNo}`, verified: false });
+      const pi = { no, supplierInvNo: entry.billNo.trim(), date: entry.date, due: addDays(entry.date, s.terms ?? 30), supplierId: s.id, grnNo: '', source: entry.source, lines: stockLines, ...t, paid: 0 };
+      db.pinvoices.push(pi);
+      fileBillCopies(pi, entry.fileObjs);
+      entry = null;
+      setTimeout(() => goFolder(s.id), 0);
+      return `${no} saved — ${stockLines.length} lines added to stock and filed in the folder for ${s.name}.`;
+    });
+  };
+
+  // Settings & backup
+  ACTIONS['open-settings'] = () => {
+    const f = db.settings.firm; const key = getApiKey();
+    openModal({
+      title: 'Settings', size: 'lg', submitLabel: 'Save settings',
+      body: `<div class="card-title" style="font-size:15px">Firm details (printed on bills)</div>
+        ${licReadBox('firm')}
+        <div class="form-grid">
+          ${field('Firm name', 'name', { value: f.name, required: true })}
+          ${field('Phone', 'phone', { value: f.phone })}
+          ${addrFields(f, false)}
+          ${licFields(f, false)}
+          ${field('Default CD % for new chemists', 'defcd', { type: 'number', value: db.settings.defaultCd ?? 0, attrs: numAttrs() })}
+          <div class="field"><label>Licence copies</label><div>${licDocsBtn('firm', 'firm')}</div></div>
+        </div>
+        <div class="card-title" style="font-size:15px">AI bill reading</div>
+        <div class="form-grid">
+          ${field('Anthropic API key', 'apikey', { type: 'password', value: key, full: true, attrs: 'autocomplete="off" placeholder="sk-ant-…"' })}
+        </div>
+        <div class="small muted">The key is saved only in this browser on this computer and is used to send uploaded bills to Anthropic’s Claude model to be read. Anyone using this computer’s browser can use it. Leave empty to turn AI reading off. Create a key at console.anthropic.com.</div>
+        <div class="card-title" style="font-size:15px">Backup</div>
+        <div class="toolbar"><button type="button" class="btn" data-act="export-data" data-id="">Download backup (JSON)</button><label class="btn">Restore backup<input type="file" id="restoreFile" accept="application/json,.json" hidden></label><button type="button" class="btn ghost danger" data-act="reset-data" data-id="">Reset to sample data</button></div>
+        <div class="small muted">All data lives in this browser. Download a backup regularly.</div>`,
+      onSubmit: d => {
+        if (!addrOk(d)) return false;
+        Object.assign(db.settings.firm, { name: d.name.trim(), phone: d.phone.trim(), ...readAddr(d), ...readLic(d) });
+        fileLicence('firm', 'firm');
+        db.settings.defaultCd = num(d.defcd);
+        setApiKey((d.apikey || '').trim());
+        return 'Settings saved.';
+      },
+    });
+  };
+  ACTIONS['export-data'] = () => downloadText(`pharma-suite-backup-${todayIso}.json`, JSON.stringify(db, null, 1), 'application/json');
+  ACTIONS['reset-data'] = () => confirmModal('Reset to sample data?', 'Everything in this browser will be replaced with the sample data. Download a backup first if you need it. This cannot be undone.', 'Reset', () => {
+    db = seed(); entry = null; Object.keys(listState).forEach(k => delete listState[k]); billStore.clear().catch(() => {}); return 'Sample data restored.';
+  });
+  ACTIONS['print'] = () => window.print();
 
   // ---------- Events ----------
   document.addEventListener('click', e => {
     const nav = e.target.closest('[data-nav]');
     if (nav) {
+      e.preventDefault();
       searchQuery = ''; $('#globalSearch').value = '';
       $('#sidebar').classList.remove('open');
+      closeModal();
       if (location.hash === '#' + nav.dataset.nav) render(); else location.hash = nav.dataset.nav;
       window.scrollTo(0, 0);
       return;
@@ -1229,29 +3259,189 @@
       $$('button', tab.parentElement).forEach(b => b.classList.toggle('active', b === tab));
       fillList(key); return;
     }
+    if (e.target.closest('[data-hosp-none]')) { setHospitalChoice(''); return; }
+    if (e.target.closest('[data-hosp-other]')) { setHospitalChoice('__other'); return; }
+    const ph = e.target.closest('[data-pick-hosp]');
+    if (ph) { pickHospital(ph.dataset.pickHosp); return; }
+    const lr = e.target.closest('[data-lic-read]');
+    if (lr) { readLicenceIntoForm(lr); return; }
+    const ba = e.target.closest('[data-bulkapply]');
+    if (ba) { bulkApply(ba.dataset.bulkapply); return; }
+    const bc = e.target.closest('[data-bulkclear]');
+    if (bc) { listState[bc.dataset.bulkclear].sel.clear(); fillList(bc.dataset.bulkclear); return; }
+    const bx = e.target.closest('[data-bulkact]');
+    if (bx) {
+      const [key, name] = bx.dataset.bulkact.split('|');
+      const items = selectedItems(key);
+      if (!items.length) { toast('Tick at least one row first.'); return; }
+      const msg = lists[key].select.actions[name](items);
+      if (msg !== false) { listState[key].sel.clear(); refresh(); if (msg) toast(msg); }
+      return;
+    }
+    const fc = e.target.closest('[data-filter-clear]');
+    if (fc) { const key = fc.dataset.filterClear; listState[key].f = {}; $$(`[data-list-filter^="${key}|"]`).forEach(s => { s.value = ''; }); fillList(key); return; }
+    if (e.target.closest('[data-sbulk]')) {
+      const trs = $$('#lineBody tr[data-line]');
+      const ticked = trs.filter(tr => $('[data-lsel]', tr)?.checked);
+      const target = (ticked.length ? ticked : trs).filter(tr => $('[data-f=productId]', tr).value);
+      const vals = {};
+      for (const [id, k, label] of [['#sbCd', 'cd', 'CD%'], ['#sbTd', 'td', 'TD%']]) {
+        const raw = $(id).value.trim(); if (raw === '') continue;
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v < 0 || v > 100) { toast(`${label} must be a number from 0 to 100.`); $(id).focus(); return; }
+        vals[k] = v;
+      }
+      if (!Object.keys(vals).length) { toast('Type a CD% or TD% to apply.'); $('#sbCd').focus(); return; }
+      if (!target.length) { toast('Pick an item on at least one line first.'); return; }
+      target.forEach(tr => Object.entries(vals).forEach(([k, v]) => { $(`[data-f=${k}]`, tr).value = v; }));
+      recalcSale();
+      toast(`Discount set on ${target.length} line${target.length === 1 ? '' : 's'}.`);
+      return;
+    }
     const act = e.target.closest('[data-act]');
-    if (act && ACTIONS[act.dataset.act]) { ACTIONS[act.dataset.act](act.dataset.id); return; }
+    if (act && ACTIONS[act.dataset.act]) {
+      e.preventDefault();
+      // Opening a new dialog from inside one: close the current one first (keeping any edit-in-progress reverted).
+      if (act.closest('.modal') && !['print', 'export-data', 'open-docs'].includes(act.dataset.act)) closeModal();
+      ACTIONS[act.dataset.act](act.dataset.id); return;
+    }
     if (e.target.closest('[data-close]') || e.target.id === 'modalBack') { closeModal(); return; }
     if (e.target.closest('[data-submit]')) { submitModal(); return; }
     if (e.target.closest('[data-add-line]')) {
-      const body = $('#lineBody'); body.insertAdjacentHTML('beforeend', lineRow(body.dataset.mode)); recalcLines(); return;
+      const body = $('#lineBody');
+      if (body.dataset.mode === 'po') { body.insertAdjacentHTML('beforeend', poRowHtml()); recalcPo(); }
+      else { body.insertAdjacentHTML('beforeend', saleRowHtml()); recalcSale(); }
+      return;
     }
     const rm = e.target.closest('[data-rm-line]');
-    if (rm) { const body = $('#lineBody'); if ($$('tr[data-line]', body).length > 1) rm.closest('tr').remove(); recalcLines(); }
+    if (rm) {
+      const body = $('#lineBody');
+      if ($$('tr[data-line]', body).length > 1) rm.closest('tr').remove();
+      if (body.dataset.mode === 'po') recalcPo(); else recalcSale();
+    }
   });
 
   document.addEventListener('input', e => {
+    if (e.target.matches('#mform [name="district"]')) refreshAddrLists();
+    if (e.target.matches('#mform [name="tehsil"]')) refreshHospitalSelect();
+    if (e.target.id === 'hospSearch') { renderHospResults(); return; }
+    if (e.target.matches('#mform [name="email"], #mform [name="phone"]')) syncLoginDefaults();
+    if (e.target.matches('#f-pUser, #f-pPass')) e.target.dataset.auto = e.target.value ? '0' : '1';
     const s = e.target.closest('[data-list-search]');
     if (s) { listState[s.dataset.listSearch].q = s.value; fillList(s.dataset.listSearch); return; }
-    if (e.target.closest('#lineBody')) recalcLines();
-  });
-  document.addEventListener('change', e => {
-    const sel = e.target.closest('#lineBody [data-f=productId]');
-    if (sel) {
-      const p = prod(sel.value); const tr = sel.closest('tr');
-      if (p) $('[data-f=rate]', tr).value = $('#lineBody').dataset.mode === 'sale' ? p.ptr : p.pts;
-      recalcLines();
+    const ei = e.target.closest('[data-e]');
+    if (ei && entry) {
+      const [i, k] = ei.dataset.e.split('|');
+      const isNum = ENTRY_COLS.find(c => c[0] === k)[2] === 'num';
+      entry.lines[+i][k] = isNum ? num(ei.value) : ei.value;
+      refreshEntryRow(+i); return;
     }
+    const eh = e.target.closest('[data-eh]');
+    if (eh && entry) { entry[eh.dataset.eh] = eh.value; return; }
+    if (e.target.closest('#lineBody')) { if ($('#lineBody').dataset.mode === 'po') recalcPo(); else recalcSale(); }
+  });
+
+  document.addEventListener('change', async e => {
+    const t = e.target;
+    if (t.matches('[data-sel]')) {
+      const key = t.dataset.sel; const st = listState[key];
+      if (t.checked) st.sel.add(t.value); else st.sel.delete(t.value);
+      updateListMeta(key); return;
+    }
+    if (t.matches('[data-selall]')) {
+      const key = t.dataset.selall; const st = listState[key];
+      st.visible.forEach(id => { if (t.checked) st.sel.add(id); else st.sel.delete(id); });
+      fillList(key); return;
+    }
+    if (t.matches('[data-list-filter]')) {
+      const [key, k] = t.dataset.listFilter.split('|');
+      listState[key].f[k] = t.value; fillList(key); return;
+    }
+    if (t.matches('[data-esel]') && entry) {
+      entry.lines[+t.dataset.esel].sel = t.checked;
+      $('#eSelN').textContent = entrySelText();
+      const all = $('[data-eselall]'); if (all) all.checked = entry.lines.every(l => l.sel);
+      return;
+    }
+    if (t.matches('[data-eselall]') && entry) {
+      entry.lines.forEach(l => { l.sel = t.checked; });
+      $$('[data-esel]').forEach(c => { c.checked = t.checked; });
+      $('#eSelN').textContent = entrySelText(); return;
+    }
+    if (t.matches('[data-lselall]')) { $$('#lineBody [data-lsel]').forEach(c => { c.checked = t.checked; }); updateSaleSel(); return; }
+    if (t.matches('#lineBody [data-lsel]')) { updateSaleSel(); return; }
+    if (t.id === 'docCsv' && t.files[0]) {
+      try { const r = importDoctors(await t.files[0].text()); refresh(); toast(`${r.added} doctors added, ${r.updated} updated${r.newHosp ? `, ${r.newHosp} new hospitals added to the directory` : ''}.`); }
+      catch (err) { toast(err.message || 'Could not read the CSV.'); }
+      t.value = ''; return;
+    }
+    if (t.id === 'hospCsv' && t.files[0]) {
+      try { const r = importHospitals(await t.files[0].text()); refresh(); toast(`${r.added} added, ${r.updated} updated in the hospital directory.`); }
+      catch (err) { toast(err.message || 'Could not read the CSV.'); }
+      t.value = ''; return;
+    }
+    if (t.id === 'f-hospitalId') { $('#hospOtherWrap')?.classList.toggle('hidden', t.value !== '__other'); if (t.value === '__other') $('#f-hospitalOther')?.focus(); return; }
+    if (t.id === 'licFiles') {
+      const files = [...t.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
+      if (files.length < t.files.length) toast('Only JPG, PNG, WEBP, GIF and PDF files up to 25 MB can be used.');
+      licPending = files;
+      $('#licNote').textContent = files.length ? `Chosen: ${files.map(f => f.name).join(', ')}. Click “Read with AI” to fill the details, or just save — the files are kept either way.` : 'No file chosen.';
+      t.value = ''; return;
+    }
+    if (t.id === 'entryAttach' && entry) {
+      const files = [...t.files].filter(f => ALLOWED.includes(f.type) && f.size <= 25 * 1024 * 1024);
+      if (files.length < t.files.length) toast('Only JPG, PNG, WEBP, GIF and PDF files up to 25 MB can be attached.');
+      entry.fileObjs = [...(entry.fileObjs || []), ...files];
+      $('#entryFilesNote').textContent = entry.fileObjs.length ? `Will be filed in the supplier’s folder: ${entry.fileObjs.map(f => f.name).join(', ')}` : '';
+      t.value = ''; return;
+    }
+    if (t.matches('#lineBody [data-f=productId]')) {
+      const tr = t.closest('tr'); const p = prod(t.value);
+      if ($('#lineBody').dataset.mode === 'po') { if (p) $('[data-f=rate]', tr).value = p.pts; recalcPo(); return; }
+      fillBatchOptions(tr);
+      if (p) { const d = partyDefaults(); const ind = $('#mform [name=ptype]:checked')?.value === 'individual'; $('[data-f=rate]', tr).value = ind ? round2(p.mrp / (1 + p.gst / 100)) : p.ptr; $('[data-f=cd]', tr).value = d.cd; $('[data-f=td]', tr).value = d.td; if (!num($('[data-f=qty]', tr).value)) $('[data-f=qty]', tr).value = 1; }
+      recalcSale(); return;
+    }
+    if (t.matches('#lineBody [data-f=batchId]')) { recalcSale(); return; }
+    if (t.matches('[data-eh="supplierId"]')) { entry.supplierId = t.value; $('#newSupName')?.classList.toggle('hidden', !!t.value); $('#newSupGst')?.classList.toggle('hidden', !!t.value); return; }
+    if (t.id === 'billFiles') { setPendingFiles([...t.files]); return; }
+    if (t.id === 'csvFile' && t.files[0]) {
+      try {
+        const text = await t.files[0].text();
+        const lines = csvToLines(text);
+        if (!lines.length) { toast('No item rows found in this CSV.'); return; }
+        if (entry && entry.lines.length && !confirm('Replace the bill you are checking now with this CSV?')) return;
+        entry = withUploadFor(newEntry('CSV', { files: [t.files[0].name] })); entry.lines = lines; render();
+        toast(`Imported ${lines.length} lines. Fill in the supplier and bill number, then check each line.`);
+      } catch (err) { toast(err.message || 'Could not read the CSV.'); }
+      t.value = ''; return;
+    }
+    if (t.id === 'restoreFile' && t.files[0]) {
+      try {
+        const data = JSON.parse(await t.files[0].text());
+        if (!data || data.version !== 2 || !Array.isArray(data.products) || !Array.isArray(data.batches)) throw new Error('This is not a Pharma Suite backup file.');
+        closeModal();
+        confirmModal('Restore this backup?', `All data in this browser will be replaced with the backup (${data.products.length} products, ${data.sales?.length || 0} sale bills). This cannot be undone.`, 'Restore', () => { db = data; entry = null; return 'Backup restored.'; });
+      } catch (err) { toast(err.message || 'Could not read the backup.'); }
+      t.value = '';
+    }
+  });
+
+  const ALLOWED = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
+  function setPendingFiles(files) {
+    const ok = files.filter(f => ALLOWED.includes(f.type));
+    if (ok.length < files.length) toast('Only JPG, PNG, WEBP, GIF photos and PDF files can be read.');
+    const big = ok.find(f => f.size > 25 * 1024 * 1024);
+    if (big) { toast(`${big.name} is larger than 25 MB.`); return; }
+    pendingFiles = ok;
+    const fl = $('#fileList'); if (fl) fl.textContent = ok.length ? ok.map(f => f.name).join(', ') : 'No file chosen';
+  }
+  document.addEventListener('dragover', e => { if (e.target.closest('#dropzone')) { e.preventDefault(); $('#dropzone').classList.add('over'); } });
+  document.addEventListener('dragleave', e => { if (e.target.closest('#dropzone')) $('#dropzone').classList.remove('over'); });
+  document.addEventListener('drop', e => {
+    if (!e.target.closest('#dropzone')) return;
+    e.preventDefault(); $('#dropzone').classList.remove('over');
+    setPendingFiles([...e.dataTransfer.files]);
   });
 
   let searchTimer;
@@ -1260,17 +3450,56 @@
     searchTimer = setTimeout(() => { searchQuery = e.target.value.trim(); render(); }, 180);
   });
   document.addEventListener('keydown', e => {
+    if (e.target.id === 'hospSearch' && ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) {
+      const items = $$('#hospResults [data-pick-hosp]'); let i = items.findIndex(x => x.classList.contains('active'));
+      if (e.key === 'Escape') { if ($('#hospSearch').value) { e.preventDefault(); e.stopImmediatePropagation(); $('#hospSearch').value = ''; renderHospResults(); } return; }
+      e.preventDefault();
+      if (e.key === 'Enter') { if (items[i]) pickHospital(items[i].dataset.pickHosp); return; }
+      if (!items.length) return;
+      i = e.key === 'ArrowDown' ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1);
+      items.forEach((x, j) => x.classList.toggle('active', j === i)); items[i].scrollIntoView({ block: 'nearest' });
+      return;
+    }
     if (e.key === 'Escape' && $('#modalBack').classList.contains('open')) closeModal();
-    if (e.key === 'Enter' && $('#modalBack').classList.contains('open') && e.target.closest('#mform') && e.target.tagName === 'INPUT') { e.preventDefault(); submitModal(); }
+    if (e.key === 'Enter' && $('#modalBack').classList.contains('open') && e.target.closest('#mform') && e.target.tagName === 'INPUT' && !e.target.closest('#lineBody, #grnLines, .bulk-inline, .hosp-search')) { e.preventDefault(); submitModal(); }
   });
-  $('#modalClose').addEventListener('click', closeModal);
+  $('#modalClose').addEventListener('click', () => closeModal());
   $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
-  $('#resetData').addEventListener('click', () => {
-    if (!confirm('Replace all data in this browser with fresh sample data?')) return;
-    db = seed(); Object.keys(listState).forEach(k => delete listState[k]); refresh(); toast('Sample data restored.');
-  });
+  $('#settingsBtn').addEventListener('click', () => ACTIONS['open-settings']());
   window.addEventListener('hashchange', render);
+  window.addEventListener('beforeunload', e => { if ((entry && entry.lines.some(l => l.name)) || saveTimer || saving) { e.preventDefault(); e.returnValue = ''; } });
+  $('#logoutBtn').addEventListener('click', async () => { try { await api('POST', 'api/logout', {}); } catch { /* signed out anyway */ } location.href = 'login.html'; });
+  $('#pwBtn').addEventListener('click', () => ACTIONS['change-password']());
 
-  save();
-  render();
+  async function boot() {
+    let me = null;
+    try {
+      const r = await fetch('api/me', { cache: 'no-store' });
+      if (r.ok && (r.headers.get('content-type') || '').includes('json')) me = await r.json();
+    } catch { /* no server: browser-only mode */ }
+    if (me) {
+      if (me.role === 'chemist') { location.href = 'portal.html'; return; }
+      if (me.role !== 'admin') { location.href = 'login.html'; return; }
+      SERVER = true;
+      try {
+        const st = await api('GET', 'api/db');
+        serverRev = st.rev;
+        db = st.data ? migrate(st.data) : null;
+      } catch (err) { $('#content').innerHTML = `<section class="card"><div class="empty">Could not load data from the server: ${esc(err.message)}</div></section>`; return; }
+      if (!db) {
+        // First run on the server: start from this browser's data if there is any, else the sample data
+        db = migrate(load() || seed());
+        await pushToServer();
+      }
+      $('#storageNote').textContent = `Signed in as ${me.username}. Data is saved on the server.`;
+      $('#accountBtns').hidden = false;
+      await Promise.all([loadOrders(), loadLogins()]);
+      setInterval(loadOrders, 30000);
+    } else {
+      db = migrate(load() || seed());
+      save();
+    }
+    render();
+  }
+  boot();
 })();

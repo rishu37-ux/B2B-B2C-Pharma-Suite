@@ -12,17 +12,19 @@
 <body>
   <div class="app">
     <aside class="sidebar" id="sidebar">
-      <div class="brand">
-        <div class="brand-mark">P</div>
-        <div>
-          <div class="brand-name">Pharma Suite</div>
-          <div class="brand-sub">Distribution</div>
+      <a class="brand brand-home" href="#overview" data-nav="overview" title="Home — go to Overview">
+        <div class="brand-mark" id="brandMark">P</div>
+        <div class="brand-text">
+          <div class="brand-name" id="brandName">Pharma Suite</div>
+          <div class="brand-sub">Pharma Suite</div>
         </div>
-      </div>
+        <svg class="brand-home-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>
+      </a>
       <nav id="nav"></nav>
       <div class="sidebar-foot">
-        Data is saved in this browser.
-        <br><button id="resetData" type="button">Reset sample data</button>
+        <span id="storageNote">Data is saved in this browser.</span>
+        <br><button id="settingsBtn" type="button">Settings &amp; backup</button>
+        <span id="accountBtns" hidden><button id="pwBtn" type="button">Change password</button> <button id="logoutBtn" type="button">Sign out</button></span>
       </div>
     </aside>
 
@@ -58,7 +60,9 @@
   </div>
 
   <div class="toast" id="toast"></div>
+  <div id="datalists" hidden></div>
 
+  <script src="hospitals-data.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
