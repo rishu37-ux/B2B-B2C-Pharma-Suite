@@ -1609,7 +1609,7 @@
           </div>
           <div class="small muted" style="margin-top:10px">${hasKey
             ? 'AI reading uses your Anthropic API key saved in Settings on this computer. The bill is sent to Anthropic to be read.'
-            : `AI reading needs an Anthropic API key. <a href="#" data-act="open-settings" data-id="">Add it in Settings</a>. You can still import a CSV or type the bill in.`}</div>
+            : `AI reading needs an Anthropic API key in this browser. <a href="#" data-act="ask-api-key" data-id="">Add the key</a>. You can still import a CSV or type the bill in.`}</div>
           ${entryBusy ? '<div class="progress"><div></div></div>' : ''}
         </div>
       </section>`;
@@ -5892,11 +5892,30 @@ Only include confident matches. A brand name alone is not enough: the ingredient
     });
   };
 
+  // Ask for the Anthropic API key where it is needed, then carry on with what the user was doing.
+  // The key is kept in this browser for this address only (localStorage is per address and port).
+  function askApiKey(then) {
+    openModal({
+      title: 'Anthropic API key needed', size: 'sm', submitLabel: then ? 'Save and read the bill' : 'Save key',
+      body: `<div class="small">Reading bills with AI uses your own Anthropic API key. No key is saved in this browser for <b>${esc(location.host || 'this page')}</b>.</div>
+        <div class="form-grid">${field('Anthropic API key', 'apikey', { type: 'password', required: true, full: true, attrs: 'autocomplete="off" placeholder="sk-ant-…"' })}</div>
+        <div class="small muted">Create a key at console.anthropic.com → API keys. It is saved only in this browser on this computer, for this address — if you saved it earlier at another address (for example localhost instead of 127.0.0.1, or the server on port 8080), enter it here once more. You can change it later in Settings → Integrations → AI providers.</div>`,
+      onSubmit: v => {
+        const k = String(v.apikey || '').trim();
+        if (!/^sk-ant-[\w-]{20,}$/.test(k)) { toast('That does not look like an Anthropic API key — it starts with “sk-ant-”.'); return false; }
+        setApiKey(k);
+        if (then) setTimeout(then, 0);
+        return then ? 'Key saved — reading the bill…' : 'Key saved.';
+      },
+    });
+  }
+  ACTIONS['ask-api-key'] = () => askApiKey(null);
+
   // Bill upload / entry
   ACTIONS['entry-ai'] = async () => {
     if (entryBusy) return;
     if (!pendingFiles.length) { toast('Choose the bill photo(s) or PDF first.'); return; }
-    if (!getApiKey()) { toast('Add your Anthropic API key in Settings first.'); ACTIONS['open-settings'](); return; }
+    if (!getApiKey()) { askApiKey(() => ACTIONS['entry-ai']()); return; }
     if (entry && entry.lines.length && !confirm('Replace the bill you are checking now with this upload?')) return;
     entryBusy = true; render();
     try {
