@@ -417,7 +417,7 @@
     Requested: 'warn', Approved: 'ok', Quoted: 'info', Converted: 'ok', Lost: 'neutral', 'Follow-up due': 'warn', Customer: 'neutral', 'New person': 'neutral',
     'Medical College': 'info', 'Medical University': 'info', AIIMS: 'info', 'Zonal Hospital': 'info', 'Regional Hospital': 'info', 'Civil Hospital': 'ok', CHC: 'ok',
     New: 'info', Accepted: 'info', Arranging: 'warn', Billed: 'ok', Rejected: 'bad', Off: 'neutral', 'All in stock': 'ok', 'Not stocked': 'bad', 'Limited stock': 'warn', 'Not in stock': 'bad',
-    Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', CSV: 'info', Manual: 'neutral',
+    Verified: 'ok', 'Needs check': 'warn', OK: 'ok', Check: 'warn', Error: 'bad', AI: 'info', OCR: 'info', CSV: 'info', Manual: 'neutral',
     Matched: 'ok', Mismatch: 'warn', 'Not in 2B': 'bad', 'Not in books': 'warn', 'e-Way bill': 'info', 'e-Invoice': 'info',
     Blocked: 'bad', Upcoming: 'info', Ended: 'neutral', Claimed: 'warn', 'Score A': 'ok', 'Score B': 'info', 'Score C': 'warn', 'Score D': 'bad',
   };
@@ -1604,15 +1604,17 @@
             ${uploadFor && sup(uploadFor) ? `<div class="small">${icon('folder')} Will be filed under <b>${esc(sup(uploadFor).name)}</b></div>` : ''}
           </label>
           <div class="toolbar" style="margin-top:14px">
-            <button type="button" class="btn primary" data-act="entry-ai" ${entryBusy ? 'disabled' : ''}>${icon('spark')}${entryBusy ? 'Reading bill…' : 'Read bill with AI'}</button>
+            <button type="button" class="btn primary" data-act="entry-ocr" ${entryBusy ? 'disabled' : ''}>${icon('file')}${entryBusy ? 'Reading bill…' : 'Read bill (free)'}</button>
+            <button type="button" class="btn" data-act="entry-ai" ${entryBusy ? 'disabled' : ''}>${icon('spark')}Read with AI</button>
             <label class="btn">${icon('file')}Import CSV<input type="file" id="csvFile" accept=".csv,text/csv" hidden></label>
             ${actBtn('entry-manual', '', icon('plus') + 'Enter manually')}
             ${actBtn('entry-template', '', 'CSV template', 'ghost')}
           </div>
-          <div class="small muted" style="margin-top:10px">${hasKey
-            ? 'AI reading uses your Anthropic API key saved in Settings on this computer. The bill is sent to Anthropic to be read.'
-            : `AI reading needs an Anthropic API key in this browser. <a href="#" data-act="ask-api-key" data-id="">Add the key</a>. You can still import a CSV or type the bill in.`}</div>
-          ${entryBusy ? '<div class="progress"><div></div></div>' : ''}
+          <label class="check-line small" style="margin-top:10px"><input type="checkbox" id="ocrAuto" ${db.settings.ocrAutoAdd ? 'checked' : ''}> Add to stock by itself when the supplier is recognised, every line passes the checks and the total matches the bill</label>
+          <div class="small muted" style="margin-top:6px"><b>Read bill (free)</b> works in this browser without any key: PDFs from billing software are read exactly; photos and scanned PDFs are read with OCR (the reader, about 15 MB, is downloaded the first time). The supplier is found from the GSTIN on the bill and the bill is filed in that supplier’s folder. Photos: keep the bill flat, straight and well lit. ${hasKey
+            ? '<b>Read with AI</b> is more accurate on difficult photos; it uses your Anthropic API key and credit.'
+            : `<b>Read with AI</b> is more accurate on difficult photos but needs an Anthropic API key with credit (<a href="#" data-act="ask-api-key" data-id="">add the key</a>).`}</div>
+          ${entryBusy ? `<div class="progress"><div></div></div><div class="small muted" id="ocrStatus">${esc(ocrMsg)}</div>` : ''}
         </div>
       </section>`;
     if (!entry) return upload + `<section class="card"><div class="empty">Upload a bill, import a CSV, or choose “Enter manually” to start.</div></section>`;
@@ -6498,6 +6500,237 @@ Only include confident matches. A brand name alone is not enough: the ingredient
       entryBusy = false; if (route === 'billentry') render();
     }
   };
+  // ----- Free bill reading in the browser (no API key) -----
+  // PDFs made by billing software carry their text, which PDF.js reads exactly. Photos and scanned PDFs go
+  // through Tesseract OCR. Words keep their position, so the item table is read column by column under its
+  // printed headers (Item, Batch, Exp, Qty, Rate…); bills without recognisable headers are read row by row.
+  const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
+  const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  const scriptCache = {};
+  const loadScript = url => scriptCache[url] || (scriptCache[url] = new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = url; s.async = true; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = () => { delete scriptCache[url]; s.remove(); rej(new Error('Could not load the bill reader. Check your internet connection (it is downloaded the first time).')); };
+    document.head.appendChild(s);
+  }));
+  let ocrMsg = '';
+  const ocrStatus = m => { ocrMsg = m; const el = $('#ocrStatus'); if (el) el.textContent = m; };
+  async function pdfLib() { await loadScript(PDFJS_URL); const lib = window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER; return lib; }
+  let tessWorker = null;
+  async function tesseract() {
+    await loadScript(TESSERACT_URL);
+    if (!tessWorker) tessWorker = await window.Tesseract.createWorker('eng', 1, { logger: m => { if (m.status === 'recognizing text') ocrStatus(`Reading text… ${Math.round((m.progress || 0) * 100)}%`); else if (m.status) ocrStatus(`${m.status[0].toUpperCase()}${m.status.slice(1)}…`); } });
+    return tessWorker;
+  }
+  // Words with positions: { t, x0, x1, y, h, page }
+  async function ocrWords(src, page) {
+    const w = await tesseract();
+    const { data } = await w.recognize(src);
+    return (data.words || []).filter(x => String(x.text).trim()).map(x => ({ t: String(x.text).trim(), x0: x.bbox.x0, x1: x.bbox.x1, y: (x.bbox.y0 + x.bbox.y1) / 2, h: x.bbox.y1 - x.bbox.y0, page }));
+  }
+  async function pdfWords(file, forceOcr) {
+    const lib = await pdfLib();
+    const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    const out = []; let textChars = 0;
+    for (let n = 1; n <= Math.min(doc.numPages, 20); n++) {
+      const pg = await doc.getPage(n); const vp = pg.getViewport({ scale: 1 });
+      if (!forceOcr) {
+        const tc = await pg.getTextContent();
+        tc.items.forEach(it => {
+          const str = String(it.str || ''); if (!str.trim()) return;
+          const x = it.transform[4], h = Math.abs(it.transform[3]) || 8, y = vp.height - it.transform[5] - h / 2, cw = (it.width || str.length * h * 0.5) / Math.max(1, str.length);
+          textChars += str.trim().length;
+          // split a text run into words, keeping each word's position
+          let i = 0; str.split(/(\s+)/).forEach(part => { if (part.trim()) out.push({ t: part, x0: x + i * cw, x1: x + (i + part.length) * cw, y, h, page: n }); i += part.length; });
+        });
+      }
+      if (forceOcr || textChars < 40 * n) {
+        ocrStatus(`Scanned page ${n} of ${doc.numPages} — reading with OCR…`);
+        const sc = 2.2, v2 = pg.getViewport({ scale: sc }); const cv = document.createElement('canvas'); cv.width = v2.width; cv.height = v2.height;
+        await pg.render({ canvasContext: cv.getContext('2d'), viewport: v2 }).promise;
+        (await ocrWords(cv, n)).forEach(w => out.push({ ...w, x0: w.x0 / sc, x1: w.x1 / sc, y: w.y / sc, h: w.h / sc }));
+      }
+    }
+    return out;
+  }
+  // Group words into printed rows, top to bottom
+  function wordRows(words) {
+    const rows = [];
+    [...words].sort((a, b) => a.page - b.page || a.y - b.y).forEach(w => {
+      const r = rows.length && rows[rows.length - 1];
+      if (r && r.page === w.page && Math.abs(r.y - w.y) <= Math.max(3, Math.min(r.h, w.h) * 0.55)) { r.words.push(w); r.y = (r.y * (r.words.length - 1) + w.y) / r.words.length; }
+      else rows.push({ page: w.page, y: w.y, h: w.h, words: [w] });
+    });
+    rows.forEach(r => { r.words.sort((a, b) => a.x0 - b.x0); r.text = r.words.map(w => w.t).join(' '); });
+    return rows;
+  }
+  const HEAD_KEYS = [
+    ['serial', /^(s\.?no|sn|sr|srno|sl|slno|#)$/], ['name', /^(item|items|product|products|description|particulars|name|itemname|productname|itemdescription)$/],
+    ['company', /^(mfg|mfr|mfgr|mkt|company|comp|mfgby|manufacturer|brand)$/], ['pack', /^(pack|packing|pkg|pck)$/], ['hsn', /^(hsn|hsncode|hsn\/sac|sac)$/],
+    ['batch', /^(batch|batchno|bno|b\.no|lot)$/], ['exp', /^(exp|expiry|expdt|expdate|exp\.dt)$/], ['qty', /^(qty|quantity|qnty|billqty)$/],
+    ['free', /^(free|fr|fqty|freeqty|sch|schqty|bonus|scheme)$/], ['mrp', /^(mrp|m\.r\.p)$/], ['rate', /^(rate|ptr|pts|prate|purrate|price|netrate|trade)$/],
+    ['cd', /^(disc|dis|disc%|dis%|cd|cd%|discount|d%)$/], ['gst', /^(gst|gst%|tax|tax%|igst%|gstrate|gst\(%\))$/], ['halfgst', /^(cgst%|sgst%|cgst|sgst)$/],
+    ['amount', /^(amount|amt|value|total|netamt|netamount|taxable|taxablevalue|tot)$/],
+  ];
+  const headKey = t => { const s = t.toLowerCase().replace(/[.:]/g, '').replace(/\s+/g, ''); const k = HEAD_KEYS.find(([, re]) => re.test(s) || re.test(t.toLowerCase())); return k ? k[0] : ''; };
+  function headerCols(row) {
+    const cols = [];
+    row.words.forEach(w => { const k = headKey(w.t); if (!k) return; const ex = cols.find(c => c.key === k); if (ex) { if (k === 'amount') Object.assign(ex, { x0: w.x0, x1: w.x1 }); return; } cols.push({ key: k, x0: w.x0, x1: w.x1 }); });
+    const keys = new Set(cols.map(c => c.key));
+    if (!(keys.has('name') && ['batch', 'exp', 'qty', 'rate', 'amount', 'mrp'].filter(k => keys.has(k)).length >= 3)) return null;
+    cols.sort((a, b) => a.x0 - b.x0);
+    // Item names and company names are long, left-aligned text: their column reaches up to the next header
+    cols.forEach((c, i) => { if ((c.key === 'name' || c.key === 'company') && cols[i + 1]) c.x1 = Math.max(c.x1, cols[i + 1].x0 - 3); });
+    return cols;
+  }
+  const FOOT_RE = /\b(grand\s*total|sub\s*total|total\s*amount|net\s*amount|net\s*payable|taxable\s*value|gst\s*summary|amount\s*in\s*words|rupees|e\.\s*&\s*o\.\s*e|terms\s*(and|&)\s*conditions|bank\s*details)\b/i;
+  const EXP_RE = /^(0?[1-9]|1[0-2])[\/\-.](\d{2}|\d{4})$/;
+  const MON = 'JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC';
+  function toExp(t) {
+    t = String(t || '').trim().toUpperCase(); let m;
+    if ((m = EXP_RE.exec(t))) return `${m[1].padStart(2, '0')}/${m[2].slice(-2)}`;
+    if ((m = /^([A-Z]{3})[A-Z]*[\-\/.' ]?(\d{2}|\d{4})$/.exec(t)) && MON.indexOf(m[1]) % 3 === 0) return `${String(MON.indexOf(m[1]) / 3 + 1).padStart(2, '0')}/${m[2].slice(-2)}`;
+    return '';
+  }
+  // In the expiry column only: OCR may drop the slash (0528) or read it as 1 / 2 / 7 / I (05128, 11227)
+  function toExpLoose(t) {
+    const e = toExp(t); if (e) return e;
+    const s = String(t || '').toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0');
+    let m;
+    if ((m = /^(0[1-9]|1[0-2])(\d{2})$/.exec(s)) || (m = /^(0[1-9]|1[0-2])[127I](\d{2})$/.exec(s)) || (m = /^(0[1-9]|1[0-2])(20\d{2})$/.exec(s))) return `${m[1]}/${m[2].slice(-2)}`;
+    return '';
+  }
+  const numOf = t => { const s = String(t || '').replace(/[,₹]/g, '').replace(/^rs\.?/i, '').replace(/%$/, ''); return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : NaN; };
+  const isBatchLike = t => /^[A-Z0-9][A-Z0-9\-\/]{2,15}$/i.test(t) && /\d/.test(t) && !EXP_RE.test(t) && !/^\d{1,3}(\.\d+)?$/.test(t);
+  function lineFromCols(row, cols) {
+    const cell = {};
+    row.words.forEach(w => {
+      const c = (w.x0 + w.x1) / 2;
+      let best = null, bd = Infinity;
+      cols.forEach(col => { const d = c < col.x0 ? col.x0 - c : c > col.x1 ? c - col.x1 : 0; if (d < bd) { bd = d; best = col; } });
+      (cell[best.key] = cell[best.key] || []).push(w.t);
+    });
+    const txt = k => (cell[k] || []).join(' ').trim(), n = k => { const v = (cell[k] || []).map(numOf).filter(Number.isFinite); return v.length ? v[v.length - 1] : 0; };
+    let gst = n('gst'); if (!gst && cell.halfgst) { const h = (cell.halfgst || []).map(numOf).filter(x => Number.isFinite(x) && x <= 14); if (h.length) gst = h[0] * 2; }
+    const l = { item_name: txt('name').replace(/^\d{1,3}[.)]?\s+/, ''), company: txt('company'), mfg_name: '', pack: txt('pack'), hsn: (txt('hsn').match(/\d{4,8}/) || [''])[0], batch: (cell.batch || []).find(isBatchLike) || txt('batch'), expiry: toExp(txt('exp').split(' ')[0]) || toExp(txt('exp')) || (cell.exp || []).map(toExpLoose).find(Boolean) || '',
+      qty: n('qty'), free: n('free'), rate: n('rate'), mrp: n('mrp'), cd_pct: n('cd'), td_pct: 0, gst_pct: [0, 5, 12, 18, 28].includes(gst) ? gst : 0, amount: n('amount') };
+    if (!l.batch && cell.exp) { const b = (cell.exp || []).find(isBatchLike); if (b) l.batch = b; }
+    return l;
+  }
+  // Bills without a recognisable header: find the expiry in the row, the batch before it, and the
+  // quantity / rate / amount among the numbers after it (qty × rate ≈ amount)
+  function lineFromRow(row) {
+    const ts = row.words.map(w => w.t);
+    const ei = ts.findIndex((t, i) => toExp(t) && !/^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$/.test(t) && i > 0);
+    if (ei < 1) return null;
+    const bi = isBatchLike(ts[ei - 1]) ? ei - 1 : -1;
+    const head = ts.slice(0, bi >= 0 ? bi : ei);
+    let hsn = ''; const hi = head.findIndex(t => /^\d{4,8}$/.test(t) && head.indexOf(t) > 0); if (hi >= 0) { hsn = head[hi]; head.splice(hi); }
+    if (/^\d{1,3}[.)]?$/.test(head[0] || '')) head.shift();
+    const nums = ts.slice(ei + 1).map(numOf).filter(Number.isFinite);
+    let best = null;
+    for (let i = 0; i < nums.length; i++) for (let j = i + 1; j < nums.length; j++) for (let k = j + 1; k < nums.length; k++) {
+      const q = nums[i], r = nums[j], a = nums[k]; if (!(q > 0 && Number.isInteger(q) && r > 0 && a > 0)) continue;
+      const gross = q * r, err = Math.min(Math.abs(gross - a), ...[0.02, 0.05, 0.1].map(d => Math.abs(gross * (1 - d) - a)), ...[5, 12, 18].map(g => Math.abs(gross * (1 + g / 100) - a)));
+      if (err <= Math.max(1, a * 0.03) && (!best || err < best.err)) best = { q, r, a, err, i, j, k };
+    }
+    if (!best) return null;
+    const rest = nums.filter((x, idx) => ![best.i, best.j, best.k].includes(idx));
+    const mrp = rest.filter(x => x > best.r && x < best.r * 3).sort((a, b) => b - a)[0] || 0;
+    const gst = rest.find(x => [5, 12, 18, 28].includes(x)) || 0;
+    const free = nums.slice(best.i + 1, best.j).find(x => Number.isInteger(x) && x >= 0 && x <= best.q) || 0;
+    const name = head.join(' ').trim();
+    if (!/[A-Za-z]{2}/.test(name)) return null;
+    return { item_name: name, company: '', mfg_name: '', pack: '', hsn, batch: bi >= 0 ? ts[bi] : '', expiry: toExp(ts[ei]), qty: best.q, free, rate: best.r, mrp, cd_pct: 0, td_pct: 0, gst_pct: gst, amount: best.a };
+  }
+  // OCR sometimes drops a decimal point (34.56 read as 3456): put it back where the row's own amount shows it
+  function repairNums(l) {
+    if (l.qty > 0 && l.amount > 0) {
+      const unit = l.amount / l.qty; // rate before discount / tax — close to the rate
+      if (l.rate > 0 && Math.abs(l.rate - unit) > unit * 0.25) for (const f of [10, 100, 1000]) if (Math.abs(l.rate / f - unit) <= unit * 0.25) { l.rate = round2(l.rate / f); break; }
+      if (!(l.rate > 0)) l.rate = round2(unit);
+    }
+    if (l.qty > 0 && l.rate > 0 && l.amount > l.qty * l.rate * 5) for (const f of [10, 100]) if (Math.abs(l.amount / f - l.qty * l.rate) <= l.qty * l.rate * 0.3) { l.amount = round2(l.amount / f); break; }
+    if (l.rate > 0 && l.mrp > l.rate * 5) for (const f of [10, 100, 1000]) if (l.mrp / f >= l.rate * 0.9 && l.mrp / f <= l.rate * 4) { l.mrp = round2(l.mrp / f); break; }
+  }
+  function parseBillWords(words) {
+    const rows = wordRows(words), all = rows.map(r => r.text).join('\n');
+    const items = []; let cols = null, inTable = false, headerPages = 0;
+    rows.forEach(r => {
+      const hc = headerCols(r);
+      if (hc) { cols = hc; inTable = true; headerPages++; return; }
+      if (!cols) return;
+      if (FOOT_RE.test(r.text)) { inTable = false; return; }
+      if (!inTable && !cols) return;
+      if (!inTable) { if (r.words.some(w => toExp(w.t))) inTable = true; else return; }
+      const l = lineFromCols(r, cols);
+      if (/[A-Za-z]{2}/.test(l.item_name) && (l.qty > 0 || l.amount > 0) && (l.batch || l.expiry)) items.push(l);
+    });
+    if (!items.length) rows.forEach(r => { if (FOOT_RE.test(r.text)) return; const l = lineFromRow(r); if (l) items.push(l); });
+    // Use the exact name of a product you already have when the row contains it
+    const prods = [...db.products].sort((a, b) => b.name.length - a.name.length);
+    items.forEach(l => { if (findProductByName(l.item_name)) return; const s = norm(l.item_name); const p = prods.find(p => p.name.length >= 4 && (s.startsWith(norm(p.name)) || norm(p.name).startsWith(s) && s.length >= 6)); if (p) l.item_name = p.name; });
+    items.forEach(repairNums);
+    // Header details. OCR often mixes up 0/O, 1/I, 5/S and 8/B, so a GSTIN that differs from a supplier's by
+    // one or two characters still counts as that supplier.
+    const own = String(db.settings.firm.gstin || '').toUpperCase();
+    const near = (a, b) => a.length === 15 && b.length === 15 && [...a].filter((ch, i) => ch !== b[i]).length <= 2;
+    const toks = [...new Set([...all.toUpperCase().matchAll(/\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b/g)].map(m => m[0]).concat(words.map(w => w.t.toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(t => t.length === 15)))];
+    const gstins = toks.filter(g => !near(g, own) && g !== own);
+    const top = rows.filter(r => r.page === 1).slice(0, 10).map(r => r.text.replace(/\b(tax|gst|retail|credit|cash)?\s*invoice\b.*$/i, '').trim()).find(t => /[A-Za-z]{3}/.test(t) && !/^(gstin|ph|phone|mob|dl|d\.l|bill\s*to|m\/s|buyer|ship|invoice|date|original|duplicate|triplicate|copy|estimate|bill of supply)/i.test(t)) || '';
+    let known = null, seller = '';
+    for (const g of gstins) { known = db.suppliers.find(s => s.gstin && near(String(s.gstin).toUpperCase(), g)); if (known) { seller = String(known.gstin).toUpperCase(); break; } }
+    if (!known && top) known = db.suppliers.find(s => norm(s.name).length > 3 && (norm(top).includes(norm(s.name)) || norm(s.name).includes(norm(top))));
+    if (!seller) seller = known?.gstin ? String(known.gstin).toUpperCase() : gstins.find(g => /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g)) || '';
+    const billNo = (/\b(?:invoice|inv|bill)\s*(?:no|number|#)\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{1,24})/i.exec(all) || [])[1] || '';
+    const dm = /\b(?:invoice|inv|bill)?\s*date[d]?\s*[:\-]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{1,2}[\s\-][A-Za-z]{3}[A-Za-z]*[\s\-,]+\d{2,4})/i.exec(all) || /\b(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})\b/.exec(all);
+    const net = (/(?:grand\s*total|net\s*amount|net\s*payable|net\s*amt|invoice\s*total|bill\s*amount|total\s*amount)\s*[:₹(rs.)\s]*([\d,]+\.\d{1,2})/i.exec(all) || [])[1];
+    return { x: { seller_name: known?.name || top.slice(0, 60), seller_gstin: seller, buyer_name: '', bill_no: billNo, bill_date: dm ? parseAnyDate(dm[1]) : '', items, totals: { gross: 0, cd: 0, td: 0, cgst: 0, sgst: 0, igst: 0, net: net ? cleanNum(net) : 0 } }, headerPages, rows: rows.length };
+  }
+  async function readBillFree(files) {
+    let words = [];
+    for (const [i, f] of files.entries()) {
+      ocrStatus(`Opening ${f.name} (${i + 1} of ${files.length})…`);
+      const base = words.length ? Math.max(...words.map(w => w.page)) : 0;
+      const ws = f.type === 'application/pdf' || /\.pdf$/i.test(f.name) ? await pdfWords(f, false) : await ocrWords(f, 1);
+      words = words.concat(ws.map(w => ({ ...w, page: w.page + base })));
+    }
+    if (!words.length) throw new Error('No text could be read from this file. Try a clearer photo (flat, well lit, straight) or the PDF from the supplier.');
+    let r = parseBillWords(words);
+    // A PDF whose text layer gave no item rows may be an image inside a PDF: read it again with OCR
+    if (!r.x.items.length && files.some(f => f.type === 'application/pdf')) {
+      let ow = [];
+      for (const f of files) ow = ow.concat(f.type === 'application/pdf' ? await pdfWords(f, true) : await ocrWords(f, 1));
+      const r2 = parseBillWords(ow); if (r2.x.items.length) r = r2;
+    }
+    return r;
+  }
+  ACTIONS['entry-ocr'] = async () => {
+    if (entryBusy) return;
+    if (!pendingFiles.length) { toast('Choose the bill photo(s) or PDF first.'); return; }
+    if (entry && entry.lines.length && !confirm('Replace the bill you are checking now with this upload?')) return;
+    entryBusy = true; ocrMsg = 'Starting the bill reader…'; render();
+    try {
+      const files = pendingFiles.slice();
+      const r = await readBillFree(files);
+      entry = withUploadFor(entryFromExtraction(r.x, files)); entry.source = 'OCR';
+      pendingFiles = [];
+      logAgent('intake', `Bill read with free OCR: ${entry.lines.length} line(s)${entry.supplierId ? ` · supplier ${sup(entry.supplierId)?.name}` : ''}`);
+      // Straight to stock when the setting is on and nothing needs a person: known supplier, bill number,
+      // no line errors, and the computed total matches the printed one
+      const ready = entry.lines.length ? entryReady() : 'No item rows found.';
+      const net = num(entry.printed?.net), calc = typeof ready === 'string' ? 0 : ready.t.total;
+      if (db.settings.ocrAutoAdd && typeof ready !== 'string' && ready.existingSup && entry.supplierId && net > 0 && Math.abs(net - calc) <= 2) {
+        const msg = saveEntryToStock(ready); save(); toast(`Read and added automatically: ${msg}`); return;
+      }
+      const why = typeof ready === 'string' ? ready : !entry.supplierId ? 'Supplier not recognised — choose it.' : !(net > 0) ? '' : Math.abs(net - calc) > 2 ? `Printed total ₹${dec(net)} vs lines ₹${dec(calc)} — check the lines.` : '';
+      toast(entry.lines.length ? `Read ${entry.lines.length} line(s)${entry.supplierId ? ` from ${sup(entry.supplierId)?.name}` : ''}. Check them, then add to stock.${why ? ' ' + why : ''}` : 'No item rows could be read. Try “Read with AI”, import a CSV, or enter the bill by hand.');
+    } catch (err) {
+      toast(err.message || 'Could not read the bill.');
+    } finally {
+      entryBusy = false; ocrMsg = ''; if (route === 'billentry') render();
+    }
+  };
   ACTIONS['entry-manual'] = () => {
     if (entry && entry.lines.length && !confirm('Discard the bill you are checking now?')) return;
     entry = withUploadFor(newEntry('Manual')); entry.lines = [blankLine()]; render();
@@ -6529,21 +6762,29 @@ Only include confident matches. A brand name alone is not enough: the ingredient
   ACTIONS['entry-add-row'] = () => { entry.lines.push(blankLine()); render(); const ins = $$('#entryBody tr:last-child input'); if (ins[0]) ins[0].focus(); };
   ACTIONS['entry-del-row'] = i => { entry.lines.splice(+i, 1); render(); };
   ACTIONS['entry-clear'] = () => confirmModal('Discard this bill?', 'Nothing has been added to stock yet. The lines you are checking will be cleared.', 'Discard', () => { entry = null; return 'Bill discarded.'; });
+  // Checks the bill in Bill Entry before it goes to stock: an error message, or what is needed to save it
+  function entryReady() {
+    const lines = entry.lines.filter(l => String(l.name).trim());
+    if (!lines.length) return 'There are no item lines to add.';
+    const errs = lines.map((l, i) => [i + 1, checkLine(l)]).filter(([, c]) => c.level === 'bad');
+    if (errs.length) return `Fix the errors on line ${errs.map(e => e[0]).slice(0, 6).join(', ')} first.`;
+    if (!entry.supplierId && !entry.supplierName.trim()) return 'Choose the supplier or enter a new supplier name.';
+    if (!entry.billNo.trim()) return 'Enter the supplier bill number.';
+    if (!entry.date) return 'Enter the bill date.';
+    const existingSup = entry.supplierId ? sup(entry.supplierId) : db.suppliers.find(s => norm(s.name) === norm(entry.supplierName));
+    if (existingSup && db.pinvoices.some(p => p.supplierId === existingSup.id && norm(p.supplierInvNo) === norm(entry.billNo))) return `Bill ${entry.billNo} from ${existingSup.name} is already saved.`;
+    const t = billCalc(lines);
+    const uniqNew = [...new Set(lines.filter(l => !findProductByName(l.name)).map(l => norm(l.name)))];
+    return { lines, existingSup, t, uniqNew };
+  }
   ACTIONS['entry-commit'] = () => {
     if (!entry) return;
-    const lines = entry.lines.filter(l => String(l.name).trim());
-    if (!lines.length) { toast('There are no item lines to add.'); return; }
-    const errs = lines.map((l, i) => [i + 1, checkLine(l)]).filter(([, c]) => c.level === 'bad');
-    if (errs.length) { toast(`Fix the errors on line ${errs.map(e => e[0]).slice(0, 6).join(', ')} first.`); return; }
-    if (!entry.supplierId && !entry.supplierName.trim()) { toast('Choose the supplier or enter a new supplier name.'); return; }
-    if (!entry.billNo.trim()) { toast('Enter the supplier bill number.'); return; }
-    if (!entry.date) { toast('Enter the bill date.'); return; }
-    const existingSup = entry.supplierId ? sup(entry.supplierId) : db.suppliers.find(s => norm(s.name) === norm(entry.supplierName));
-    if (existingSup && db.pinvoices.some(p => p.supplierId === existingSup.id && norm(p.supplierInvNo) === norm(entry.billNo))) { toast(`Bill ${entry.billNo} from ${existingSup.name} is already saved.`); return; }
-    const t = billCalc(lines);
-    const newProducts = lines.filter(l => !findProductByName(l.name)).map(l => norm(l.name));
-    const uniqNew = [...new Set(newProducts)];
-    confirmModal('Add this bill to stock?', `${lines.length} lines · net ${money2(t.total)}${uniqNew.length ? ` · ${uniqNew.length} new product(s) will be created` : ''}${existingSup ? '' : ` · new supplier “${esc(entry.supplierName)}”`}. The stock lines will be marked “Needs check”.`, 'Add to stock', () => {
+    const r = entryReady(); if (typeof r === 'string') { toast(r); return; }
+    const { lines, existingSup, t, uniqNew } = r;
+    confirmModal('Add this bill to stock?', `${lines.length} lines · net ${money2(t.total)}${uniqNew.length ? ` · ${uniqNew.length} new product(s) will be created` : ''}${existingSup ? '' : ` · new supplier “${esc(entry.supplierName)}”`}. The stock lines will be marked “Needs check”.`, 'Add to stock', () => saveEntryToStock(r));
+  };
+  function saveEntryToStock({ lines, existingSup, t }) {
+    {
       let s = existingSup;
       if (!s) { s = { id: nextId('S', db.suppliers), name: entry.supplierName.trim(), contact: '', phone: '', city: '', gstin: entry.gstin.toUpperCase(), dl1: '', dl2: '', dlValid: '', terms: 30 }; db.suppliers.push(s); }
       const stockLines = lines.map(l => {
@@ -6564,8 +6805,8 @@ Only include confident matches. A brand name alone is not enough: the ingredient
       entry = null;
       setTimeout(() => goFolder(s.id), 0);
       return `${no} saved — ${stockLines.length} lines added to stock and filed in the folder for ${s.name}.`;
-    });
-  };
+    }
+  }
 
   // Settings & backup
   ACTIONS['open-settings'] = () => {
@@ -6817,6 +7058,7 @@ Only include confident matches. A brand name alone is not enough: the ingredient
     if (t.matches('#lineBody [data-f=batchId]')) { recalcSale(); return; }
     if (t.matches('[data-eh="supplierId"]')) { entry.supplierId = t.value; $('#newSupName')?.classList.toggle('hidden', !!t.value); $('#newSupGst')?.classList.toggle('hidden', !!t.value); return; }
     if (t.id === 'billFiles') { setPendingFiles([...t.files]); return; }
+    if (t.id === 'ocrAuto') { db.settings.ocrAutoAdd = t.checked; save(); return; }
     if (t.id === 'csvFile' && t.files[0]) {
       try {
         const text = await t.files[0].text();

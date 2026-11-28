@@ -54,7 +54,10 @@ Dashboard for a medical supplies distributor, with a portal where chemists see y
 - **Stock Details** — batch-wise stock, near-expiry and expired batches, reorder list
 - **Products** — product master with HSN, GST, MRP, PTR and PTS
 - **Purchase** — purchase summary, supplier folders and every purchased item
-- **Bill Upload / Entry** — read a supplier bill photo/PDF with AI, import a CSV, or type it in
+- **Bill Upload / Entry** — read a supplier bill photo/PDF for free (no key), read it with AI, import a CSV, or type it in.
+  - *Read bill (free)* runs in the browser: PDFs made by billing software are read exactly from their text (PDF.js); photos and scanned PDFs are read with OCR (Tesseract — about 15 MB downloaded the first time, then cached). The item table is read under its printed headers (Item, Pack, HSN, Batch, Exp, Qty, Free, MRP, Rate, Disc, GST, Amount); bills without headers are read row by row (expiry, the batch before it, and qty × rate = amount). Names of products you already have are used when the row contains them.
+  - The supplier is found from the GSTIN printed on the bill (OCR mix-ups of one or two characters are allowed) or its name, together with the bill number, date and grand total. Saving files the bill in that supplier's folder.
+  - Tick “Add to stock by itself…” to skip the review when the supplier is recognised, every line passes the checks and the lines add up to the printed total; otherwise the lines wait in the check grid. OCR on photos can misread numbers — the total check, line checks and Purchase Intake rate warnings catch most of it; check the lines before adding them.
 - **Supplier Details** — supplier master with licences and payables
 - **Supplier folders** — each supplier's bills (with the uploaded bill copy), item purchase history and item summary
 - **Purchase Orders**, **Goods Receipt (GRN)**, **Purchase Invoices**
